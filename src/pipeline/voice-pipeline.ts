@@ -54,8 +54,8 @@ export class VoicePipeline {
   }
 
   private async handleUtterance(userId: string, wavBuffer: Buffer, durationMs: number): Promise<void> {
-    // Interrupt current playback if speaking while Watson is responding
-    if (this.player.isPlaying()) {
+    // Interrupt TTS playback if user speaks — but don't kill the waiting tone
+    if (this.player.isPlaying() && !this.player.isWaiting()) {
       console.log('User spoke during playback — interrupting');
       this.player.stopPlayback();
     }
@@ -69,10 +69,14 @@ export class VoicePipeline {
     const pipelineStart = Date.now();
 
     try {
+      // Start waiting indicator sound
+      this.player.startWaitingLoop();
+
       // Step 1: Speech-to-text
       const transcript = await transcribe(wavBuffer);
       if (!transcript || transcript.trim().length === 0) {
         console.log('Empty transcript, skipping');
+        this.player.stopWaitingLoop();
         return;
       }
 
@@ -87,14 +91,18 @@ export class VoicePipeline {
       this.log(`**Watson:** ${response}`);
       this.session.appendAssistantMessage(response);
 
-      // Step 3: Text-to-speech + playback
+      // Step 3: Text-to-speech + playback — stop waiting loop, start TTS
       const ttsStream = await textToSpeechStream(response);
+      this.player.stopWaitingLoop();
+      this.player.stopPlayback();
       await this.player.playStream(ttsStream);
 
       const totalMs = Date.now() - pipelineStart;
       console.log(`Pipeline complete: ${totalMs}ms total`);
     } catch (error) {
       console.error('Pipeline error:', error);
+      this.player.stopWaitingLoop();
+      this.player.stopPlayback();
     } finally {
       this.processing = false;
     }
