@@ -45,7 +45,7 @@ describe('Full pipeline (no Discord)', () => {
 
     // Step 2: LLM
     const llmStart = Date.now();
-    const response = await getResponse('pipeline-test', transcript);
+    const { response } = await getResponse('pipeline-test', transcript);
     const llmMs = Date.now() - llmStart;
     console.log(`LLM: "${response.slice(0, 80)}..." (${llmMs}ms)`);
     expect(response.length).toBeGreaterThan(0);

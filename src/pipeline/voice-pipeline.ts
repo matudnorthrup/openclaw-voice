@@ -6,6 +6,7 @@ import { transcribe } from '../services/whisper.js';
 import { getResponse } from '../services/claude.js';
 import { textToSpeechStream } from '../services/elevenlabs.js';
 import { SessionTranscript } from '../services/session-transcript.js';
+import type { ChannelRouter } from '../services/channel-router.js';
 
 export class VoicePipeline {
   private receiver: AudioReceiver;
@@ -13,6 +14,7 @@ export class VoicePipeline {
   private processing = false;
   private logChannel: TextChannel | null = null;
   private session: SessionTranscript;
+  private router: ChannelRouter | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -29,6 +31,19 @@ export class VoicePipeline {
       silenceDurationMs,
       (userId, wavBuffer, durationMs) => this.handleUtterance(userId, wavBuffer, durationMs),
     );
+  }
+
+  setRouter(router: ChannelRouter): void {
+    this.router = router;
+  }
+
+  async onChannelSwitch(): Promise<void> {
+    if (this.router) {
+      const routerLogChannel = await this.router.getLogChannel();
+      if (routerLogChannel) {
+        this.logChannel = routerLogChannel;
+      }
+    }
   }
 
   start(): void {
@@ -80,19 +95,34 @@ export class VoicePipeline {
         return;
       }
 
+      const channelName = this.router?.getActiveChannel().name;
+
       // Log to text channel + session transcript
       this.log(`**You:** ${transcript}`);
-      this.session.appendUserMessage(userId, transcript);
+      this.session.appendUserMessage(userId, transcript, channelName);
 
       // Step 2: LLM response
-      const response = await getResponse(userId, transcript);
+      let responseText: string;
+      if (this.router) {
+        const systemPrompt = this.router.getSystemPrompt();
+        const history = this.router.getHistory();
+        const { response, history: updatedHistory } = await getResponse(userId, transcript, {
+          systemPrompt,
+          history,
+        });
+        this.router.setHistory(updatedHistory);
+        responseText = response;
+      } else {
+        const { response } = await getResponse(userId, transcript);
+        responseText = response;
+      }
 
       // Log to text channel + session transcript
-      this.log(`**Watson:** ${response}`);
-      this.session.appendAssistantMessage(response);
+      this.log(`**Watson:** ${responseText}`);
+      this.session.appendAssistantMessage(responseText, channelName);
 
       // Step 3: Text-to-speech + playback — stop waiting loop, start TTS
-      const ttsStream = await textToSpeechStream(response);
+      const ttsStream = await textToSpeechStream(responseText);
       this.player.stopWaitingLoop();
       this.player.stopPlayback();
       await this.player.playStream(ttsStream);
@@ -109,7 +139,15 @@ export class VoicePipeline {
   }
 
   private log(message: string): void {
-    if (this.logChannel) {
+    if (this.router) {
+      this.router.getLogChannel().then((channel) => {
+        if (channel) {
+          channel.send(message).catch((err) => {
+            console.error('Failed to log to text channel:', err.message);
+          });
+        }
+      });
+    } else if (this.logChannel) {
       this.logChannel.send(message).catch((err) => {
         console.error('Failed to log to text channel:', err.message);
       });

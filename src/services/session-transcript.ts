@@ -42,10 +42,10 @@ export class SessionTranscript {
     console.log(`Session transcript: ${this.filePath}`);
   }
 
-  appendUserMessage(userId: string, text: string): void {
+  appendUserMessage(userId: string, text: string, channelName?: string): void {
     this.ensureInitialized();
     const id = randomUUID().slice(0, 8);
-    const entry = {
+    const entry: Record<string, unknown> = {
       type: 'message',
       id,
       parentId: this.lastMessageId,
@@ -56,14 +56,15 @@ export class SessionTranscript {
         timestamp: Date.now(),
       },
     };
+    if (channelName) entry.channel = channelName;
     this.appendLine(entry);
     this.lastMessageId = id;
   }
 
-  appendAssistantMessage(text: string): void {
+  appendAssistantMessage(text: string, channelName?: string): void {
     this.ensureInitialized();
     const id = randomUUID().slice(0, 8);
-    const entry = {
+    const entry: Record<string, unknown> = {
       type: 'message',
       id,
       parentId: this.lastMessageId,
@@ -74,6 +75,7 @@ export class SessionTranscript {
         timestamp: Date.now(),
       },
     };
+    if (channelName) entry.channel = channelName;
     this.appendLine(entry);
     this.lastMessageId = id;
   }

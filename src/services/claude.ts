@@ -1,18 +1,35 @@
 import { config } from '../config.js';
 import { WATSON_SYSTEM_PROMPT } from '../prompts/watson-system.js';
 
-interface Message {
+export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
+}
+
+export interface GetResponseOptions {
+  systemPrompt?: string;
+  history?: Message[];
+}
+
+export interface GetResponseResult {
+  response: string;
+  history: Message[];
 }
 
 const MAX_HISTORY = 20;
 const conversations = new Map<string, Message[]>();
 
-export async function getResponse(userId: string, text: string): Promise<string> {
+export async function getResponse(
+  userId: string,
+  text: string,
+  options?: GetResponseOptions,
+): Promise<GetResponseResult> {
   const start = Date.now();
 
-  let history = conversations.get(userId) || [];
+  const systemPrompt = options?.systemPrompt ?? WATSON_SYSTEM_PROMPT;
+  const externalHistory = options?.history !== undefined;
+
+  let history = externalHistory ? options!.history! : (conversations.get(userId) || []);
   history.push({ role: 'user', content: text });
 
   // Trim to last MAX_HISTORY messages
@@ -22,11 +39,11 @@ export async function getResponse(userId: string, text: string): Promise<string>
 
   // Build messages array with system prompt
   const messages: Message[] = [
-    { role: 'system', content: WATSON_SYSTEM_PROMPT },
+    { role: 'system', content: systemPrompt },
     ...history,
   ];
 
-  const response = await fetch(`${config.gatewayUrl}/v1/chat/completions`, {
+  const apiResponse = await fetch(`${config.gatewayUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -40,21 +57,24 @@ export async function getResponse(userId: string, text: string): Promise<string>
     }),
   });
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Gateway API error ${response.status}: ${body}`);
+  if (!apiResponse.ok) {
+    const body = await apiResponse.text();
+    throw new Error(`Gateway API error ${apiResponse.status}: ${body}`);
   }
 
-  const data = await response.json() as any;
+  const data = await apiResponse.json() as any;
   const assistantText = data.choices?.[0]?.message?.content || '';
 
   history.push({ role: 'assistant', content: assistantText });
-  conversations.set(userId, history);
+
+  if (!externalHistory) {
+    conversations.set(userId, history);
+  }
 
   const elapsed = Date.now() - start;
   console.log(`Claude LLM (via gateway): "${assistantText.slice(0, 80)}..." (${elapsed}ms)`);
 
-  return assistantText;
+  return { response: assistantText, history };
 }
 
 export function clearConversation(userId: string): void {

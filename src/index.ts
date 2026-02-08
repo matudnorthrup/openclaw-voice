@@ -3,6 +3,7 @@ import { createClient } from './discord/client.js';
 import { joinChannel, leaveChannel, getConnection, setConnection } from './discord/voice-connection.js';
 import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
+import { ChannelRouter } from './services/channel-router.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState } from 'discord.js';
 
@@ -10,6 +11,7 @@ console.log('Watson Voice starting...');
 
 const client = createClient();
 let pipeline: VoicePipeline | null = null;
+let router: ChannelRouter | null = null;
 let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // --- Text command handlers ---
@@ -17,14 +19,49 @@ let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 client.on('messageCreate', async (message) => {
   if (message.author.bot) return;
 
-  if (message.content === '!join') {
+  if (message.content === '~join') {
     await handleJoin(message.guild!.id, message);
-  } else if (message.content === '!leave') {
+  } else if (message.content === '~leave') {
     handleLeave();
     await message.reply('Left voice channel.');
-  } else if (message.content === '!clear') {
+  } else if (message.content === '~clear') {
     clearConversation(message.author.id);
+    if (router) {
+      router.clearActiveHistory();
+    }
     await message.reply('Conversation cleared.');
+  } else if (message.content === '~channels') {
+    if (!router) {
+      await message.reply('Not connected to voice. Use `~join` first.');
+      return;
+    }
+    const list = router.listChannels();
+    const lines = list.map((ch) =>
+      `${ch.active ? '> ' : '  '} **${ch.name}** — ${ch.displayName}${ch.active ? ' (active)' : ''}`,
+    );
+    await message.reply(`Available channels:\n${lines.join('\n')}`);
+  } else if (message.content.startsWith('~switch ')) {
+    if (!router || !pipeline) {
+      await message.reply('Not connected to voice. Use `~join` first.');
+      return;
+    }
+    const name = message.content.slice('~switch '.length).trim();
+    const result = await router.switchTo(name.toLowerCase());
+    if (!result.success) {
+      await message.reply(result.error!);
+      return;
+    }
+    await pipeline.onChannelSwitch();
+    const label = result.displayName || name;
+    await message.reply(`Switched to **${label}**. Loaded ${result.historyCount} history messages.`);
+  } else if (message.content === '~default') {
+    if (!router || !pipeline) {
+      await message.reply('Not connected to voice. Use `~join` first.');
+      return;
+    }
+    const result = await router.switchToDefault();
+    await pipeline.onChannelSwitch();
+    await message.reply(`Switched back to **default** channel. Loaded ${result.historyCount} history messages.`);
   }
 });
 
@@ -125,6 +162,8 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     }
 
     pipeline = new VoicePipeline(connection, config.silenceDurationMs, logChannel);
+    router = new ChannelRouter(guild);
+    pipeline.setRouter(router);
     pipeline.start();
 
     if (message) {
@@ -143,6 +182,7 @@ function handleLeave(): void {
     pipeline.stop();
     pipeline = null;
   }
+  router = null;
   leaveChannel();
 }
 

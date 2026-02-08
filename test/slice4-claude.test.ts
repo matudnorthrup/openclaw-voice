@@ -9,7 +9,7 @@ describe('Claude LLM (via Gateway)', () => {
 
     const { getResponse, clearConversation } = await import('../src/services/claude.js');
 
-    const response = await getResponse('test-user', 'Hello Watson, what is your name?');
+    const { response } = await getResponse('test-user', 'Hello Watson, what is your name?');
     expect(response.length).toBeGreaterThan(0);
     expect(typeof response).toBe('string');
 
@@ -29,7 +29,7 @@ describe('Claude LLM (via Gateway)', () => {
     await getResponse(userId, 'My favorite color is purple. Please remember that.');
 
     // Ask about it
-    const response = await getResponse(userId, 'What is my favorite color?');
+    const { response } = await getResponse(userId, 'What is my favorite color?');
     expect(response.toLowerCase()).toContain('purple');
 
     clearConversation(userId);
