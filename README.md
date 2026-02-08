@@ -27,8 +27,8 @@ Voice Input → Whisper STT → OpenClaw Gateway (LLM) → ElevenLabs TTS → Vo
 1. Clone the repo and install dependencies:
 
 ```bash
-git clone https://github.com/matudnorthrup/watson-voice.git
-cd watson-voice
+git clone https://github.com/matudnorthrup/openclaw-voice.git
+cd openclaw-voice
 npm install
 ```
 
