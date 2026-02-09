@@ -11,7 +11,8 @@ function required(key: string): string {
 
 export const config = {
   discordToken: required('DISCORD_TOKEN'),
-  openaiApiKey: required('OPENAI_API_KEY'),
+  openaiApiKey: process.env['OPENAI_API_KEY'] || '',
+  whisperUrl: process.env['WHISPER_URL'] || '',
   gatewayUrl: process.env['GATEWAY_URL'] || 'http://localhost:18789',
   gatewayToken: required('GATEWAY_TOKEN'),
   gatewayAgentId: process.env['GATEWAY_AGENT_ID'] || 'main',
@@ -20,6 +21,8 @@ export const config = {
   discordGuildId: required('DISCORD_GUILD_ID'),
   discordVoiceChannelId: required('DISCORD_VOICE_CHANNEL_ID'),
   silenceDurationMs: parseInt(process.env['SILENCE_DURATION_MS'] || '1500', 10),
+  speechThreshold: parseInt(process.env['SPEECH_THRESHOLD'] || '500', 10),
+  minSpeechDurationMs: parseInt(process.env['MIN_SPEECH_DURATION_MS'] || '300', 10),
   botName: process.env['BOT_NAME'] || 'Assistant',
   logChannelId: process.env['LOG_CHANNEL_ID'] || '',
   sessionsDir: process.env['SESSIONS_DIR'] || `${process.env['HOME']}/.clawdbot/agents/main/sessions`,

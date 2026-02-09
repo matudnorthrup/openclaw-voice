@@ -4,10 +4,17 @@ import { joinChannel, leaveChannel, getConnection, setConnection } from './disco
 import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
+import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
-import { ChannelType, TextChannel, VoiceState } from 'discord.js';
+import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember } from 'discord.js';
 
 console.log(`${config.botName} Voice starting...`);
+
+initVoiceSettings({
+  silenceDurationMs: config.silenceDurationMs,
+  speechThreshold: config.speechThreshold,
+  minSpeechDurationMs: config.minSpeechDurationMs,
+});
 
 const client = createClient();
 let pipeline: VoicePipeline | null = null;
@@ -62,6 +69,32 @@ client.on('messageCreate', async (message) => {
     const result = await router.switchToDefault();
     await pipeline.onChannelSwitch();
     await message.reply(`Switched back to **default** channel. Loaded ${result.historyCount} history messages.`);
+  } else if (message.content === '~voice') {
+    const s = getVoiceSettings();
+    await message.reply(
+      `**Voice settings:**\n` +
+      `  Silence delay: **${s.silenceDurationMs}ms**\n` +
+      `  Noise threshold: **${s.speechThreshold}** (higher = ignores more noise)\n` +
+      `  Min speech duration: **${s.minSpeechDurationMs}ms**`,
+    );
+  } else if (message.content.startsWith('~delay ')) {
+    const val = parseInt(message.content.slice('~delay '.length).trim(), 10);
+    if (isNaN(val) || val < 500 || val > 10000) {
+      await message.reply('Usage: `~delay <500-10000>` (milliseconds). Example: `~delay 3000`');
+      return;
+    }
+    setSilenceDuration(val);
+    await message.reply(`Silence delay set to **${val}ms**. Takes effect on next utterance.`);
+  } else if (message.content.startsWith('~noise ')) {
+    const input = message.content.slice('~noise '.length).trim();
+    const result = resolveNoiseLevel(input);
+    if (!result) {
+      const presets = getNoisePresetNames().join(', ');
+      await message.reply(`Usage: \`~noise <${presets}>\` or \`~noise <number>\`. Example: \`~noise high\``);
+      return;
+    }
+    setSpeechThreshold(result.threshold);
+    await message.reply(`Noise threshold set to **${result.label}** (${result.threshold}). Higher = ignores more background noise.`);
   }
 });
 
@@ -161,7 +194,7 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       pipeline.stop();
     }
 
-    pipeline = new VoicePipeline(connection, config.silenceDurationMs, logChannel);
+    pipeline = new VoicePipeline(connection, logChannel);
     router = new ChannelRouter(guild);
     pipeline.setRouter(router);
     pipeline.start();
@@ -188,8 +221,81 @@ function handleLeave(): void {
 
 // --- Auto-join on startup ---
 
+// --- Slash command handler ---
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== 'watson') return;
+
+  // Auto-join voice if not connected
+  if (!router || !pipeline) {
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+      return;
+    }
+    await interaction.deferReply();
+    await handleJoin(guildId);
+    if (!router || !pipeline) {
+      await interaction.editReply('Failed to join voice channel.');
+      return;
+    }
+  }
+
+  const channelId = interaction.channelId;
+  const result = await router.switchTo(channelId);
+  if (!result.success) {
+    const msg = result.error!;
+    if (interaction.deferred) await interaction.editReply(msg);
+    else await interaction.reply({ content: msg, ephemeral: true });
+    return;
+  }
+
+  await pipeline!.onChannelSwitch();
+  const label = result.displayName || `<#${channelId}>`;
+
+  // Try to move user into voice channel if they're not already there
+  let voiceNote = '';
+  const member = interaction.member as GuildMember | null;
+  if (member?.voice) {
+    if (member.voice.channelId !== config.discordVoiceChannelId) {
+      if (member.voice.channelId) {
+        try {
+          await member.voice.setChannel(config.discordVoiceChannelId);
+        } catch {
+          voiceNote = `\nJoin voice: <#${config.discordVoiceChannelId}>`;
+        }
+      } else {
+        voiceNote = `\nJoin voice: <#${config.discordVoiceChannelId}>`;
+      }
+    }
+  }
+
+  const msg = `Switched ${config.botName} to **${label}**. Loaded ${result.historyCount} history messages.${voiceNote}`;
+  if (interaction.deferred) await interaction.editReply(msg);
+  else await interaction.reply(msg);
+});
+
+// --- Auto-join on startup ---
+
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user?.tag}`);
+
+  // Register slash command
+  const command = new SlashCommandBuilder()
+    .setName('watson')
+    .setDescription(`Switch ${config.botName} voice to this channel`);
+
+  const rest = new REST().setToken(config.discordToken);
+  try {
+    await rest.put(
+      Routes.applicationGuildCommands(client.user!.id, config.discordGuildId),
+      { body: [command.toJSON()] },
+    );
+    console.log('Registered /watson slash command');
+  } catch (err: any) {
+    console.error('Failed to register slash command:', err.message);
+  }
 
   // Auto-join the configured voice channel
   const guild = client.guilds.cache.get(config.discordGuildId);

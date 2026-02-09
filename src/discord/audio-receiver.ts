@@ -2,6 +2,7 @@ import { VoiceConnection, EndBehaviorType } from '@discordjs/voice';
 import prism from 'prism-media';
 import { isLikelySpeech, stereoToMono } from '../audio/silence-detector.js';
 import { pcmToWav } from '../audio/wav-utils.js';
+import { getVoiceSettings } from '../services/voice-settings.js';
 
 export interface UtteranceHandler {
   (userId: string, wavBuffer: Buffer, durationMs: number): void;
@@ -9,17 +10,14 @@ export interface UtteranceHandler {
 
 export class AudioReceiver {
   private connection: VoiceConnection;
-  private silenceDurationMs: number;
   private onUtterance: UtteranceHandler;
   private listening = false;
 
   constructor(
     connection: VoiceConnection,
-    silenceDurationMs: number,
     onUtterance: UtteranceHandler,
   ) {
     this.connection = connection;
-    this.silenceDurationMs = silenceDurationMs;
     this.onUtterance = onUtterance;
   }
 
@@ -47,7 +45,7 @@ export class AudioReceiver {
     const opusStream = receiver.subscribe(userId, {
       end: {
         behavior: EndBehaviorType.AfterSilence,
-        duration: this.silenceDurationMs,
+        duration: getVoiceSettings().silenceDurationMs,
       },
     });
 

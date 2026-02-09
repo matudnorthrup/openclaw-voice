@@ -3,8 +3,7 @@
  * PCM format: 16-bit signed integer, little-endian, mono, 48kHz.
  */
 
-const SPEECH_THRESHOLD = 500; // RMS threshold — below this is considered noise/silence
-const MIN_SPEECH_SAMPLES = 48000 * 0.3; // At least 300ms of audio to be considered speech (48kHz mono)
+import { getVoiceSettings } from '../services/voice-settings.js';
 
 export function calculateRMSEnergy(pcm: Buffer): number {
   const samples = pcm.length / 2; // 16-bit = 2 bytes per sample
@@ -20,11 +19,14 @@ export function calculateRMSEnergy(pcm: Buffer): number {
 }
 
 export function isLikelySpeech(pcm: Buffer): boolean {
+  const { speechThreshold, minSpeechDurationMs } = getVoiceSettings();
+  const minSamples = 48000 * (minSpeechDurationMs / 1000);
+
   const samples = pcm.length / 2;
-  if (samples < MIN_SPEECH_SAMPLES) return false;
+  if (samples < minSamples) return false;
 
   const rms = calculateRMSEnergy(pcm);
-  return rms > SPEECH_THRESHOLD;
+  return rms > speechThreshold;
 }
 
 export function stereoToMono(stereo: Buffer): Buffer {
