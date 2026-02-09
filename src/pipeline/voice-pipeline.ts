@@ -19,7 +19,6 @@ export class VoicePipeline {
 
   constructor(
     connection: VoiceConnection,
-    silenceDurationMs: number,
     logChannel?: TextChannel,
   ) {
     this.player = new DiscordAudioPlayer();
@@ -29,7 +28,6 @@ export class VoicePipeline {
 
     this.receiver = new AudioReceiver(
       connection,
-      silenceDurationMs,
       (userId, wavBuffer, durationMs) => this.handleUtterance(userId, wavBuffer, durationMs),
     );
   }
