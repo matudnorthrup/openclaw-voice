@@ -27,3 +27,7 @@ export const config = {
   logChannelId: process.env['LOG_CHANNEL_ID'] || '',
   sessionsDir: process.env['SESSIONS_DIR'] || `${process.env['HOME']}/.clawdbot/agents/main/sessions`,
 };
+
+if (!config.whisperUrl && !config.openaiApiKey) {
+  throw new Error('At least one STT backend required: set WHISPER_URL (local) or OPENAI_API_KEY (cloud)');
+}

@@ -227,14 +227,16 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== 'watson') return;
 
+  // Defer upfront — switchTo can trigger Discord message fetches that take time
+  await interaction.deferReply();
+
   // Auto-join voice if not connected
   if (!router || !pipeline) {
     const guildId = interaction.guildId;
     if (!guildId) {
-      await interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+      await interaction.editReply('This command must be used in a server.');
       return;
     }
-    await interaction.deferReply();
     await handleJoin(guildId);
     if (!router || !pipeline) {
       await interaction.editReply('Failed to join voice channel.');
@@ -245,9 +247,7 @@ client.on('interactionCreate', async (interaction) => {
   const channelId = interaction.channelId;
   const result = await router.switchTo(channelId);
   if (!result.success) {
-    const msg = result.error!;
-    if (interaction.deferred) await interaction.editReply(msg);
-    else await interaction.reply({ content: msg, ephemeral: true });
+    await interaction.editReply(result.error!);
     return;
   }
 
@@ -271,9 +271,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  const msg = `Switched ${config.botName} to **${label}**. Loaded ${result.historyCount} history messages.${voiceNote}`;
-  if (interaction.deferred) await interaction.editReply(msg);
-  else await interaction.reply(msg);
+  await interaction.editReply(`Switched ${config.botName} to **${label}**. Loaded ${result.historyCount} history messages.${voiceNote}`);
 });
 
 // --- Auto-join on startup ---
