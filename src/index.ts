@@ -4,6 +4,7 @@ import { joinChannel, leaveChannel, getConnection, setConnection } from './disco
 import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
+import { GatewaySync } from './services/gateway-sync.js';
 import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember } from 'discord.js';
@@ -19,6 +20,7 @@ initVoiceSettings({
 const client = createClient();
 let pipeline: VoicePipeline | null = null;
 let router: ChannelRouter | null = null;
+let gatewaySync: GatewaySync | null = null;
 let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // --- Text command handlers ---
@@ -195,8 +197,11 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     }
 
     pipeline = new VoicePipeline(connection, logChannel);
-    router = new ChannelRouter(guild);
+    router = new ChannelRouter(guild, gatewaySync ?? undefined);
     pipeline.setRouter(router);
+    if (gatewaySync) {
+      pipeline.setGatewaySync(gatewaySync);
+    }
     pipeline.start();
 
     if (message) {
@@ -218,8 +223,6 @@ function handleLeave(): void {
   router = null;
   leaveChannel();
 }
-
-// --- Auto-join on startup ---
 
 // --- Slash command handler ---
 
@@ -279,6 +282,14 @@ client.on('interactionCreate', async (interaction) => {
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user?.tag}`);
 
+  // Connect to OpenClaw gateway for session sync
+  if (config.gatewayWsEnabled) {
+    gatewaySync = new GatewaySync();
+    gatewaySync.connect().catch((err) => {
+      console.warn(`OpenClaw gateway sync unavailable: ${err.message}`);
+    });
+  }
+
   // Register slash command
   const command = new SlashCommandBuilder()
     .setName('watson')
@@ -315,6 +326,10 @@ client.once('ready', async () => {
 
 function shutdown(): void {
   console.log('Shutting down gracefully...');
+  if (gatewaySync) {
+    gatewaySync.destroy();
+    gatewaySync = null;
+  }
   handleLeave();
   client.destroy();
   process.exit(0);

@@ -4,6 +4,7 @@ import { Guild, ChannelType, TextChannel, type GuildBasedChannel } from 'discord
 import { WATSON_SYSTEM_PROMPT } from '../prompts/watson-system.js';
 import { config } from '../config.js';
 import type { Message } from './claude.js';
+import { GatewaySync, type ChatMessage } from './gateway-sync.js';
 
 const SENDABLE_TYPES = new Set([
   ChannelType.GuildText,
@@ -15,6 +16,7 @@ interface ChannelDef {
   displayName: string;
   channelId: string;
   topicPrompt: string | null;
+  sessionKey?: string;
 }
 
 const channels = JSON.parse(
@@ -26,9 +28,11 @@ export class ChannelRouter {
   private activeChannelName = 'default';
   private historyMap = new Map<string, Message[]>();
   private resolvedChannels = new Map<string, TextChannel>();
+  private gatewaySync: GatewaySync | null = null;
 
-  constructor(guild: Guild) {
+  constructor(guild: Guild, gatewaySync?: GatewaySync) {
     this.guild = guild;
+    this.gatewaySync = gatewaySync ?? null;
   }
 
   listChannels(): { name: string; displayName: string; active: boolean }[] {
@@ -122,10 +126,9 @@ export class ChannelRouter {
     if (channels[name]) {
       this.activeChannelName = name;
 
-      if (!this.historyMap.has(name)) {
-        const seeded = await this.seedHistoryFromDiscord(name);
-        this.historyMap.set(name, seeded);
-      }
+      // Always re-seed from OpenClaw to pick up new text messages
+      const seeded = await this.seedHistory(name);
+      this.historyMap.set(name, seeded);
 
       const historyCount = this.historyMap.get(name)?.length || 0;
       console.log(`Switched to channel: ${name} (${historyCount} history messages)`);
@@ -163,10 +166,9 @@ export class ChannelRouter {
 
     this.activeChannelName = key;
 
-    if (!this.historyMap.has(key)) {
-      const seeded = await this.seedHistoryFromDiscord(key);
-      this.historyMap.set(key, seeded);
-    }
+    // Always re-seed from OpenClaw to pick up new text messages
+    const seeded = await this.seedHistory(key);
+    this.historyMap.set(key, seeded);
 
     const historyCount = this.historyMap.get(key)?.length || 0;
     console.log(`Switched to ad-hoc channel: #${displayName} / type=${resolved.type} (${historyCount} history messages)`);
@@ -180,6 +182,53 @@ export class ChannelRouter {
   clearActiveHistory(): void {
     this.historyMap.delete(this.activeChannelName);
     console.log(`Cleared history for channel: ${this.activeChannelName}`);
+  }
+
+  getActiveSessionKey(): string {
+    const def = channels[this.activeChannelName];
+    if (def?.sessionKey) return def.sessionKey;
+    if (def?.channelId) return GatewaySync.sessionKeyForChannel(def.channelId);
+    return GatewaySync.defaultSessionKey;
+  }
+
+  private async seedHistory(name: string): Promise<Message[]> {
+    const def = channels[name];
+
+    // Try OpenClaw first
+    if (this.gatewaySync?.isConnected() && def) {
+      const sessionKey = def.sessionKey
+        || (def.channelId ? GatewaySync.sessionKeyForChannel(def.channelId) : GatewaySync.defaultSessionKey);
+
+      const result = await this.gatewaySync.getHistory(sessionKey, 40);
+      if (result && result.messages.length > 0) {
+        const messages = this.convertOpenClawMessages(result.messages);
+        console.log(`Seeded ${messages.length} messages from OpenClaw session ${sessionKey}`);
+        return messages;
+      }
+    }
+
+    // Fall back to Discord history
+    return this.seedHistoryFromDiscord(name);
+  }
+
+  private convertOpenClawMessages(clawMessages: ChatMessage[]): Message[] {
+    const messages: Message[] = [];
+    for (const msg of clawMessages) {
+      // Skip system messages
+      if (msg.role === 'system') continue;
+
+      // Messages injected from voice with label 'voice-user' are user messages
+      if (msg.label === 'voice-user') {
+        messages.push({ role: 'user', content: msg.content });
+        continue;
+      }
+
+      // Keep user and assistant messages as-is
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        messages.push({ role: msg.role, content: msg.content });
+      }
+    }
+    return messages;
   }
 
   private async seedHistoryFromDiscord(name: string): Promise<Message[]> {

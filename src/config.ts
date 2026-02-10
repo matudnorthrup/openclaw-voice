@@ -31,6 +31,7 @@ export const config = {
   botName: process.env['BOT_NAME'] || 'Assistant',
   logChannelId: process.env['LOG_CHANNEL_ID'] || '',
   sessionsDir: process.env['SESSIONS_DIR'] || `${process.env['HOME']}/.clawdbot/agents/main/sessions`,
+  gatewayWsEnabled: process.env['GATEWAY_WS_SYNC'] !== 'false',
 };
 
 if (!config.whisperUrl && !config.openaiApiKey) {
