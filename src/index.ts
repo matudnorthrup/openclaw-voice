@@ -4,6 +4,7 @@ import { joinChannel, leaveChannel, getConnection, setConnection } from './disco
 import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
+import { GatewaySync } from './services/gateway-sync.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState } from 'discord.js';
 
@@ -12,6 +13,7 @@ console.log(`${config.botName} Voice starting...`);
 const client = createClient();
 let pipeline: VoicePipeline | null = null;
 let router: ChannelRouter | null = null;
+let gatewaySync: GatewaySync | null = null;
 let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // --- Text command handlers ---
@@ -162,8 +164,11 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     }
 
     pipeline = new VoicePipeline(connection, config.silenceDurationMs, logChannel);
-    router = new ChannelRouter(guild);
+    router = new ChannelRouter(guild, gatewaySync ?? undefined);
     pipeline.setRouter(router);
+    if (gatewaySync) {
+      pipeline.setGatewaySync(gatewaySync);
+    }
     pipeline.start();
 
     if (message) {
@@ -191,6 +196,14 @@ function handleLeave(): void {
 client.once('ready', async () => {
   console.log(`Logged in as ${client.user?.tag}`);
 
+  // Connect to OpenClaw gateway for session sync
+  if (config.gatewayWsEnabled) {
+    gatewaySync = new GatewaySync();
+    gatewaySync.connect().catch((err) => {
+      console.warn(`OpenClaw gateway sync unavailable: ${err.message}`);
+    });
+  }
+
   // Auto-join the configured voice channel
   const guild = client.guilds.cache.get(config.discordGuildId);
   if (guild) {
@@ -211,6 +224,10 @@ client.once('ready', async () => {
 
 function shutdown(): void {
   console.log('Shutting down gracefully...');
+  if (gatewaySync) {
+    gatewaySync.destroy();
+    gatewaySync = null;
+  }
   handleLeave();
   client.destroy();
   process.exit(0);

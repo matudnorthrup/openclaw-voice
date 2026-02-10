@@ -8,6 +8,7 @@ import { textToSpeechStream } from '../services/elevenlabs.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import type { ChannelRouter } from '../services/channel-router.js';
+import type { GatewaySync } from '../services/gateway-sync.js';
 
 export class VoicePipeline {
   private receiver: AudioReceiver;
@@ -16,6 +17,7 @@ export class VoicePipeline {
   private logChannel: TextChannel | null = null;
   private session: SessionTranscript;
   private router: ChannelRouter | null = null;
+  private gatewaySync: GatewaySync | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -36,6 +38,10 @@ export class VoicePipeline {
 
   setRouter(router: ChannelRouter): void {
     this.router = router;
+  }
+
+  setGatewaySync(sync: GatewaySync): void {
+    this.gatewaySync = sync;
   }
 
   async onChannelSwitch(): Promise<void> {
@@ -122,6 +128,9 @@ export class VoicePipeline {
       this.log(`**${config.botName}:** ${responseText}`);
       this.session.appendAssistantMessage(responseText, channelName);
 
+      // Fire-and-forget sync to OpenClaw text session
+      void this.syncToOpenClaw(transcript, responseText);
+
       // Step 3: Text-to-speech + playback — stop waiting loop, start TTS
       const ttsStream = await textToSpeechStream(responseText);
       this.player.stopWaitingLoop();
@@ -136,6 +145,18 @@ export class VoicePipeline {
       this.player.stopPlayback();
     } finally {
       this.processing = false;
+    }
+  }
+
+  private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {
+    if (!this.gatewaySync?.isConnected() || !this.router) return;
+
+    try {
+      const sessionKey = this.router.getActiveSessionKey();
+      await this.gatewaySync.inject(sessionKey, userText, 'voice-user');
+      await this.gatewaySync.inject(sessionKey, assistantText, 'voice-assistant');
+    } catch (err: any) {
+      console.warn(`OpenClaw sync failed: ${err.message}`);
     }
   }
 
