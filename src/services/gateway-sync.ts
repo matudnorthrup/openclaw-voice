@@ -44,10 +44,12 @@ export class GatewaySync {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private wsUrl: string;
 
-  static defaultSessionKey = 'agent:main:main';
+  static get defaultSessionKey(): string {
+    return `agent:${config.gatewayAgentId}:main`;
+  }
 
   static sessionKeyForChannel(channelId: string): string {
-    return `agent:main:discord:channel:${channelId}`;
+    return `agent:${config.gatewayAgentId}:discord:channel:${channelId}`;
   }
 
   constructor() {
