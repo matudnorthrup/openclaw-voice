@@ -27,8 +27,8 @@ Voice Input → Whisper STT → OpenClaw Gateway (LLM) → ElevenLabs TTS → Vo
 1. Clone the repo and install dependencies:
 
 ```bash
-git clone https://github.com/matudnorthrup/watson-voice.git
-cd watson-voice
+git clone https://github.com/matudnorthrup/openclaw-voice.git
+cd openclaw-voice
 npm install
 ```
 
@@ -74,6 +74,9 @@ Type these in any text channel the bot can read (use `~` prefix):
 | `~switch <name>` | Switch to a named channel (e.g., `~switch health`) |
 | `~switch <id>` | Switch to any channel by Discord ID |
 | `~default` | Switch back to the default channel |
+| `~voice` | Show current voice detection settings |
+| `~delay <ms>` | Set silence wait time in ms (e.g., `~delay 3000` for thinking pauses) |
+| `~noise <level>` | Set noise filtering: `low`, `medium`, `high`, or a number (e.g., `~noise high`) |
 
 ## Channel Switching
 
@@ -84,6 +87,16 @@ The bot can target different Discord channels, each with a tailored system promp
 3. Transcripts (your speech + the bot's replies) are logged to that channel
 
 You can switch to **named channels** defined in `channels.json`, or to **any channel by ID** — including forum posts and threads.
+
+## Voice Tuning
+
+The bot's speech detection can be adjusted on the fly without restarting:
+
+- **`~delay <ms>`** — How long silence must last before your speech is considered "finished." Default is 1500ms. Increase this (e.g., `~delay 3000`) if you pause to think mid-sentence and the bot cuts you off too early.
+- **`~noise <low|medium|high>`** — How aggressively background noise is filtered. `low` (300) picks up softer speech, `high` (800) ignores more background noise. Default is `medium` (500). You can also pass a specific number, e.g., `~noise 600`.
+- **`~voice`** — Shows current settings.
+
+Changes take effect on the next utterance. Set startup defaults via `SILENCE_DURATION_MS`, `SPEECH_THRESHOLD`, and `MIN_SPEECH_DURATION_MS` in your `.env`.
 
 ## Auto-Join / Auto-Leave
 
@@ -109,6 +122,7 @@ src/
     claude.ts                 # LLM calls via OpenClaw gateway
     elevenlabs.ts             # ElevenLabs text-to-speech
     channel-router.ts         # Channel switching, prompt composition, history
+    voice-settings.ts         # Runtime-adjustable voice detection settings
     session-transcript.ts     # JSONL session logging
   prompts/
     watson-system.ts          # Base voice system prompt
@@ -132,5 +146,7 @@ See [`.env.example`](.env.example) for the full list with descriptions.
 - `ELEVENLABS_VOICE_ID` — Voice to use (defaults to `JBFqnCBsd6RMkjVDRZzb`)
 - `GATEWAY_AGENT_ID` — OpenClaw agent (defaults to `main`)
 - `LOG_CHANNEL_ID` — Default text channel for transcript logging
-- `SILENCE_DURATION_MS` — Silence threshold before processing (defaults to `1500`)
+- `SILENCE_DURATION_MS` — Silence wait time in ms before processing speech (defaults to `1500`)
+- `SPEECH_THRESHOLD` — RMS energy threshold for speech detection (defaults to `500`)
+- `MIN_SPEECH_DURATION_MS` — Minimum speech length to process (defaults to `300`)
 - `SESSIONS_DIR` — Directory for JSONL session files

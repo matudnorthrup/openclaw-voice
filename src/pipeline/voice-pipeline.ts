@@ -4,7 +4,7 @@ import { AudioReceiver } from '../discord/audio-receiver.js';
 import { DiscordAudioPlayer } from '../discord/audio-player.js';
 import { transcribe } from '../services/whisper.js';
 import { getResponse } from '../services/claude.js';
-import { textToSpeechStream } from '../services/elevenlabs.js';
+import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import type { ChannelRouter } from '../services/channel-router.js';
@@ -21,7 +21,6 @@ export class VoicePipeline {
 
   constructor(
     connection: VoiceConnection,
-    silenceDurationMs: number,
     logChannel?: TextChannel,
   ) {
     this.player = new DiscordAudioPlayer();
@@ -31,7 +30,6 @@ export class VoicePipeline {
 
     this.receiver = new AudioReceiver(
       connection,
-      silenceDurationMs,
       (userId, wavBuffer, durationMs) => this.handleUtterance(userId, wavBuffer, durationMs),
     );
   }
@@ -111,9 +109,12 @@ export class VoicePipeline {
       // Step 2: LLM response
       let responseText: string;
       if (this.router) {
+        const activeChannel = this.router.getActiveChannel();
         const systemPrompt = this.router.getSystemPrompt();
         const history = this.router.getHistory();
-        const { response, history: updatedHistory } = await getResponse(userId, transcript, {
+        // Use channel-scoped user ID so the gateway treats each channel as a separate conversation
+        const scopedUserId = `${userId}:${activeChannel.name}`;
+        const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
           systemPrompt,
           history,
         });
@@ -160,19 +161,26 @@ export class VoicePipeline {
     }
   }
 
+  private async sendChunked(channel: TextChannel, message: string): Promise<void> {
+    const MAX_LEN = 2000;
+    for (let i = 0; i < message.length; i += MAX_LEN) {
+      await channel.send(message.slice(i, i + MAX_LEN));
+    }
+  }
+
   private log(message: string): void {
-    if (this.router) {
-      this.router.getLogChannel().then((channel) => {
-        if (channel) {
-          channel.send(message).catch((err) => {
-            console.error('Failed to log to text channel:', err.message);
-          });
-        }
-      });
-    } else if (this.logChannel) {
-      this.logChannel.send(message).catch((err) => {
+    const send = (channel: TextChannel) => {
+      this.sendChunked(channel, message).catch((err) => {
         console.error('Failed to log to text channel:', err.message);
       });
+    };
+
+    if (this.router) {
+      this.router.getLogChannel().then((channel) => {
+        if (channel) send(channel);
+      });
+    } else if (this.logChannel) {
+      send(this.logChannel);
     }
   }
 }
