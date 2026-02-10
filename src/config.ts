@@ -20,6 +20,7 @@ export const config = {
   discordGuildId: required('DISCORD_GUILD_ID'),
   discordVoiceChannelId: required('DISCORD_VOICE_CHANNEL_ID'),
   silenceDurationMs: parseInt(process.env['SILENCE_DURATION_MS'] || '1500', 10),
+  botName: process.env['BOT_NAME'] || 'Assistant',
   logChannelId: process.env['LOG_CHANNEL_ID'] || '',
   sessionsDir: process.env['SESSIONS_DIR'] || `${process.env['HOME']}/.clawdbot/agents/main/sessions`,
 };

@@ -1,5 +1,5 @@
 {
-  "name": "watson-voice",
+  "name": "openclaw-voice",
   "version": "1.0.0",
   "main": "dist/index.js",
   "scripts": {
@@ -17,7 +17,7 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "Watson Discord voice bot — hands-free conversational AI",
+  "description": "OpenClaw Voice — hands-free Discord voice bot for conversational AI",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
     "@discordjs/opus": "^0.10.0",

@@ -1,6 +1,6 @@
-# Watson Voice
+# OpenClaw Voice
 
-A Discord voice bot for hands-free conversational AI. Watson joins a voice channel, listens via speech-to-text (Whisper), generates responses through an LLM (via OpenClaw gateway), and speaks back using text-to-speech (ElevenLabs).
+A Discord voice bot for hands-free conversational AI. The bot joins a voice channel, listens via speech-to-text (Whisper), generates responses through an LLM (via OpenClaw gateway), and speaks back using text-to-speech (ElevenLabs).
 
 ## Architecture
 
@@ -49,13 +49,17 @@ cp src/channels.example.json src/channels.json
 The `default` entry is required. Additional entries let you `~switch` to topic-specific channels. Each entry has:
 - `displayName`: Human-readable name shown in `~channels`
 - `channelId`: Discord channel ID where transcripts are logged (leave empty for default log channel)
-- `topicPrompt`: Additional system prompt context appended to the base Watson prompt (`null` for default behavior)
+- `topicPrompt`: Additional system prompt context appended to the base voice prompt (`null` for default behavior)
 
 4. Start the bot:
 
 ```bash
 npm start
 ```
+
+## Customization
+
+Set `BOT_NAME` in your `.env` to give the bot a custom identity. This name is used in the system prompt (e.g., "You are Watson, a friendly and helpful AI assistant...") and in transcript logging. Defaults to `Assistant` if not set.
 
 ## Text Commands
 
@@ -73,18 +77,18 @@ Type these in any text channel the bot can read (use `~` prefix):
 
 ## Channel Switching
 
-Watson can target different Discord channels, each with a tailored system prompt. When you switch channels:
+The bot can target different Discord channels, each with a tailored system prompt. When you switch channels:
 
-1. Watson loads the last 50 messages from that Discord channel as conversation history
+1. The last 50 messages from that Discord channel are loaded as conversation history
 2. The system prompt is composed from the base voice prompt + the channel's `topicPrompt`
-3. Transcripts (your speech + Watson's replies) are logged to that channel
+3. Transcripts (your speech + the bot's replies) are logged to that channel
 
 You can switch to **named channels** defined in `channels.json`, or to **any channel by ID** — including forum posts and threads.
 
 ## Auto-Join / Auto-Leave
 
-- Watson automatically joins the voice channel when a user enters it
-- When all users leave, Watson waits 30 seconds then disconnects
+- The bot automatically joins the voice channel when a user enters it
+- When all users leave, the bot waits 30 seconds then disconnects
 
 ## Project Structure
 
@@ -107,7 +111,7 @@ src/
     channel-router.ts         # Channel switching, prompt composition, history
     session-transcript.ts     # JSONL session logging
   prompts/
-    watson-system.ts          # Base Watson system prompt
+    watson-system.ts          # Base voice system prompt
 ```
 
 ## Environment Variables
@@ -124,6 +128,7 @@ See [`.env.example`](.env.example) for the full list with descriptions.
 - `GATEWAY_TOKEN` — OpenClaw gateway auth token
 
 **Optional:**
+- `BOT_NAME` — Bot's display name and identity (defaults to `Assistant`)
 - `ELEVENLABS_VOICE_ID` — Voice to use (defaults to `JBFqnCBsd6RMkjVDRZzb`)
 - `GATEWAY_AGENT_ID` — OpenClaw agent (defaults to `main`)
 - `LOG_CHANNEL_ID` — Default text channel for transcript logging

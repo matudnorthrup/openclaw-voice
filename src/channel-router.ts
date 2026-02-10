@@ -202,7 +202,7 @@ export class ChannelRouter {
       for (const msg of sorted) {
         const content = msg.content
           .replace(/^\*\*You:\*\*\s*/i, '')
-          .replace(new RegExp(`^\\*\\*${config.botName}:\\*\\*\\s*`, 'i'), '');
+          .replace(/^\*\*Watson:\*\*\s*/i, '');
 
         if (!content.trim()) continue;
 

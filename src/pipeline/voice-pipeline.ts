@@ -6,6 +6,7 @@ import { transcribe } from '../services/whisper.js';
 import { getResponse } from '../services/claude.js';
 import { textToSpeechStream } from '../services/elevenlabs.js';
 import { SessionTranscript } from '../services/session-transcript.js';
+import { config } from '../config.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 
 export class VoicePipeline {
@@ -118,7 +119,7 @@ export class VoicePipeline {
       }
 
       // Log to text channel + session transcript
-      this.log(`**Watson:** ${responseText}`);
+      this.log(`**${config.botName}:** ${responseText}`);
       this.session.appendAssistantMessage(responseText, channelName);
 
       // Step 3: Text-to-speech + playback — stop waiting loop, start TTS

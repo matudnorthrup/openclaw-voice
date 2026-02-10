@@ -7,7 +7,7 @@ import { ChannelRouter } from './services/channel-router.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState } from 'discord.js';
 
-console.log('Watson Voice starting...');
+console.log(`${config.botName} Voice starting...`);
 
 const client = createClient();
 let pipeline: VoicePipeline | null = null;
