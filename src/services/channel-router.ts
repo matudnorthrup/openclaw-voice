@@ -247,18 +247,33 @@ export class ChannelRouter {
       // Skip system messages
       if (msg.role === 'system') continue;
 
+      const content = this.extractTextContent(msg.content);
+      if (!content) continue;
+
       // Messages injected from voice with label 'voice-user' are user messages
       if (msg.label === 'voice-user') {
-        messages.push({ role: 'user', content: msg.content });
+        messages.push({ role: 'user', content });
         continue;
       }
 
       // Keep user and assistant messages as-is
       if (msg.role === 'user' || msg.role === 'assistant') {
-        messages.push({ role: msg.role, content: msg.content });
+        messages.push({ role: msg.role, content });
       }
     }
     return messages;
+  }
+
+  /** Normalize content that may be a string or Anthropic-style content blocks. */
+  private extractTextContent(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .filter((b: any) => b.type === 'text' && b.text)
+        .map((b: any) => b.text)
+        .join('');
+    }
+    return String(content);
   }
 
   private async seedHistoryFromDiscord(name: string): Promise<Message[]> {
