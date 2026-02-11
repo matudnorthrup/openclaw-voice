@@ -29,6 +29,7 @@ export class ChannelRouter {
   private historyMap = new Map<string, Message[]>();
   private resolvedChannels = new Map<string, TextChannel>();
   private gatewaySync: GatewaySync | null = null;
+  private lastAccessed = new Map<string, number>();
 
   constructor(guild: Guild, gatewaySync?: GatewaySync) {
     this.guild = guild;
@@ -46,6 +47,33 @@ export class ChannelRouter {
   getActiveChannel(): { name: string } & ChannelDef {
     const def = channels[this.activeChannelName] || channels['default'];
     return { name: this.activeChannelName, ...def };
+  }
+
+  getRecentChannels(limit: number): { name: string; displayName: string }[] {
+    const active = this.activeChannelName;
+    const allNames = Object.keys(channels).filter((n) => n !== active);
+
+    // Sort by last accessed (most recent first), unvisited channels keep definition order at the end
+    allNames.sort((a, b) => {
+      const aTime = this.lastAccessed.get(a) ?? 0;
+      const bTime = this.lastAccessed.get(b) ?? 0;
+      if (aTime && bTime) return bTime - aTime;
+      if (aTime) return -1;
+      if (bTime) return 1;
+      return 0; // preserve definition order for unvisited
+    });
+
+    return allNames.slice(0, limit).map((name) => ({
+      name,
+      displayName: channels[name].displayName,
+    }));
+  }
+
+  getLastMessage(channelName?: string): { role: string; content: string } | null {
+    const name = channelName ?? this.activeChannelName;
+    const history = this.historyMap.get(name);
+    if (!history || history.length === 0) return null;
+    return history[history.length - 1];
   }
 
   getSystemPrompt(): string {
@@ -130,6 +158,7 @@ export class ChannelRouter {
       const seeded = await this.seedHistory(name);
       this.historyMap.set(name, seeded);
 
+      this.lastAccessed.set(name, Date.now());
       const historyCount = this.historyMap.get(name)?.length || 0;
       console.log(`Switched to channel: ${name} (${historyCount} history messages)`);
       return { success: true, historyCount, displayName: channels[name].displayName };
@@ -170,6 +199,7 @@ export class ChannelRouter {
     const seeded = await this.seedHistory(key);
     this.historyMap.set(key, seeded);
 
+    this.lastAccessed.set(key, Date.now());
     const historyCount = this.historyMap.get(key)?.length || 0;
     console.log(`Switched to ad-hoc channel: #${displayName} / type=${resolved.type} (${historyCount} history messages)`);
     return { success: true, historyCount, displayName: `#${displayName}` };
@@ -217,18 +247,33 @@ export class ChannelRouter {
       // Skip system messages
       if (msg.role === 'system') continue;
 
+      const content = this.extractTextContent(msg.content);
+      if (!content) continue;
+
       // Messages injected from voice with label 'voice-user' are user messages
       if (msg.label === 'voice-user') {
-        messages.push({ role: 'user', content: msg.content });
+        messages.push({ role: 'user', content });
         continue;
       }
 
       // Keep user and assistant messages as-is
       if (msg.role === 'user' || msg.role === 'assistant') {
-        messages.push({ role: msg.role, content: msg.content });
+        messages.push({ role: msg.role, content });
       }
     }
     return messages;
+  }
+
+  /** Normalize content that may be a string or Anthropic-style content blocks. */
+  private extractTextContent(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .filter((b: any) => b.type === 'text' && b.text)
+        .map((b: any) => b.text)
+        .join('');
+    }
+    return String(content);
   }
 
   private async seedHistoryFromDiscord(name: string): Promise<Message[]> {

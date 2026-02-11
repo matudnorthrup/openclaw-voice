@@ -7,6 +7,8 @@ import { getResponse } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
+import { parseVoiceCommand, matchChannelSelection, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
+import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel } from '../services/voice-settings.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
 
@@ -18,6 +20,7 @@ export class VoicePipeline {
   private session: SessionTranscript;
   private router: ChannelRouter | null = null;
   private gatewaySync: GatewaySync | null = null;
+  private awaitingSelection: { options: ChannelOption[]; timeout: NodeJS.Timeout } | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -100,6 +103,24 @@ export class VoicePipeline {
         return;
       }
 
+      // Step 1.5: Check for voice commands (bypass LLM)
+      if (this.awaitingSelection) {
+        console.log(`Channel selection input: "${transcript}"`);
+        await this.handleChannelSelection(transcript);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command (selection) complete: ${totalMs}ms total`);
+        return;
+      }
+
+      const command = parseVoiceCommand(transcript, config.botName);
+      if (command) {
+        console.log(`Voice command detected: ${command.type}`);
+        await this.handleVoiceCommand(command);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command complete: ${totalMs}ms total`);
+        return;
+      }
+
       const channelName = this.router?.getActiveChannel().name;
 
       // Log to text channel + session transcript
@@ -147,6 +168,180 @@ export class VoicePipeline {
     } finally {
       this.processing = false;
     }
+  }
+
+  private async handleVoiceCommand(command: VoiceCommand): Promise<void> {
+    switch (command.type) {
+      case 'switch':
+        await this.handleDirectSwitch(command.channel);
+        break;
+      case 'list':
+        await this.handleListChannels();
+        break;
+      case 'default':
+        await this.handleDefaultSwitch();
+        break;
+      case 'noise':
+        await this.handleNoise(command.level);
+        break;
+      case 'delay':
+        await this.handleDelay(command.value);
+        break;
+      case 'delay-adjust':
+        await this.handleDelayAdjust(command.direction);
+        break;
+      case 'settings':
+        await this.handleReadSettings();
+        break;
+    }
+  }
+
+  private async handleDirectSwitch(channelName: string): Promise<void> {
+    if (!this.router) return;
+
+    // Try to find the channel by fuzzy matching against known channels
+    const allChannels = this.router.listChannels();
+    const lower = channelName.toLowerCase();
+    const match = allChannels.find(
+      (c) =>
+        c.name.toLowerCase() === lower ||
+        c.displayName.toLowerCase() === lower ||
+        c.displayName.toLowerCase().includes(lower) ||
+        lower.includes(c.name.toLowerCase()),
+    );
+
+    const target = match ? match.name : channelName;
+    const result = await this.router.switchTo(target);
+
+    let responseText: string;
+    if (result.success) {
+      await this.onChannelSwitch();
+      responseText = this.buildSwitchConfirmation(result.displayName || target);
+    } else {
+      responseText = `I couldn't find a channel called ${channelName}.`;
+    }
+
+    await this.speakResponse(responseText);
+  }
+
+  private async handleListChannels(): Promise<void> {
+    if (!this.router) return;
+
+    const recent = this.router.getRecentChannels(5);
+    if (recent.length === 0) {
+      await this.speakResponse('There are no other channels available.');
+      return;
+    }
+
+    const options: ChannelOption[] = recent.map((ch, i) => ({
+      index: i + 1,
+      name: ch.name,
+      displayName: ch.displayName,
+    }));
+
+    const lines = options.map((o) => `${o.index}: ${o.displayName}`);
+    const responseText = `Here are your recent channels. ${lines.join('. ')}. Say a number or channel name.`;
+
+    // Enter selection mode with 15s timeout
+    this.awaitingSelection = {
+      options,
+      timeout: setTimeout(() => {
+        console.log('Channel selection timed out');
+        this.awaitingSelection = null;
+      }, 15_000),
+    };
+
+    await this.speakResponse(responseText);
+  }
+
+  private async handleChannelSelection(transcript: string): Promise<void> {
+    if (!this.awaitingSelection || !this.router) return;
+
+    const { options, timeout } = this.awaitingSelection;
+    clearTimeout(timeout);
+    this.awaitingSelection = null;
+
+    const selected = matchChannelSelection(transcript, options);
+    if (!selected) {
+      await this.speakResponse("I didn't catch that. You can try again by saying hey " + config.botName + ", change channels.");
+      return;
+    }
+
+    const result = await this.router.switchTo(selected.name);
+    if (result.success) {
+      await this.onChannelSwitch();
+      await this.speakResponse(this.buildSwitchConfirmation(result.displayName || selected.displayName));
+    } else {
+      await this.speakResponse(`I couldn't switch to ${selected.displayName}.`);
+    }
+  }
+
+  private async handleDefaultSwitch(): Promise<void> {
+    if (!this.router) return;
+
+    const result = await this.router.switchToDefault();
+    if (result.success) {
+      await this.onChannelSwitch();
+      await this.speakResponse(`Switched back to ${result.displayName || 'default'}.`);
+    } else {
+      await this.speakResponse("I couldn't switch to the default channel.");
+    }
+  }
+
+  private async handleNoise(level: string): Promise<void> {
+    const resolved = resolveNoiseLevel(level);
+    if (!resolved) {
+      await this.speakResponse("I didn't recognize that noise level. Try low, medium, or high.");
+      return;
+    }
+    setSpeechThreshold(resolved.threshold);
+    await this.speakResponse(`Noise threshold set to ${resolved.label}.`);
+  }
+
+  private async handleDelay(value: number): Promise<void> {
+    const clamped = Math.max(500, Math.min(10000, value));
+    setSilenceDuration(clamped);
+    await this.speakResponse(`Silence delay set to ${clamped} milliseconds.`);
+  }
+
+  private async handleDelayAdjust(direction: 'longer' | 'shorter'): Promise<void> {
+    const current = getVoiceSettings().silenceDurationMs;
+    const delta = direction === 'longer' ? 500 : -500;
+    const updated = Math.max(500, Math.min(10000, current + delta));
+    setSilenceDuration(updated);
+    const verb = direction === 'longer' ? 'increased' : 'decreased';
+    await this.speakResponse(`Silence delay ${verb} to ${updated} milliseconds.`);
+  }
+
+  private async handleReadSettings(): Promise<void> {
+    const s = getVoiceSettings();
+    await this.speakResponse(
+      `Silence delay: ${s.silenceDurationMs} milliseconds. ` +
+      `Noise threshold: ${s.speechThreshold}. ` +
+      `Minimum speech duration: ${s.minSpeechDurationMs} milliseconds.`,
+    );
+  }
+
+  private buildSwitchConfirmation(displayName: string): string {
+    const lastMsg = this.router?.getLastMessage();
+    let text = `Switched to ${displayName}.`;
+    if (lastMsg) {
+      const speaker = lastMsg.role === 'user' ? 'you' : config.botName;
+      // Truncate long messages for TTS
+      const content = lastMsg.content.length > 200
+        ? lastMsg.content.slice(0, 200) + '...'
+        : lastMsg.content;
+      text += ` The last message was from ${speaker}: ${content}`;
+    }
+    return text;
+  }
+
+  private async speakResponse(text: string): Promise<void> {
+    this.log(`**${config.botName}:** ${text}`);
+    const ttsStream = await textToSpeechStream(text);
+    this.player.stopWaitingLoop();
+    this.player.stopPlayback();
+    await this.player.playStream(ttsStream);
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {

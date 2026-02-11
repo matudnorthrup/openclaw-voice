@@ -12,6 +12,7 @@ export class AudioReceiver {
   private connection: VoiceConnection;
   private onUtterance: UtteranceHandler;
   private listening = false;
+  private activeSubscriptions = new Set<string>();
 
   constructor(
     connection: VoiceConnection,
@@ -40,6 +41,9 @@ export class AudioReceiver {
   }
 
   private subscribeToUser(userId: string): void {
+    if (this.activeSubscriptions.has(userId)) return;
+    this.activeSubscriptions.add(userId);
+
     const receiver = this.connection.receiver;
 
     const opusStream = receiver.subscribe(userId, {
@@ -65,6 +69,7 @@ export class AudioReceiver {
     });
 
     decoder.on('end', () => {
+      this.activeSubscriptions.delete(userId);
       const durationMs = Date.now() - startTime;
       const stereoPcm = Buffer.concat(chunks);
 
@@ -88,6 +93,7 @@ export class AudioReceiver {
     });
 
     opusStream.on('error', (err: Error) => {
+      this.activeSubscriptions.delete(userId);
       console.error(`Opus stream error for ${userId}:`, err.message);
     });
   }
