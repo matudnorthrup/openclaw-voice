@@ -146,13 +146,6 @@ export class ChannelRouter {
     if (seeded.length > 0) {
       this.historyMap.set(this.activeChannelName, seeded);
     }
-    // Debug: show last few messages so we can verify text messages appear
-    const current = this.historyMap.get(this.activeChannelName) || [];
-    const tail = current.slice(-5);
-    console.log(`[refreshHistory] ${current.length} msgs, last ${tail.length}:`);
-    for (const m of tail) {
-      console.log(`  [${m.role}] ${m.content.slice(0, 100)}`);
-    }
   }
 
   getHistory(): Message[] {
