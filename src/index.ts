@@ -5,7 +5,7 @@ import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
 import { GatewaySync } from './services/gateway-sync.js';
-import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
@@ -236,9 +236,9 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
   const embed = new EmbedBuilder()
     .setTitle('Voice Settings')
     .addFields(
-      { name: 'Silence Delay', value: `${s.silenceDurationMs}ms`, inline: true },
-      { name: 'Noise Threshold', value: `${s.speechThreshold} (${noiseLabel})`, inline: true },
-      { name: 'Min Speech Duration', value: `${s.minSpeechDurationMs}ms`, inline: true },
+      { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech. Raise if the bot is picking up background noise.', inline: false },
+      { name: `Silence Delay — ${s.silenceDurationMs}ms`, value: 'How long to wait after you stop talking before processing. Increase if the bot cuts you off mid-sentence.', inline: false },
+      { name: `Min Speech Duration — ${s.minSpeechDurationMs}ms`, value: 'Shortest utterance the bot will accept. Raise to ignore brief noises like coughs or "um".', inline: false },
     );
 
   const noiseRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
@@ -246,9 +246,9 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
       .setCustomId('noise-select')
       .setPlaceholder('Noise threshold')
       .addOptions(
-        { label: 'Low (300)', value: '300', default: s.speechThreshold === 300 },
-        { label: 'Medium (500)', value: '500', default: s.speechThreshold === 500 },
-        { label: 'High (800)', value: '800', default: s.speechThreshold === 800 },
+        { label: 'Low (300)', description: 'Quiet room, picks up soft speech', value: '300', default: s.speechThreshold === 300 },
+        { label: 'Medium (500)', description: 'Some background noise', value: '500', default: s.speechThreshold === 500 },
+        { label: 'High (800)', description: 'Noisy environment, ignores more', value: '800', default: s.speechThreshold === 800 },
       ),
   );
 
@@ -260,7 +260,15 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
     new ButtonBuilder().setCustomId('delay-plus').setLabel('+500ms').setStyle(ButtonStyle.Secondary),
   );
 
-  return { embeds: [embed], components: [noiseRow, delayRow] };
+  const minSpeechRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('minspeech-minus').setLabel('-100ms').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('minspeech-200').setLabel('200').setStyle(s.minSpeechDurationMs === 200 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('minspeech-300').setLabel('300').setStyle(s.minSpeechDurationMs === 300 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('minspeech-500').setLabel('500').setStyle(s.minSpeechDurationMs === 500 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('minspeech-plus').setLabel('+100ms').setStyle(ButtonStyle.Secondary),
+  );
+
+  return { embeds: [embed], components: [noiseRow, delayRow, minSpeechRow] };
 }
 
 // --- Slash command handler ---
@@ -287,6 +295,23 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     setSilenceDuration(newDelay);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('minspeech-')) {
+    const s = getVoiceSettings();
+    let newVal: number;
+
+    if (interaction.customId === 'minspeech-minus') {
+      newVal = Math.max(100, s.minSpeechDurationMs - 100);
+    } else if (interaction.customId === 'minspeech-plus') {
+      newVal = Math.min(2000, s.minSpeechDurationMs + 100);
+    } else {
+      newVal = parseInt(interaction.customId.slice('minspeech-'.length), 10);
+    }
+
+    setMinSpeechDuration(newVal);
     await interaction.update(buildSettingsPanel());
     return;
   }
