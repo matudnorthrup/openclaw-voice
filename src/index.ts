@@ -294,7 +294,7 @@ client.on('interactionCreate', async (interaction) => {
   // --- Slash commands ---
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === 'settings') {
+  if (interaction.commandName === 'watson-settings') {
     await interaction.reply({ ...buildSettingsPanel(), ephemeral: true });
     return;
   }
@@ -367,7 +367,7 @@ client.once('ready', async () => {
     .setDescription(`Switch ${config.botName} voice to this channel`);
 
   const settingsCommand = new SlashCommandBuilder()
-    .setName('settings')
+    .setName('watson-settings')
     .setDescription('View and adjust voice settings');
 
   const rest = new REST().setToken(config.discordToken);
@@ -376,7 +376,7 @@ client.once('ready', async () => {
       Routes.applicationGuildCommands(client.user!.id, config.discordGuildId),
       { body: [watsonCommand.toJSON(), settingsCommand.toJSON()] },
     );
-    console.log('Registered /watson and /settings slash commands');
+    console.log('Registered /watson and /watson-settings slash commands');
   } catch (err: any) {
     console.error('Failed to register slash commands:', err.message);
   }
