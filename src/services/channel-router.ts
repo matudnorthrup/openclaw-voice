@@ -141,6 +141,13 @@ export class ChannelRouter {
     return null;
   }
 
+  async refreshHistory(): Promise<void> {
+    const seeded = await this.seedHistory(this.activeChannelName);
+    if (seeded.length > 0) {
+      this.historyMap.set(this.activeChannelName, seeded);
+    }
+  }
+
   getHistory(): Message[] {
     return this.historyMap.get(this.activeChannelName) || [];
   }
