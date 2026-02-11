@@ -7,7 +7,7 @@ import { ChannelRouter } from './services/channel-router.js';
 import { GatewaySync } from './services/gateway-sync.js';
 import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
-import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember } from 'discord.js';
+import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
 console.log(`${config.botName} Voice starting...`);
 
@@ -224,10 +224,81 @@ function handleLeave(): void {
   leaveChannel();
 }
 
+// --- Settings panel builder ---
+
+function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBuilder<any>[] } {
+  const s = getVoiceSettings();
+
+  // Determine noise preset label
+  const presetMap: Record<number, string> = { 300: 'Low', 500: 'Medium', 800: 'High' };
+  const noiseLabel = presetMap[s.speechThreshold] ?? 'Custom';
+
+  const embed = new EmbedBuilder()
+    .setTitle('Voice Settings')
+    .addFields(
+      { name: 'Silence Delay', value: `${s.silenceDurationMs}ms`, inline: true },
+      { name: 'Noise Threshold', value: `${s.speechThreshold} (${noiseLabel})`, inline: true },
+      { name: 'Min Speech Duration', value: `${s.minSpeechDurationMs}ms`, inline: true },
+    );
+
+  const noiseRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('noise-select')
+      .setPlaceholder('Noise threshold')
+      .addOptions(
+        { label: 'Low (300)', value: '300', default: s.speechThreshold === 300 },
+        { label: 'Medium (500)', value: '500', default: s.speechThreshold === 500 },
+        { label: 'High (800)', value: '800', default: s.speechThreshold === 800 },
+      ),
+  );
+
+  const delayRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('delay-minus').setLabel('-500ms').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('delay-1000').setLabel('1000').setStyle(s.silenceDurationMs === 1000 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('delay-1500').setLabel('1500').setStyle(s.silenceDurationMs === 1500 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('delay-2000').setLabel('2000').setStyle(s.silenceDurationMs === 2000 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('delay-plus').setLabel('+500ms').setStyle(ButtonStyle.Secondary),
+  );
+
+  return { embeds: [embed], components: [noiseRow, delayRow] };
+}
+
 // --- Slash command handler ---
 
 client.on('interactionCreate', async (interaction) => {
+  // --- Component interactions (buttons / select menus) ---
+  if (interaction.isStringSelectMenu() && interaction.customId === 'noise-select') {
+    const value = parseInt(interaction.values[0], 10);
+    setSpeechThreshold(value);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('delay-')) {
+    const s = getVoiceSettings();
+    let newDelay: number;
+
+    if (interaction.customId === 'delay-minus') {
+      newDelay = Math.max(500, s.silenceDurationMs - 500);
+    } else if (interaction.customId === 'delay-plus') {
+      newDelay = Math.min(10000, s.silenceDurationMs + 500);
+    } else {
+      newDelay = parseInt(interaction.customId.slice('delay-'.length), 10);
+    }
+
+    setSilenceDuration(newDelay);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  // --- Slash commands ---
   if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'settings') {
+    await interaction.reply({ ...buildSettingsPanel(), ephemeral: true });
+    return;
+  }
+
   if (interaction.commandName !== 'watson') return;
 
   // Defer upfront — switchTo can trigger Discord message fetches that take time
@@ -290,20 +361,24 @@ client.once('ready', async () => {
     });
   }
 
-  // Register slash command
-  const command = new SlashCommandBuilder()
+  // Register slash commands
+  const watsonCommand = new SlashCommandBuilder()
     .setName('watson')
     .setDescription(`Switch ${config.botName} voice to this channel`);
+
+  const settingsCommand = new SlashCommandBuilder()
+    .setName('settings')
+    .setDescription('View and adjust voice settings');
 
   const rest = new REST().setToken(config.discordToken);
   try {
     await rest.put(
       Routes.applicationGuildCommands(client.user!.id, config.discordGuildId),
-      { body: [command.toJSON()] },
+      { body: [watsonCommand.toJSON(), settingsCommand.toJSON()] },
     );
-    console.log('Registered /watson slash command');
+    console.log('Registered /watson and /settings slash commands');
   } catch (err: any) {
-    console.error('Failed to register slash command:', err.message);
+    console.error('Failed to register slash commands:', err.message);
   }
 
   // Auto-join the configured voice channel
