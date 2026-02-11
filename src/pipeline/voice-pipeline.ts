@@ -132,6 +132,8 @@ export class VoicePipeline {
       if (this.router) {
         const activeChannel = this.router.getActiveChannel();
         const systemPrompt = this.router.getSystemPrompt();
+        // Refresh history from gateway to pick up text messages
+        await this.router.refreshHistory();
         const history = this.router.getHistory();
         // Use channel-scoped user ID so the gateway treats each channel as a separate conversation
         const scopedUserId = `${userId}:${activeChannel.name}`;
