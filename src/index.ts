@@ -253,18 +253,18 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
   );
 
   const delayRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('label-delay').setLabel('Silence Delay').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('delay-minus').setLabel('-500ms').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('delay-1000').setLabel('1000').setStyle(s.silenceDurationMs === 1000 ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('delay-1500').setLabel('1500').setStyle(s.silenceDurationMs === 1500 ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('delay-2000').setLabel('2000').setStyle(s.silenceDurationMs === 2000 ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('delay-plus').setLabel('+500ms').setStyle(ButtonStyle.Secondary),
   );
 
   const minSpeechRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder().setCustomId('label-minspeech').setLabel('Min Speech').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('minspeech-minus').setLabel('-100ms').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('minspeech-200').setLabel('200').setStyle(s.minSpeechDurationMs === 200 ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('minspeech-300').setLabel('300').setStyle(s.minSpeechDurationMs === 300 ? ButtonStyle.Primary : ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('minspeech-500').setLabel('500').setStyle(s.minSpeechDurationMs === 500 ? ButtonStyle.Primary : ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId('minspeech-plus').setLabel('+100ms').setStyle(ButtonStyle.Secondary),
   );
 
