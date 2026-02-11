@@ -1,7 +1,11 @@
 export type VoiceCommand =
   | { type: 'switch'; channel: string }
   | { type: 'list' }
-  | { type: 'default' };
+  | { type: 'default' }
+  | { type: 'noise'; level: string }
+  | { type: 'delay'; value: number }
+  | { type: 'delay-adjust'; direction: 'longer' | 'shorter' }
+  | { type: 'settings' };
 
 export interface ChannelOption {
   index: number;
@@ -31,6 +35,30 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "go back", "go to default", "go home", "default", "go to default channel"
   if (/^(?:go\s+back|go\s+(?:to\s+)?default(?:\s+channel)?|go\s+home|default)$/.test(rest)) {
     return { type: 'default' };
+  }
+
+  // "set noise to high", "noise low", "noise 800"
+  const noiseMatch = rest.match(/^(?:set\s+)?noise\s+(?:to\s+)?(.+)$/);
+  if (noiseMatch) {
+    return { type: 'noise', level: noiseMatch[1].trim() };
+  }
+
+  // "set delay to 3000", "delay 2000"
+  const delayMatch = rest.match(/^(?:set\s+)?delay\s+(?:to\s+)?(\d+)$/);
+  if (delayMatch) {
+    return { type: 'delay', value: parseInt(delayMatch[1], 10) };
+  }
+
+  // "longer delay", "shorter delay", "delay longer", "delay shorter"
+  const delayAdjustMatch = rest.match(/^(longer|shorter)\s+delay$|^delay\s+(longer|shorter)$/);
+  if (delayAdjustMatch) {
+    const direction = (delayAdjustMatch[1] || delayAdjustMatch[2]) as 'longer' | 'shorter';
+    return { type: 'delay-adjust', direction };
+  }
+
+  // "voice settings", "settings", "what are my settings", "what are the settings"
+  if (/^(?:voice\s+)?settings$|^what\s+are\s+(?:my|the)\s+settings$/.test(rest)) {
+    return { type: 'settings' };
   }
 
   return null;

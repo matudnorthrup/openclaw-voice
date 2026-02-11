@@ -8,6 +8,7 @@ import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import { parseVoiceCommand, matchChannelSelection, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
+import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel } from '../services/voice-settings.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
 
@@ -111,7 +112,7 @@ export class VoicePipeline {
         return;
       }
 
-      const command = this.router ? parseVoiceCommand(transcript, config.botName) : null;
+      const command = parseVoiceCommand(transcript, config.botName);
       if (command) {
         console.log(`Voice command detected: ${command.type}`);
         await this.handleVoiceCommand(command);
@@ -179,6 +180,18 @@ export class VoicePipeline {
         break;
       case 'default':
         await this.handleDefaultSwitch();
+        break;
+      case 'noise':
+        await this.handleNoise(command.level);
+        break;
+      case 'delay':
+        await this.handleDelay(command.value);
+        break;
+      case 'delay-adjust':
+        await this.handleDelayAdjust(command.direction);
+        break;
+      case 'settings':
+        await this.handleReadSettings();
         break;
     }
   }
@@ -273,6 +286,40 @@ export class VoicePipeline {
     } else {
       await this.speakResponse("I couldn't switch to the default channel.");
     }
+  }
+
+  private async handleNoise(level: string): Promise<void> {
+    const resolved = resolveNoiseLevel(level);
+    if (!resolved) {
+      await this.speakResponse("I didn't recognize that noise level. Try low, medium, or high.");
+      return;
+    }
+    setSpeechThreshold(resolved.threshold);
+    await this.speakResponse(`Noise threshold set to ${resolved.label}.`);
+  }
+
+  private async handleDelay(value: number): Promise<void> {
+    const clamped = Math.max(500, Math.min(10000, value));
+    setSilenceDuration(clamped);
+    await this.speakResponse(`Silence delay set to ${clamped} milliseconds.`);
+  }
+
+  private async handleDelayAdjust(direction: 'longer' | 'shorter'): Promise<void> {
+    const current = getVoiceSettings().silenceDurationMs;
+    const delta = direction === 'longer' ? 500 : -500;
+    const updated = Math.max(500, Math.min(10000, current + delta));
+    setSilenceDuration(updated);
+    const verb = direction === 'longer' ? 'increased' : 'decreased';
+    await this.speakResponse(`Silence delay ${verb} to ${updated} milliseconds.`);
+  }
+
+  private async handleReadSettings(): Promise<void> {
+    const s = getVoiceSettings();
+    await this.speakResponse(
+      `Silence delay: ${s.silenceDurationMs} milliseconds. ` +
+      `Noise threshold: ${s.speechThreshold}. ` +
+      `Minimum speech duration: ${s.minSpeechDurationMs} milliseconds.`,
+    );
   }
 
   private buildSwitchConfirmation(displayName: string): string {
