@@ -649,9 +649,12 @@ Use channel names (the part before the colon). Do not explain.`,
       if (this.inboxTracker?.isActive()) {
         await this.handleInboxCheck();
       }
-    } else {
-      // Default to wait for unrecognized input too
+    } else if (choice === 'wait') {
       await this.handleWaitMode(userId, originalTranscript);
+    } else {
+      // Cancel or unrecognized — discard the utterance
+      console.log(`Queue choice: discarded (input: "${transcript}")`);
+      this.player.stopWaitingLoop();
     }
   }
 

@@ -375,6 +375,30 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice("let's wait")).toBe('wait');
   });
 
+  it('returns "cancel" for "cancel"', () => {
+    expect(matchQueueChoice('cancel')).toBe('cancel');
+  });
+
+  it('returns "cancel" for "nevermind"', () => {
+    expect(matchQueueChoice('nevermind')).toBe('cancel');
+  });
+
+  it('returns "cancel" for "never mind"', () => {
+    expect(matchQueueChoice('never mind')).toBe('cancel');
+  });
+
+  it('returns "cancel" for "forget it"', () => {
+    expect(matchQueueChoice('forget it')).toBe('cancel');
+  });
+
+  it('returns "cancel" for "nothing"', () => {
+    expect(matchQueueChoice('nothing')).toBe('cancel');
+  });
+
+  it('returns "cancel" for "ignore that"', () => {
+    expect(matchQueueChoice('ignore that')).toBe('cancel');
+  });
+
   it('returns null for unrecognized input', () => {
     expect(matchQueueChoice('hello')).toBeNull();
   });

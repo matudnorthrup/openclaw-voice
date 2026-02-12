@@ -103,7 +103,7 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   return null;
 }
 
-export function matchQueueChoice(transcript: string): 'queue' | 'wait' | null {
+export function matchQueueChoice(transcript: string): 'queue' | 'wait' | 'cancel' | null {
   const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
   // Match "inbox" and variants — the prompt asks "Inbox, or wait?"
@@ -113,6 +113,9 @@ export function matchQueueChoice(transcript: string): 'queue' | 'wait' | null {
   // Match "wait" and common Whisper misrecognitions
   if (/\bwait\b/.test(input)) return 'wait';
   if (/^(?:wait|weight|wade|weigh|way|no|nope)$/.test(input)) return 'wait';
+
+  // Match "cancel" — discard the utterance entirely
+  if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|discard|nothing|ignore|ignore\s+that)$/.test(input)) return 'cancel';
 
   return null;
 }
