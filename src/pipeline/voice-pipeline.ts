@@ -127,7 +127,7 @@ export class VoicePipeline {
       this.player.startWaitingLoop();
 
       // Step 1: Speech-to-text
-      const transcript = await transcribe(wavBuffer);
+      let transcript = await transcribe(wavBuffer);
       if (!transcript || transcript.trim().length === 0) {
         console.log('Empty transcript, skipping');
         this.player.stopWaitingLoop();
@@ -153,10 +153,15 @@ export class VoicePipeline {
 
       if (this.newPostFlow) {
         console.log(`New-post flow (${this.newPostFlow.step}): "${transcript}"`);
-        await this.handleNewPostStep(transcript);
-        const totalMs = Date.now() - pipelineStart;
-        console.log(`Voice command (new-post flow) complete: ${totalMs}ms total`);
-        return;
+        const fallThrough = await this.handleNewPostStep(transcript);
+        if (!fallThrough) {
+          const totalMs = Date.now() - pipelineStart;
+          console.log(`Voice command (new-post flow) complete: ${totalMs}ms total`);
+          return;
+        }
+        // Body step completed — fall through to LLM with body as transcript
+        transcript = fallThrough;
+        console.log('New-post flow complete — falling through to LLM');
       }
 
       const command = parseVoiceCommand(transcript, config.botName);
@@ -274,8 +279,8 @@ export class VoicePipeline {
     this.resetNewPostTimeout(30_000);
   }
 
-  private async handleNewPostStep(transcript: string): Promise<void> {
-    if (!this.newPostFlow || !this.router) return;
+  private async handleNewPostStep(transcript: string): Promise<string | null> {
+    if (!this.newPostFlow || !this.router) return null;
 
     const { step } = this.newPostFlow;
 
@@ -287,14 +292,14 @@ export class VoicePipeline {
         clearTimeout(this.newPostFlow.timeout);
         this.newPostFlow = null;
         await this.speakResponse('Cancelled.');
-        return;
+        return null;
       }
 
       const match = this.router.findForumChannel(input);
       if (!match) {
         await this.speakResponse(`I couldn't find a forum matching "${transcript}". Try again, or say cancel.`);
         this.resetNewPostTimeout(30_000);
-        return;
+        return null;
       }
 
       clearTimeout(this.newPostFlow.timeout);
@@ -307,7 +312,7 @@ export class VoicePipeline {
 
       await this.speakResponse(`Got it, ${match.name}. What should the post be called?`);
       this.resetNewPostTimeout(30_000);
-      return;
+      return null;
     }
 
     if (step === 'title') {
@@ -317,7 +322,7 @@ export class VoicePipeline {
         clearTimeout(this.newPostFlow.timeout);
         this.newPostFlow = null;
         await this.speakResponse('Cancelled.');
-        return;
+        return null;
       }
 
       clearTimeout(this.newPostFlow.timeout);
@@ -330,7 +335,7 @@ export class VoicePipeline {
 
       await this.speakResponse(`Title: ${input}. What's the prompt?`);
       this.resetNewPostTimeout(60_000);
-      return;
+      return null;
     }
 
     if (step === 'body') {
@@ -340,7 +345,7 @@ export class VoicePipeline {
         clearTimeout(this.newPostFlow.timeout);
         this.newPostFlow = null;
         await this.speakResponse('Cancelled.');
-        return;
+        return null;
       }
 
       const { forumId, forumName, title } = this.newPostFlow;
@@ -352,11 +357,15 @@ export class VoicePipeline {
         await this.onChannelSwitch();
         console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
         await this.speakResponse(`Created ${title} in ${forumName}. You're now in the new thread.`);
+        // Return body so pipeline falls through to LLM
+        return body;
       } else {
         console.warn(`Forum post creation failed: ${result.error}`);
         await this.speakResponse(`Sorry, I couldn't create the post. ${result.error}`);
       }
     }
+
+    return null;
   }
 
   private async handleDirectSwitch(channelName: string): Promise<void> {
