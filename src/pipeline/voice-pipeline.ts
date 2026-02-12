@@ -412,7 +412,12 @@ export class VoicePipeline {
     this.dispatchToLLMFireAndForget(userId, transcript, item.id);
 
     // Brief confirmation — stop waiting loop quickly
-    await this.speakResponse(`Sent to ${displayName}.`);
+    // Confirm dispatch + mention ready items if any
+    const readyCount = this.queueState.getReadyItems().length;
+    const readySuffix = readyCount > 0
+      ? ` ${readyCount} response${readyCount > 1 ? 's' : ''} ready.`
+      : '';
+    await this.speakResponse(`Sent to ${displayName}.${readySuffix}`);
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
