@@ -137,6 +137,7 @@ export class GatewaySync {
               params: {
                 minProtocol: 3,
                 maxProtocol: 3,
+                scopes: ['operator.admin'],
                 client: { id: 'gateway-client', mode: 'backend', version: '1.0.0', platform: 'node' },
                 auth: { token: config.gatewayToken },
               },
