@@ -603,31 +603,18 @@ export class VoicePipeline {
         return;
       }
 
-      // Store as inbox flow and auto-read first channel
+      // Store as inbox flow for "next" traversal
       this.inboxFlow = activities;
-      this.inboxFlowIndex = 1;
+      this.inboxFlowIndex = 0;
 
       const channelNames = activities.map((a) => a.displayName);
       const pending = this.queueState.getPendingItems();
       const pendingSuffix = pending.length > 0 ? ` ${pending.length} still processing.` : '';
 
-      const summary = `New activity in ${channelNames.join(', ')}.${pendingSuffix}`;
-      const firstParts = await this.readInboxItem(activities[0]);
-      const remaining = activities.length - 1;
-      const remainingSuffix = remaining > 0
-        ? `${remaining} more. Say next or done.`
-        : "That's everything.";
-
-      if (remaining === 0) {
-        this.inboxFlow = null;
-        this.inboxFlowIndex = 0;
-      }
-
-      this.logToInbox(`**${config.botName}:** ${summary}`);
-      const ttsStream = await textToSpeechStream(`${summary} ${firstParts.join(' ')} ${remainingSuffix}`);
-      this.player.stopWaitingLoop();
-      this.player.stopPlayback();
-      await this.player.playStream(ttsStream);
+      await this.speakResponse(
+        `New activity in ${channelNames.join(', ')}.${pendingSuffix} Say next, done, or go to a channel.`,
+        { inbox: true },
+      );
       return;
     }
 
