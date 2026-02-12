@@ -257,14 +257,22 @@ export class VoicePipeline {
     let responseText: string;
     if (result.success) {
       await this.onChannelSwitch();
-      responseText = this.buildSwitchConfirmation(result.displayName || target);
 
-      // Queue-aware: auto-read ready item for this channel
-      if (this.queueState) {
-        const readyItem = this.queueState.getReadyByChannel(target);
-        if (readyItem) {
-          responseText += ` You have a queued response here.`;
+      // Check for queued responses — read them in full
+      const readyItems = this.queueState?.getReadyItems().filter(
+        (i) => i.channel === target,
+      ) ?? [];
+
+      if (readyItems.length > 0) {
+        responseText = `Switched to ${result.displayName || target}.`;
+        for (const item of readyItems) {
+          responseText += ` ${item.responseText}`;
+          this.queueState!.markHeard(item.id);
         }
+        this.responsePoller?.check();
+      } else {
+        // No queued responses — brief context from last message
+        responseText = this.buildSwitchConfirmation(result.displayName || target);
       }
 
       // Update inbox snapshot for this channel so it's marked as "seen"
@@ -731,21 +739,21 @@ export class VoicePipeline {
       }
     }
 
-    // Channel name + last message context
-    parts.push(this.buildSwitchConfirmation(activity.displayName));
+    // Check for queued responses — read in full if present
+    const readyItems = this.queueState?.getReadyItems().filter(
+      (i) => i.sessionKey === activity.sessionKey,
+    ) ?? [];
 
-    // Read voice-queued ready items for this channel
-    if (this.queueState) {
-      const readyItems = this.queueState.getReadyItems().filter(
-        (i) => i.sessionKey === activity.sessionKey,
-      );
-      if (readyItems.length > 0) {
-        for (const item of readyItems) {
-          parts.push(item.responseText);
-          this.queueState.markHeard(item.id);
-        }
-        this.responsePoller?.check();
+    if (readyItems.length > 0) {
+      parts.push(`Switched to ${activity.displayName}.`);
+      for (const item of readyItems) {
+        parts.push(item.responseText);
+        this.queueState!.markHeard(item.id);
       }
+      this.responsePoller?.check();
+    } else {
+      // No queued responses — brief context from last message
+      parts.push(this.buildSwitchConfirmation(activity.displayName));
     }
 
     // Mark this channel as seen
