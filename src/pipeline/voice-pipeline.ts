@@ -7,10 +7,13 @@ import { getResponse } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
-import { parseVoiceCommand, matchChannelSelection, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
+import { parseVoiceCommand, matchChannelSelection, matchQueueChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
 import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel } from '../services/voice-settings.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
+import type { QueueState } from '../services/queue-state.js';
+import type { ResponsePoller } from '../services/response-poller.js';
+import type { VoiceMode } from '../services/queue-state.js';
 
 export class VoicePipeline {
   private receiver: AudioReceiver;
@@ -21,6 +24,9 @@ export class VoicePipeline {
   private router: ChannelRouter | null = null;
   private gatewaySync: GatewaySync | null = null;
   private awaitingSelection: { options: ChannelOption[]; timeout: NodeJS.Timeout } | null = null;
+  private queueState: QueueState | null = null;
+  private responsePoller: ResponsePoller | null = null;
+  private awaitingQueueChoice: { timeout: NodeJS.Timeout } | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -43,6 +49,14 @@ export class VoicePipeline {
 
   setGatewaySync(sync: GatewaySync): void {
     this.gatewaySync = sync;
+  }
+
+  setQueueState(state: QueueState): void {
+    this.queueState = state;
+  }
+
+  setResponsePoller(poller: ResponsePoller): void {
+    this.responsePoller = poller;
   }
 
   async onChannelSwitch(): Promise<void> {
@@ -103,12 +117,20 @@ export class VoicePipeline {
         return;
       }
 
-      // Step 1.5: Check for voice commands (bypass LLM)
+      // Step 1.5: Check for awaiting responses (bypass LLM)
       if (this.awaitingSelection) {
         console.log(`Channel selection input: "${transcript}"`);
         await this.handleChannelSelection(transcript);
         const totalMs = Date.now() - pipelineStart;
         console.log(`Voice command (selection) complete: ${totalMs}ms total`);
+        return;
+      }
+
+      if (this.awaitingQueueChoice) {
+        console.log(`Queue choice input: "${transcript}"`);
+        await this.handleQueueChoiceResponse(transcript);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command (queue choice) complete: ${totalMs}ms total`);
         return;
       }
 
@@ -127,45 +149,15 @@ export class VoicePipeline {
         }
       }
 
-      const channelName = this.router?.getActiveChannel().name;
-
-      // Log to text channel + session transcript
-      this.log(`**You:** ${transcript}`);
-      this.session.appendUserMessage(userId, transcript, channelName);
-
-      // Step 2: LLM response
-      let responseText: string;
-      if (this.router) {
-        const activeChannel = this.router.getActiveChannel();
-        const systemPrompt = this.router.getSystemPrompt();
-        // Refresh history from gateway to pick up text messages
-        await this.router.refreshHistory();
-        const history = this.router.getHistory();
-        // Use channel-scoped user ID so the gateway treats each channel as a separate conversation
-        const scopedUserId = `${userId}:${activeChannel.name}`;
-        const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
-          systemPrompt,
-          history,
-        });
-        this.router.setHistory(updatedHistory);
-        responseText = response;
+      // Branch based on voice mode
+      const mode = this.queueState?.getMode() ?? 'wait';
+      if (mode === 'queue') {
+        await this.handleQueueMode(userId, transcript);
+      } else if (mode === 'ask') {
+        await this.handleAskMode(userId, transcript);
       } else {
-        const { response } = await getResponse(userId, transcript);
-        responseText = response;
+        await this.handleWaitMode(userId, transcript);
       }
-
-      // Log to text channel + session transcript
-      this.log(`**${config.botName}:** ${responseText}`);
-      this.session.appendAssistantMessage(responseText, channelName);
-
-      // Fire-and-forget sync to OpenClaw text session
-      void this.syncToOpenClaw(transcript, responseText);
-
-      // Step 3: Text-to-speech + playback — stop waiting loop, start TTS
-      const ttsStream = await textToSpeechStream(responseText);
-      this.player.stopWaitingLoop();
-      this.player.stopPlayback();
-      await this.player.playStream(ttsStream);
 
       const totalMs = Date.now() - pipelineStart;
       console.log(`Pipeline complete: ${totalMs}ms total`);
@@ -200,6 +192,15 @@ export class VoicePipeline {
         break;
       case 'settings':
         await this.handleReadSettings();
+        break;
+      case 'mode':
+        await this.handleModeSwitch(command.mode);
+        break;
+      case 'queue-status':
+        await this.handleQueueStatus();
+        break;
+      case 'queue-next':
+        await this.handleQueueNext();
         break;
     }
   }
@@ -237,6 +238,14 @@ export class VoicePipeline {
     if (result.success) {
       await this.onChannelSwitch();
       responseText = this.buildSwitchConfirmation(result.displayName || target);
+
+      // Queue-aware: auto-read ready item for this channel
+      if (this.queueState) {
+        const readyItem = this.queueState.getReadyByChannel(target);
+        if (readyItem) {
+          responseText += ` You have a queued response here.`;
+        }
+      }
     } else {
       responseText = `I couldn't find a channel called ${channelName}.`;
     }
@@ -340,6 +349,249 @@ export class VoicePipeline {
       `Noise threshold: ${s.speechThreshold}. ` +
       `Minimum speech duration: ${s.minSpeechDurationMs} milliseconds.`,
     );
+  }
+
+  private async handleWaitMode(userId: string, transcript: string): Promise<void> {
+    const channelName = this.router?.getActiveChannel().name;
+
+    this.log(`**You:** ${transcript}`);
+    this.session.appendUserMessage(userId, transcript, channelName);
+
+    let responseText: string;
+    if (this.router) {
+      const activeChannel = this.router.getActiveChannel();
+      const systemPrompt = this.router.getSystemPrompt();
+      await this.router.refreshHistory();
+      const history = this.router.getHistory();
+      const scopedUserId = `${userId}:${activeChannel.name}`;
+      const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
+        systemPrompt,
+        history,
+      });
+      this.router.setHistory(updatedHistory);
+      responseText = response;
+    } else {
+      const { response } = await getResponse(userId, transcript);
+      responseText = response;
+    }
+
+    this.log(`**${config.botName}:** ${responseText}`);
+    this.session.appendAssistantMessage(responseText, channelName);
+
+    void this.syncToOpenClaw(transcript, responseText);
+
+    const ttsStream = await textToSpeechStream(responseText);
+    this.player.stopWaitingLoop();
+    this.player.stopPlayback();
+    await this.player.playStream(ttsStream);
+  }
+
+  private async handleQueueMode(userId: string, transcript: string): Promise<void> {
+    if (!this.router || !this.queueState) {
+      // Fall back to wait mode if queue state not available
+      await this.handleWaitMode(userId, transcript);
+      return;
+    }
+
+    const activeChannel = this.router.getActiveChannel();
+    const channelName = activeChannel.name;
+    const displayName = (activeChannel as any).displayName || channelName;
+    const sessionKey = this.router.getActiveSessionKey();
+
+    this.log(`**You:** ${transcript}`);
+    this.session.appendUserMessage(userId, transcript, channelName);
+
+    // Enqueue and dispatch fire-and-forget
+    const item = this.queueState.enqueue({
+      channel: channelName,
+      displayName,
+      sessionKey,
+      userMessage: transcript,
+    });
+
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id);
+
+    // Brief confirmation — stop waiting loop quickly
+    await this.speakResponse(`Sent to ${displayName}.`);
+  }
+
+  private async handleAskMode(userId: string, transcript: string): Promise<void> {
+    // Speak the prompt, then await choice
+    await this.speakResponse('Queue or wait?');
+
+    this.awaitingQueueChoice = {
+      timeout: setTimeout(() => {
+        console.log('Queue choice timed out, defaulting to wait');
+        this.awaitingQueueChoice = null;
+        // Default to wait mode behavior
+        this.processing = true;
+        this.player.startWaitingLoop();
+        this.handleWaitMode(userId, transcript)
+          .catch((err) => {
+            console.error('Wait mode fallback error:', err);
+            this.player.stopWaitingLoop();
+            this.player.stopPlayback();
+          })
+          .finally(() => {
+            this.processing = false;
+          });
+      }, 10_000),
+    };
+
+    // Store transcript/userId for when choice comes in
+    (this.awaitingQueueChoice as any).userId = userId;
+    (this.awaitingQueueChoice as any).transcript = transcript;
+  }
+
+  private async handleQueueChoiceResponse(transcript: string): Promise<void> {
+    if (!this.awaitingQueueChoice) return;
+
+    const { timeout } = this.awaitingQueueChoice;
+    const userId = (this.awaitingQueueChoice as any).userId as string;
+    const originalTranscript = (this.awaitingQueueChoice as any).transcript as string;
+    clearTimeout(timeout);
+    this.awaitingQueueChoice = null;
+
+    const choice = matchQueueChoice(transcript);
+    if (choice === 'queue') {
+      await this.handleQueueMode(userId, originalTranscript);
+    } else {
+      // Default to wait for unrecognized input too
+      await this.handleWaitMode(userId, originalTranscript);
+    }
+  }
+
+  private dispatchToLLMFireAndForget(userId: string, transcript: string, queueItemId: string): void {
+    if (!this.router || !this.queueState) return;
+
+    const activeChannel = this.router.getActiveChannel();
+    const systemPrompt = this.router.getSystemPrompt();
+    const channelName = activeChannel.name;
+
+    // Capture state we need before the async work
+    const routerRef = this.router;
+    const queueRef = this.queueState;
+    const pollerRef = this.responsePoller;
+    const gatewaySync = this.gatewaySync;
+    const session = this.session;
+
+    void (async () => {
+      try {
+        await routerRef.refreshHistory();
+        const history = routerRef.getHistory();
+        const scopedUserId = `${userId}:${activeChannel.name}`;
+        const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
+          systemPrompt,
+          history,
+        });
+        routerRef.setHistory(updatedHistory);
+
+        // Generate summary (first sentence or first 100 chars)
+        const summary = response.length > 100
+          ? response.slice(0, 100) + '...'
+          : response;
+
+        queueRef.markReady(queueItemId, summary, response);
+        console.log(`Queue item ${queueItemId} ready (channel: ${channelName})`);
+
+        // Log + session transcript
+        this.log(`**${config.botName}:** ${response}`);
+        session.appendAssistantMessage(response, channelName);
+
+        // Sync to OpenClaw
+        if (gatewaySync?.isConnected() && routerRef) {
+          const sessionKey = routerRef.getActiveSessionKey();
+          await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+          await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+        }
+
+        pollerRef?.check();
+      } catch (err: any) {
+        console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
+      }
+    })();
+
+    this.responsePoller?.check();
+  }
+
+  private async handleModeSwitch(mode: VoiceMode): Promise<void> {
+    if (!this.queueState) {
+      await this.speakResponse('Queue mode is not available.');
+      return;
+    }
+
+    this.queueState.setMode(mode);
+    const labels: Record<VoiceMode, string> = {
+      wait: 'Wait mode. I will wait for each response before you can speak again.',
+      queue: 'Queue mode. Your messages will be dispatched and you can keep talking.',
+      ask: 'Ask mode. I will ask you whether to queue or wait for each message.',
+    };
+    await this.speakResponse(labels[mode]);
+  }
+
+  private async handleQueueStatus(): Promise<void> {
+    if (!this.queueState) {
+      await this.speakResponse('Queue mode is not available.');
+      return;
+    }
+
+    const ready = this.queueState.getReadyItems();
+    const pending = this.queueState.getPendingItems();
+
+    if (ready.length === 0 && pending.length === 0) {
+      await this.speakResponse('Your queue is empty.');
+      return;
+    }
+
+    const parts: string[] = [];
+    if (ready.length > 0) {
+      const channels = [...new Set(ready.map((r) => r.displayName))];
+      parts.push(`${ready.length} ready from ${channels.join(', ')}`);
+    }
+    if (pending.length > 0) {
+      parts.push(`${pending.length} still waiting`);
+    }
+
+    await this.speakResponse(`You have ${parts.join(', and ')}.`);
+  }
+
+  private async handleQueueNext(): Promise<void> {
+    if (!this.queueState) {
+      await this.speakResponse('Queue mode is not available.');
+      return;
+    }
+
+    const item = this.queueState.getNextReady();
+    if (!item) {
+      const pending = this.queueState.getPendingItems();
+      if (pending.length > 0) {
+        await this.speakResponse(`Nothing ready yet. ${pending.length} still waiting.`);
+      } else {
+        await this.speakResponse('Your queue is empty.');
+      }
+      return;
+    }
+
+    // Switch to the response's channel
+    if (this.router) {
+      const result = await this.router.switchTo(item.channel);
+      if (result.success) {
+        await this.onChannelSwitch();
+      }
+    }
+
+    // Read the response aloud
+    this.queueState.markHeard(item.id);
+    this.responsePoller?.check();
+
+    const remaining = this.queueState.getReadyItems().length;
+    const prefix = `From ${item.displayName}: `;
+    const suffix = remaining > 0 ? ` ${remaining} more in queue.` : '';
+
+    const ttsStream = await textToSpeechStream(prefix + item.responseText + suffix);
+    this.player.stopWaitingLoop();
+    this.player.stopPlayback();
+    await this.player.playStream(ttsStream);
   }
 
   private buildSwitchConfirmation(displayName: string): string {

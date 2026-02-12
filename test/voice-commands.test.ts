@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVoiceCommand } from '../src/services/voice-commands.js';
+import { parseVoiceCommand, matchQueueChoice } from '../src/services/voice-commands.js';
 
 const BOT = 'Watson';
 
@@ -101,5 +101,131 @@ describe('parseVoiceCommand — existing commands still work', () => {
   it('settings command', () => {
     const result = parseVoiceCommand('Hey Watson, settings', BOT);
     expect(result).toEqual({ type: 'settings' });
+  });
+});
+
+describe('parseVoiceCommand — mode commands', () => {
+  it('parses "queue mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, queue mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'queue' });
+  });
+
+  it('parses "switch to queue mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, switch to queue mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'queue' });
+  });
+
+  it('parses "wait mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, wait mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'wait' });
+  });
+
+  it('parses "switch to wait mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, switch to wait mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'wait' });
+  });
+
+  it('parses "ask mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, ask mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'ask' });
+  });
+
+  it('parses "switch to ask mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, switch to ask mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'ask' });
+  });
+});
+
+describe('parseVoiceCommand — queue status', () => {
+  it('parses "what do I have"', () => {
+    const result = parseVoiceCommand('Hey Watson, what do I have', BOT);
+    expect(result).toEqual({ type: 'queue-status' });
+  });
+
+  it('parses "check queue"', () => {
+    const result = parseVoiceCommand('Hey Watson, check queue', BOT);
+    expect(result).toEqual({ type: 'queue-status' });
+  });
+
+  it('parses "check the queue"', () => {
+    const result = parseVoiceCommand('Hey Watson, check the queue', BOT);
+    expect(result).toEqual({ type: 'queue-status' });
+  });
+
+  it('parses "what\'s waiting"', () => {
+    const result = parseVoiceCommand("Hey Watson, what's waiting", BOT);
+    expect(result).toEqual({ type: 'queue-status' });
+  });
+
+  it('parses "whats waiting" (no apostrophe)', () => {
+    const result = parseVoiceCommand('Hey Watson, whats waiting', BOT);
+    expect(result).toEqual({ type: 'queue-status' });
+  });
+
+  it('parses "queue status"', () => {
+    const result = parseVoiceCommand('Hey Watson, queue status', BOT);
+    expect(result).toEqual({ type: 'queue-status' });
+  });
+});
+
+describe('parseVoiceCommand — queue next', () => {
+  it('parses "next"', () => {
+    const result = parseVoiceCommand('Hey Watson, next', BOT);
+    expect(result).toEqual({ type: 'queue-next' });
+  });
+
+  it('parses "next response"', () => {
+    const result = parseVoiceCommand('Hey Watson, next response', BOT);
+    expect(result).toEqual({ type: 'queue-next' });
+  });
+
+  it('parses "next one"', () => {
+    const result = parseVoiceCommand('Hey Watson, next one', BOT);
+    expect(result).toEqual({ type: 'queue-next' });
+  });
+
+  it('parses "next message"', () => {
+    const result = parseVoiceCommand('Hey Watson, next message', BOT);
+    expect(result).toEqual({ type: 'queue-next' });
+  });
+});
+
+describe('matchQueueChoice', () => {
+  it('returns "queue" for "queue"', () => {
+    expect(matchQueueChoice('queue')).toBe('queue');
+  });
+
+  it('returns "queue" for "cue" (Whisper misrecognition)', () => {
+    expect(matchQueueChoice('cue')).toBe('queue');
+  });
+
+  it('returns "queue" for "q"', () => {
+    expect(matchQueueChoice('q')).toBe('queue');
+  });
+
+  it('returns "wait" for "wait"', () => {
+    expect(matchQueueChoice('wait')).toBe('wait');
+  });
+
+  it('returns "wait" for "weight" (Whisper misrecognition)', () => {
+    expect(matchQueueChoice('weight')).toBe('wait');
+  });
+
+  it('returns "wait" for "wade"', () => {
+    expect(matchQueueChoice('wade')).toBe('wait');
+  });
+
+  it('returns null for unrecognized input', () => {
+    expect(matchQueueChoice('hello')).toBeNull();
+  });
+
+  it('handles leading/trailing whitespace', () => {
+    expect(matchQueueChoice('  queue  ')).toBe('queue');
+    expect(matchQueueChoice('  wait  ')).toBe('wait');
+  });
+
+  it('is case-insensitive', () => {
+    expect(matchQueueChoice('QUEUE')).toBe('queue');
+    expect(matchQueueChoice('Wait')).toBe('wait');
   });
 });

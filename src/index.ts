@@ -6,6 +6,8 @@ import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
 import { GatewaySync } from './services/gateway-sync.js';
 import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { QueueState, type VoiceMode } from './services/queue-state.js';
+import { ResponsePoller } from './services/response-poller.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
@@ -22,6 +24,8 @@ let pipeline: VoicePipeline | null = null;
 let router: ChannelRouter | null = null;
 let gatewaySync: GatewaySync | null = null;
 let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
+let queueState: QueueState | null = null;
+let responsePoller: ResponsePoller | null = null;
 
 // --- Text command handlers ---
 
@@ -73,8 +77,10 @@ client.on('messageCreate', async (message) => {
     await message.reply(`Switched back to **default** channel. Loaded ${result.historyCount} history messages.`);
   } else if (message.content === '~voice') {
     const s = getVoiceSettings();
+    const mode = queueState?.getMode() ?? 'wait';
     await message.reply(
       `**Voice settings:**\n` +
+      `  Voice mode: **${mode}**\n` +
       `  Silence delay: **${s.silenceDurationMs}ms**\n` +
       `  Noise threshold: **${s.speechThreshold}** (higher = ignores more noise)\n` +
       `  Min speech duration: **${s.minSpeechDurationMs}ms**`,
@@ -97,6 +103,32 @@ client.on('messageCreate', async (message) => {
     }
     setSpeechThreshold(result.threshold);
     await message.reply(`Noise threshold set to **${result.label}** (${result.threshold}). Higher = ignores more background noise.`);
+  } else if (message.content.startsWith('~mode ')) {
+    const mode = message.content.slice('~mode '.length).trim().toLowerCase();
+    if (!['wait', 'queue', 'ask'].includes(mode)) {
+      await message.reply('Usage: `~mode <wait|queue|ask>`');
+      return;
+    }
+    if (!queueState) {
+      queueState = new QueueState();
+    }
+    queueState.setMode(mode as VoiceMode);
+    await message.reply(`Voice mode set to **${mode}**.`);
+  } else if (message.content === '~queue') {
+    if (!queueState) {
+      await message.reply('Queue state not initialized. Join voice first or use `~mode queue`.');
+      return;
+    }
+    const ready = queueState.getReadyItems();
+    const pending = queueState.getPendingItems();
+    const mode = queueState.getMode();
+    const lines = [`**Voice mode:** ${mode}`, `**Ready:** ${ready.length}`, `**Pending:** ${pending.length}`];
+    if (ready.length > 0) {
+      for (const item of ready) {
+        lines.push(`  - ${item.displayName}: "${item.summary}"`);
+      }
+    }
+    await message.reply(lines.join('\n'));
   }
 });
 
@@ -202,6 +234,18 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     if (gatewaySync) {
       pipeline.setGatewaySync(gatewaySync);
     }
+
+    // Wire queue state + poller
+    if (!queueState) {
+      queueState = new QueueState();
+    }
+    pipeline.setQueueState(queueState);
+    if (gatewaySync) {
+      responsePoller = new ResponsePoller(queueState, gatewaySync);
+      pipeline.setResponsePoller(responsePoller);
+      responsePoller.start(); // starts only if pending items exist from previous session
+    }
+
     pipeline.start();
 
     if (message) {
@@ -216,6 +260,10 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
 }
 
 function handleLeave(): void {
+  if (responsePoller) {
+    responsePoller.stop();
+    responsePoller = null;
+  }
   if (pipeline) {
     pipeline.stop();
     pipeline = null;
@@ -426,6 +474,10 @@ client.once('ready', async () => {
 
 function shutdown(): void {
   console.log('Shutting down gracefully...');
+  if (responsePoller) {
+    responsePoller.stop();
+    responsePoller = null;
+  }
   if (gatewaySync) {
     gatewaySync.destroy();
     gatewaySync = null;

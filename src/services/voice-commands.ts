@@ -1,3 +1,5 @@
+import type { VoiceMode } from './queue-state.js';
+
 export type VoiceCommand =
   | { type: 'switch'; channel: string }
   | { type: 'list' }
@@ -6,7 +8,10 @@ export type VoiceCommand =
   | { type: 'delay'; value: number }
   | { type: 'delay-adjust'; direction: 'longer' | 'shorter' }
   | { type: 'settings' }
-  | { type: 'new-post'; forum: string; title: string };
+  | { type: 'new-post'; forum: string; title: string }
+  | { type: 'mode'; mode: VoiceMode }
+  | { type: 'queue-status' }
+  | { type: 'queue-next' };
 
 export interface ChannelOption {
   index: number;
@@ -21,6 +26,12 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   if (!match) return null;
 
   const rest = trimmed.slice(match[0].length).trim().toLowerCase();
+
+  // Mode switch — must come before "switch to X" to avoid matching "switch to queue mode" as a channel switch
+  const modeMatch = rest.match(/^(?:switch\s+to\s+)?(queue|wait|ask)\s+mode$/);
+  if (modeMatch) {
+    return { type: 'mode', mode: modeMatch[1] as VoiceMode };
+  }
 
   // "switch to X", "go to X", "change to X", "move to X"
   const switchMatch = rest.match(/^(?:switch|go|change|move)\s+to\s+(.+)$/);
@@ -69,6 +80,28 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   if (newPostMatch) {
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
   }
+
+  // "what do I have", "check queue", "what's waiting", "queue status"
+  if (/^(?:what\s+do\s+i\s+have|check\s+(?:the\s+)?queue|what'?s\s+waiting|queue\s+status)$/.test(rest)) {
+    return { type: 'queue-status' };
+  }
+
+  // "next", "next response", "next one", "next message"
+  if (/^next(?:\s+(?:response|one|message))?$/.test(rest)) {
+    return { type: 'queue-next' };
+  }
+
+  return null;
+}
+
+export function matchQueueChoice(transcript: string): 'queue' | 'wait' | null {
+  const input = transcript.trim().toLowerCase();
+
+  // Match "queue" and common Whisper misrecognitions
+  if (/^(?:queue|cue|q|cute|cu)$/.test(input)) return 'queue';
+
+  // Match "wait" and common Whisper misrecognitions
+  if (/^(?:wait|weight|wade|weigh)$/.test(input)) return 'wait';
 
   return null;
 }
