@@ -482,6 +482,10 @@ export class VoicePipeline {
     const choice = matchQueueChoice(transcript);
     if (choice === 'queue') {
       await this.handleQueueMode(userId, originalTranscript);
+      // Auto-check inbox after dispatch in ask mode
+      if (this.inboxTracker?.isActive()) {
+        await this.handleInboxCheck();
+      }
     } else {
       // Default to wait for unrecognized input too
       await this.handleWaitMode(userId, originalTranscript);
