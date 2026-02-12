@@ -64,6 +64,16 @@ describe('parseVoiceCommand — new-post', () => {
     expect(result).toEqual({ type: 'new-post', forum: 'dev logs', title: 'deployment issues' });
   });
 
+  it('parses reversed order: "titled X in Y"', () => {
+    const result = parseVoiceCommand('Hey Watson, I would like you to create a forum post titled home heater systems in my research channel.', BOT);
+    expect(result).toEqual({ type: 'new-post', forum: 'research channel', title: 'home heater systems' });
+  });
+
+  it('parses reversed order: "called X in Y"', () => {
+    const result = parseVoiceCommand('Hey Watson, create a post called weekend plans in general', BOT);
+    expect(result).toEqual({ type: 'new-post', forum: 'general', title: 'weekend plans' });
+  });
+
   it('captures extended description after title', () => {
     const result = parseVoiceCommand(
       'Hey Watson, make a new post in 3D printing about multi-color printing. I have been experimenting with filament swapping and wanted to discuss approaches',

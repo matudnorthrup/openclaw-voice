@@ -76,13 +76,23 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'settings' };
   }
 
-  // Flexible: [filler] create/make/start [filler] post/thread/topic/discussion in [forum] about/called/titled [title]
-  // Drops ^ anchor and absorbs filler words so natural speech like "please create", "can you make", "I want to start" all work
+  // Flexible forum post creation — two word orders:
+  //   "create [filler] post/thread/topic in [forum] about/called/titled [title]"
+  //   "create [filler] post/thread/topic titled/called/about [title] in [forum]"
+  // Drops ^ anchor and absorbs filler so "please create", "can you make", "I want to start" all work
   const newPostMatch = rest.match(
     /(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
   );
   if (newPostMatch) {
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
+  }
+
+  // Reversed order: "create a post titled [title] in [forum]"
+  const newPostReverseMatch = rest.match(
+    /(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)\s+(?:about|called|titled)\s+(.+?)\s+in\s+(?:the\s+|my\s+)?(.+?)(?:\.|$)/
+  );
+  if (newPostReverseMatch) {
+    return { type: 'new-post', forum: newPostReverseMatch[2].trim(), title: newPostReverseMatch[1].trim() };
   }
 
   // "voice status", "status"
