@@ -28,6 +28,13 @@ export class VoicePipeline {
   private queueState: QueueState | null = null;
   private responsePoller: ResponsePoller | null = null;
   private awaitingQueueChoice: { timeout: NodeJS.Timeout } | null = null;
+  private newPostFlow: {
+    step: 'forum' | 'title' | 'body';
+    forumId?: string;
+    forumName?: string;
+    title?: string;
+    timeout: NodeJS.Timeout;
+  } | null = null;
   private inboxTracker: InboxTracker | null = null;
   private inboxFlow: ChannelActivity[] | null = null;
   private inboxFlowIndex = 0;
@@ -144,12 +151,22 @@ export class VoicePipeline {
         return;
       }
 
+      if (this.newPostFlow) {
+        console.log(`New-post flow (${this.newPostFlow.step}): "${transcript}"`);
+        await this.handleNewPostStep(transcript);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command (new-post flow) complete: ${totalMs}ms total`);
+        return;
+      }
+
       const command = parseVoiceCommand(transcript, config.botName);
       if (command) {
         if (command.type === 'new-post') {
-          console.log(`New-post command: forum="${command.forum}" title="${command.title}"`);
-          await this.handleNewPost(command.forum, command.title);
-          // Fall through to LLM — do NOT return
+          console.log('New-post command: starting guided flow');
+          await this.startNewPostFlow();
+          const totalMs = Date.now() - pipelineStart;
+          console.log(`Voice command complete: ${totalMs}ms total`);
+          return;
         } else {
           console.log(`Voice command detected: ${command.type}`);
           await this.handleVoiceCommand(command);
@@ -228,16 +245,112 @@ export class VoicePipeline {
     }
   }
 
-  private async handleNewPost(forum: string, title: string): Promise<void> {
+  private async startNewPostFlow(): Promise<void> {
     if (!this.router) return;
 
-    const result = await this.router.createForumPost(forum, title);
-    if (result.success) {
-      await this.onChannelSwitch();
-      console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
-      await this.speakResponse(`Created a new post in ${result.forumName}.`);
-    } else {
-      console.warn(`Forum post creation failed: ${result.error} — continuing in current channel`);
+    const forums = this.router.listForumChannels();
+    if (forums.length === 0) {
+      await this.speakResponse('There are no forum channels available.');
+      return;
+    }
+
+    const names = forums.map((f) => f.name).join(', ');
+    this.newPostFlow = {
+      step: 'forum',
+      timeout: setTimeout(() => {
+        console.log('New-post flow timed out');
+        this.newPostFlow = null;
+      }, 30_000),
+    };
+
+    await this.speakResponse(`Which forum? Available: ${names}.`);
+  }
+
+  private async handleNewPostStep(transcript: string): Promise<void> {
+    if (!this.newPostFlow || !this.router) return;
+
+    const { step } = this.newPostFlow;
+
+    if (step === 'forum') {
+      const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+
+      // Check for cancel
+      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/.test(input)) {
+        clearTimeout(this.newPostFlow.timeout);
+        this.newPostFlow = null;
+        await this.speakResponse('Cancelled.');
+        return;
+      }
+
+      const match = this.router.findForumChannel(input);
+      if (!match) {
+        await this.speakResponse(`I couldn't find a forum matching "${transcript}". Try again, or say cancel.`);
+        return;
+      }
+
+      clearTimeout(this.newPostFlow.timeout);
+      this.newPostFlow = {
+        step: 'title',
+        forumId: match.id,
+        forumName: match.name,
+        timeout: setTimeout(() => {
+          console.log('New-post flow timed out');
+          this.newPostFlow = null;
+        }, 30_000),
+      };
+
+      await this.speakResponse(`Got it, ${match.name}. What should the post be called?`);
+      return;
+    }
+
+    if (step === 'title') {
+      const input = transcript.trim().replace(/[.!?]+$/, '');
+
+      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(input)) {
+        clearTimeout(this.newPostFlow.timeout);
+        this.newPostFlow = null;
+        await this.speakResponse('Cancelled.');
+        return;
+      }
+
+      clearTimeout(this.newPostFlow.timeout);
+      this.newPostFlow = {
+        ...this.newPostFlow,
+        step: 'body',
+        title: input,
+        timeout: setTimeout(() => {
+          console.log('New-post flow timed out');
+          this.newPostFlow = null;
+        }, 30_000),
+      };
+
+      await this.speakResponse(`Title: ${input}. What's the prompt?`);
+      return;
+    }
+
+    if (step === 'body') {
+      const body = transcript.trim();
+
+      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(body.toLowerCase().replace(/[.!?,]+$/, ''))) {
+        clearTimeout(this.newPostFlow.timeout);
+        this.newPostFlow = null;
+        await this.speakResponse('Cancelled.');
+        return;
+      }
+
+      const { forumId, forumName, title } = this.newPostFlow;
+      clearTimeout(this.newPostFlow.timeout);
+      this.newPostFlow = null;
+
+      const result = await this.router.createForumPost(forumId!, title!, body);
+      if (result.success) {
+        await this.onChannelSwitch();
+        console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
+        await this.speakResponse(`Created ${title} in ${forumName}. You're now in the new thread.`);
+      } else {
+        console.warn(`Forum post creation failed: ${result.error}`);
+        await this.speakResponse(`Sorry, I couldn't create the post. ${result.error}`);
+      }
     }
   }
 

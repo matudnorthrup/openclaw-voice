@@ -3,112 +3,41 @@ import { parseVoiceCommand, matchQueueChoice } from '../src/services/voice-comma
 
 const BOT = 'Watson';
 
-describe('parseVoiceCommand — new-post', () => {
-  it('parses "make a new post in X about Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, make a new post in 3D printing about multi-color printing', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: '3d printing', title: 'multi-color printing' });
+describe('parseVoiceCommand — new-post (guided flow trigger)', () => {
+  it('parses "create a post"', () => {
+    expect(parseVoiceCommand('Hey Watson, create a post', BOT)).toEqual({ type: 'new-post' });
   });
 
-  it('parses "create a post in X about Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, create a post in general about weekend plans', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'general', title: 'weekend plans' });
+  it('parses "make a new post"', () => {
+    expect(parseVoiceCommand('Hey Watson, make a new post', BOT)).toEqual({ type: 'new-post' });
   });
 
-  it('parses "start a thread in X called Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, start a thread in dev logs called deployment checklist', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'dev logs', title: 'deployment checklist' });
+  it('parses "start a thread"', () => {
+    expect(parseVoiceCommand('Hey Watson, start a thread', BOT)).toEqual({ type: 'new-post' });
   });
 
-  it('parses "create a new thread in X titled Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, create a new thread in project ideas titled AI assistant', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'project ideas', title: 'ai assistant' });
+  it('parses "create a new forum topic"', () => {
+    expect(parseVoiceCommand('Hey Watson, create a new forum topic', BOT)).toEqual({ type: 'new-post' });
   });
 
-  it('parses with "the" before forum name', () => {
-    const result = parseVoiceCommand('Hey Watson, make a post in the health forum about sleep tracking', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'health forum', title: 'sleep tracking' });
+  it('parses "please create a new forum discussion"', () => {
+    expect(parseVoiceCommand('Hey Watson, please create a new forum discussion', BOT)).toEqual({ type: 'new-post' });
   });
 
-  it('parses with "my" before forum name', () => {
-    const result = parseVoiceCommand('Hey Watson, create a post in my journal called morning routine', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'journal', title: 'morning routine' });
+  it('parses "can you make a post"', () => {
+    expect(parseVoiceCommand('Hey Watson, can you make a post', BOT)).toEqual({ type: 'new-post' });
   });
 
-  it('parses without "a" or "new"', () => {
-    const result = parseVoiceCommand('Hey Watson, make post in cooking about best pasta recipe', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'cooking', title: 'best pasta recipe' });
-  });
-
-  it('parses without "new" but with "a"', () => {
-    const result = parseVoiceCommand('Hey Watson, create a thread in music about favorite albums', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'music', title: 'favorite albums' });
-  });
-
-  it('parses "create a new forum post in X called Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, create a new forum post in my open cloth forum called testing switching', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'open cloth forum', title: 'testing switching' });
-  });
-
-  it('handles "please" before the verb', () => {
-    const result = parseVoiceCommand('Hey Watson, please create a new forum topic in my research forum called motorcycle gear', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'research forum', title: 'motorcycle gear' });
-  });
-
-  it('handles "can you" before the verb', () => {
-    const result = parseVoiceCommand('Hey Watson, can you create a post in general about weekend plans', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'general', title: 'weekend plans' });
-  });
-
-  it('handles "I want to" before the verb', () => {
-    const result = parseVoiceCommand('Hey Watson, I want to make a new thread in dev logs about deployment issues', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'dev logs', title: 'deployment issues' });
-  });
-
-  it('parses reversed order: "titled X in Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, I would like you to create a forum post titled home heater systems in my research channel.', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'research channel', title: 'home heater systems' });
-  });
-
-  it('parses reversed order: "called X in Y"', () => {
-    const result = parseVoiceCommand('Hey Watson, create a post called weekend plans in general', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'general', title: 'weekend plans' });
-  });
-
-  it('captures extended description after title', () => {
-    const result = parseVoiceCommand(
-      'Hey Watson, make a new post in 3D printing about multi-color printing. I have been experimenting with filament swapping and wanted to discuss approaches',
-      BOT,
-    );
-    expect(result).toEqual({
-      type: 'new-post',
-      forum: '3d printing',
-      title: 'multi-color printing. i have been experimenting with filament swapping and wanted to discuss approaches',
-    });
-  });
-
-  it('forum capture is non-greedy (stops at delimiter)', () => {
-    const result = parseVoiceCommand('Hey Watson, make a new post in stuff about things about the topic', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'stuff', title: 'things about the topic' });
-  });
-
-  it('trims whitespace from forum and title', () => {
-    const result = parseVoiceCommand('Hey Watson, make a new post in  testing  about  some title ', BOT);
-    expect(result).toEqual({ type: 'new-post', forum: 'testing', title: 'some title' });
-  });
-
-  it('returns null when no delimiter (about/called/titled) is present', () => {
-    const result = parseVoiceCommand('Hey Watson, make a new post in general', BOT);
-    expect(result).toBeNull();
-  });
-
-  it('returns null for non-matching commands', () => {
-    const result = parseVoiceCommand('Hey Watson, tell me about forum posts', BOT);
-    expect(result).toBeNull();
+  it('parses "I want to create a post in general about stuff" (extras ignored)', () => {
+    expect(parseVoiceCommand('Hey Watson, I want to create a post in general about stuff', BOT)).toEqual({ type: 'new-post' });
   });
 
   it('returns null without trigger phrase', () => {
-    const result = parseVoiceCommand('make a new post in general about stuff', BOT);
-    expect(result).toBeNull();
+    expect(parseVoiceCommand('create a post', BOT)).toBeNull();
+  });
+
+  it('returns null for unrelated commands', () => {
+    expect(parseVoiceCommand('Hey Watson, tell me about forum posts', BOT)).toBeNull();
   });
 });
 

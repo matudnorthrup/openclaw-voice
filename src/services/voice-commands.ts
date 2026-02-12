@@ -8,7 +8,7 @@ export type VoiceCommand =
   | { type: 'delay'; value: number }
   | { type: 'delay-adjust'; direction: 'longer' | 'shorter' }
   | { type: 'settings' }
-  | { type: 'new-post'; forum: string; title: string }
+  | { type: 'new-post' }
   | { type: 'mode'; mode: VoiceMode }
   | { type: 'inbox-check' }
   | { type: 'inbox-next' }
@@ -76,23 +76,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'settings' };
   }
 
-  // Flexible forum post creation — two word orders:
-  //   "create [filler] post/thread/topic in [forum] about/called/titled [title]"
-  //   "create [filler] post/thread/topic titled/called/about [title] in [forum]"
-  // Drops ^ anchor and absorbs filler so "please create", "can you make", "I want to start" all work
-  const newPostMatch = rest.match(
-    /(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
-  );
-  if (newPostMatch) {
-    return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
-  }
-
-  // Reversed order: "create a post titled [title] in [forum]"
-  const newPostReverseMatch = rest.match(
-    /(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)\s+(?:about|called|titled)\s+(.+?)\s+in\s+(?:the\s+|my\s+)?(.+?)(?:\.|$)/
-  );
-  if (newPostReverseMatch) {
-    return { type: 'new-post', forum: newPostReverseMatch[2].trim(), title: newPostReverseMatch[1].trim() };
+  // "create/make/start a post/thread/topic" — kicks off guided multi-step flow
+  if (/(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)/.test(rest)) {
+    return { type: 'new-post' };
   }
 
   // "voice status", "status"

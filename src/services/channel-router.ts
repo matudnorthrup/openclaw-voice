@@ -216,40 +216,41 @@ export class ChannelRouter {
     return this.switchTo('default');
   }
 
-  async createForumPost(forumQuery: string, title: string): Promise<{ success: boolean; error?: string; threadId?: string; forumName?: string }> {
-    const lower = forumQuery.toLowerCase();
+  listForumChannels(): { name: string; id: string }[] {
+    return this.guild.channels.cache
+      .filter((ch): ch is ForumChannel => ch.type === ChannelType.GuildForum)
+      .map((f) => ({ name: f.name, id: f.id }));
+  }
 
-    // Search guild channels cache for forum channels
-    const forums = this.guild.channels.cache.filter(
-      (ch): ch is ForumChannel => ch.type === ChannelType.GuildForum,
-    );
-
-    // Fuzzy match: exact, includes, contained-by
-    const match = forums.find((f) => f.name.toLowerCase() === lower)
+  findForumChannel(query: string): { name: string; id: string } | null {
+    const forums = this.listForumChannels();
+    const lower = query.toLowerCase();
+    return forums.find((f) => f.name.toLowerCase() === lower)
       ?? forums.find((f) => f.name.toLowerCase().includes(lower))
-      ?? forums.find((f) => lower.includes(f.name.toLowerCase()));
+      ?? forums.find((f) => lower.includes(f.name.toLowerCase()))
+      ?? null;
+  }
 
-    if (!match) {
-      return { success: false, error: `No forum channel matching "${forumQuery}" found.` };
+  async createForumPost(forumId: string, title: string, body: string): Promise<{ success: boolean; error?: string; threadId?: string; forumName?: string }> {
+    const forum = this.guild.channels.cache.get(forumId) as ForumChannel | undefined;
+    if (!forum || forum.type !== ChannelType.GuildForum) {
+      return { success: false, error: `Forum channel ${forumId} not found.` };
     }
 
     try {
-      // First sentence becomes thread title (max 100 chars for Discord), full text becomes post body
-      const sentenceEnd = title.search(/[.!?]\s/);
-      let threadName = sentenceEnd > 0 ? title.slice(0, sentenceEnd) : title;
+      let threadName = title;
       if (threadName.length > 100) threadName = threadName.slice(0, 97) + '...';
-      const body = title.charAt(0).toUpperCase() + title.slice(1);
+      const content = body.charAt(0).toUpperCase() + body.slice(1);
 
-      const thread = await match.threads.create({
+      const thread = await forum.threads.create({
         name: threadName,
-        message: { content: body },
+        message: { content },
       });
 
-      // Switch the active session to the new thread
       await this.switchTo(thread.id);
 
-      console.log(`Created forum post "${title}" in #${match.name} (thread ${thread.id})`);
-      return { success: true, threadId: thread.id, forumName: match.name };
+      console.log(`Created forum post "${title}" in #${forum.name} (thread ${thread.id})`);
+      return { success: true, threadId: thread.id, forumName: forum.name };
     } catch (err: any) {
       return { success: false, error: `Failed to create thread: ${err.message}` };
     }
