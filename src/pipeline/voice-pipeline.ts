@@ -245,6 +245,16 @@ export class VoicePipeline {
     }
   }
 
+  private resetNewPostTimeout(ms: number): void {
+    if (this.newPostFlow) {
+      clearTimeout(this.newPostFlow.timeout);
+      this.newPostFlow.timeout = setTimeout(() => {
+        console.log('New-post flow timed out');
+        this.newPostFlow = null;
+      }, ms);
+    }
+  }
+
   private async startNewPostFlow(): Promise<void> {
     if (!this.router) return;
 
@@ -257,13 +267,11 @@ export class VoicePipeline {
     const names = forums.map((f) => f.name).join(', ');
     this.newPostFlow = {
       step: 'forum',
-      timeout: setTimeout(() => {
-        console.log('New-post flow timed out');
-        this.newPostFlow = null;
-      }, 30_000),
+      timeout: setTimeout(() => {}, 0), // placeholder, reset after speak
     };
 
     await this.speakResponse(`Which forum? Available: ${names}.`);
+    this.resetNewPostTimeout(30_000);
   }
 
   private async handleNewPostStep(transcript: string): Promise<void> {
@@ -285,6 +293,7 @@ export class VoicePipeline {
       const match = this.router.findForumChannel(input);
       if (!match) {
         await this.speakResponse(`I couldn't find a forum matching "${transcript}". Try again, or say cancel.`);
+        this.resetNewPostTimeout(30_000);
         return;
       }
 
@@ -293,13 +302,11 @@ export class VoicePipeline {
         step: 'title',
         forumId: match.id,
         forumName: match.name,
-        timeout: setTimeout(() => {
-          console.log('New-post flow timed out');
-          this.newPostFlow = null;
-        }, 30_000),
+        timeout: setTimeout(() => {}, 0),
       };
 
       await this.speakResponse(`Got it, ${match.name}. What should the post be called?`);
+      this.resetNewPostTimeout(30_000);
       return;
     }
 
@@ -318,13 +325,11 @@ export class VoicePipeline {
         ...this.newPostFlow,
         step: 'body',
         title: input,
-        timeout: setTimeout(() => {
-          console.log('New-post flow timed out');
-          this.newPostFlow = null;
-        }, 30_000),
+        timeout: setTimeout(() => {}, 0),
       };
 
       await this.speakResponse(`Title: ${input}. What's the prompt?`);
+      this.resetNewPostTimeout(60_000);
       return;
     }
 
