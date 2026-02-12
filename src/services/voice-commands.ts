@@ -76,9 +76,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'settings' };
   }
 
-  // "make/create/start a (new) post/thread in [forum] about/called/titled [title]"
+  // "make/create/start a (new) (forum) post/thread in [forum] about/called/titled [title]"
   const newPostMatch = rest.match(
-    /^(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?(?:post|thread)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
+    /^(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?(?:forum\s+)?(?:post|thread)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
   );
   if (newPostMatch) {
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };

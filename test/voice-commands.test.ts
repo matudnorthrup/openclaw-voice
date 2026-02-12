@@ -44,6 +44,11 @@ describe('parseVoiceCommand — new-post', () => {
     expect(result).toEqual({ type: 'new-post', forum: 'music', title: 'favorite albums' });
   });
 
+  it('parses "create a new forum post in X called Y"', () => {
+    const result = parseVoiceCommand('Hey Watson, create a new forum post in my open cloth forum called testing switching', BOT);
+    expect(result).toEqual({ type: 'new-post', forum: 'open cloth forum', title: 'testing switching' });
+  });
+
   it('captures extended description after title', () => {
     const result = parseVoiceCommand(
       'Hey Watson, make a new post in 3D printing about multi-color printing. I have been experimenting with filament swapping and wanted to discuss approaches',
