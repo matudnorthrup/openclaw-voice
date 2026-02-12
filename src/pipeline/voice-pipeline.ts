@@ -361,11 +361,19 @@ Use channel names (the part before the colon). Do not explain.`,
       const cleaned = result.trim();
       console.log(`LLM channel match result: "${cleaned}"`);
 
+      const findChannel = (query: string) =>
+        channels.find((c) =>
+          c.name.toLowerCase() === query ||
+          c.displayName.toLowerCase() === query ||
+          c.displayName.toLowerCase().startsWith(query) ||
+          query.startsWith(c.displayName.toLowerCase()),
+        );
+
       // Parse BEST: single confident match
       const bestMatch = cleaned.match(/^BEST:\s*(.+)$/i);
       if (bestMatch) {
         const name = bestMatch[1].trim().toLowerCase();
-        const matched = channels.find((c) => c.name.toLowerCase() === name);
+        const matched = findChannel(name);
         if (matched) {
           console.log(`LLM channel match: "${userPhrase}" → ${matched.name} (confident)`);
           return { best: matched, confident: true };
@@ -377,7 +385,7 @@ Use channel names (the part before the colon). Do not explain.`,
       if (optionsMatch) {
         const names = optionsMatch[1].split(',').map((n) => n.trim().toLowerCase());
         const resolved = names
-          .map((n) => channels.find((c) => c.name.toLowerCase() === n))
+          .map((n) => findChannel(n))
           .filter((c): c is { name: string; displayName: string; active: boolean } => c != null);
         if (resolved.length > 0) {
           console.log(`LLM channel match: "${userPhrase}" → ${resolved.length} options`);
@@ -386,7 +394,7 @@ Use channel names (the part before the colon). Do not explain.`,
       }
 
       // Single name without prefix (backwards compat / fallback)
-      const fallback = channels.find((c) => c.name.toLowerCase() === cleaned.toLowerCase());
+      const fallback = findChannel(cleaned.toLowerCase());
       if (fallback) {
         return { best: fallback, confident: true };
       }
