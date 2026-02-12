@@ -443,7 +443,7 @@ export class VoicePipeline {
           .finally(() => {
             this.processing = false;
           });
-      }, 10_000),
+      }, 20_000),
     };
 
     // Store transcript/userId for when choice comes in
