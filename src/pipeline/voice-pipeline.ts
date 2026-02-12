@@ -406,11 +406,6 @@ export class VoicePipeline {
       parts.push(`Channel: ${displayName}.`);
     }
 
-    // Inbox status
-    if (this.inboxTracker?.isActive()) {
-      parts.push('Inbox is active.');
-    }
-
     // Queue items
     if (this.queueState) {
       const ready = this.queueState.getReadyItems().length;
