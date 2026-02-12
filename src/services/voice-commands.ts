@@ -88,8 +88,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'inbox-check' };
   }
 
-  // "next", "next response", "next one", "next message", "next channel"
-  if (/^next(?:\s+(?:response|one|message|channel))?$/.test(rest)) {
+  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on"
+  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(rest)) {
     return { type: 'inbox-next' };
   }
 

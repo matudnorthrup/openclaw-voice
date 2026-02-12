@@ -599,18 +599,31 @@ export class VoicePipeline {
         return;
       }
 
-      // Store as inbox flow for "next" traversal
+      // Store as inbox flow and auto-read first channel
       this.inboxFlow = activities;
-      this.inboxFlowIndex = 0;
+      this.inboxFlowIndex = 1;
 
       const channelNames = activities.map((a) => a.displayName);
       const pending = this.queueState.getPendingItems();
       const pendingSuffix = pending.length > 0 ? ` ${pending.length} still processing.` : '';
 
-      await this.speakResponse(
-        `New activity in ${channelNames.join(', ')}.${pendingSuffix} Say next to start reading.`,
-        { inbox: true },
-      );
+      const summary = `New activity in ${channelNames.join(', ')}.${pendingSuffix}`;
+      const firstParts = await this.readInboxItem(activities[0]);
+      const remaining = activities.length - 1;
+      const remainingSuffix = remaining > 0
+        ? `${remaining} more. Say next or done.`
+        : "That's everything.";
+
+      if (remaining === 0) {
+        this.inboxFlow = null;
+        this.inboxFlowIndex = 0;
+      }
+
+      this.logToInbox(`**${config.botName}:** ${summary}`);
+      const ttsStream = await textToSpeechStream(`${summary} ${firstParts.join(' ')} ${remainingSuffix}`);
+      this.player.stopWaitingLoop();
+      this.player.stopPlayback();
+      await this.player.playStream(ttsStream);
       return;
     }
 
@@ -659,37 +672,7 @@ export class VoicePipeline {
     }
 
     if (activity) {
-      // Switch to the channel
-      if (this.router) {
-        const result = await this.router.switchTo(activity.channelName);
-        if (result.success) {
-          await this.onChannelSwitch();
-        }
-      }
-
-      // Build TTS content — brief context, not full message dump
-      const parts: string[] = [];
-
-      // Channel name + last message context (like a normal switch)
-      parts.push(this.buildSwitchConfirmation(activity.displayName));
-
-      // Read voice-queued ready items for this channel
-      const readyItems = this.queueState.getReadyItems().filter(
-        (i) => i.sessionKey === activity!.sessionKey,
-      );
-      if (readyItems.length > 0) {
-        for (const item of readyItems) {
-          parts.push(item.responseText);
-          this.queueState.markHeard(item.id);
-        }
-        this.responsePoller?.check();
-      }
-
-      // Mark this channel as seen
-      if (this.inboxTracker) {
-        const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
-        this.inboxTracker.markSeen(activity.sessionKey, currentCount);
-      }
+      const parts = await this.readInboxItem(activity);
 
       // Report remaining
       const remaining = this.inboxFlow
@@ -697,7 +680,7 @@ export class VoicePipeline {
         : 0;
 
       if (remaining > 0) {
-        parts.push(`${remaining} more. Say next.`);
+        parts.push(`${remaining} more. Say next or done.`);
       } else {
         parts.push("That's everything.");
         this.inboxFlow = null;
@@ -745,6 +728,43 @@ export class VoicePipeline {
     await this.player.playStream(ttsStream);
   }
 
+  private async readInboxItem(activity: ChannelActivity): Promise<string[]> {
+    const parts: string[] = [];
+
+    // Switch to the channel
+    if (this.router) {
+      const result = await this.router.switchTo(activity.channelName);
+      if (result.success) {
+        await this.onChannelSwitch();
+      }
+    }
+
+    // Channel name + last message context
+    parts.push(this.buildSwitchConfirmation(activity.displayName));
+
+    // Read voice-queued ready items for this channel
+    if (this.queueState) {
+      const readyItems = this.queueState.getReadyItems().filter(
+        (i) => i.sessionKey === activity.sessionKey,
+      );
+      if (readyItems.length > 0) {
+        for (const item of readyItems) {
+          parts.push(item.responseText);
+          this.queueState.markHeard(item.id);
+        }
+        this.responsePoller?.check();
+      }
+    }
+
+    // Mark this channel as seen
+    if (this.inboxTracker) {
+      const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
+      this.inboxTracker.markSeen(activity.sessionKey, currentCount);
+    }
+
+    return parts;
+  }
+
   private async getCurrentMessageCount(sessionKey: string): Promise<number> {
     if (!this.gatewaySync?.isConnected()) return 0;
     const result = await this.gatewaySync.getHistory(sessionKey, 40);
@@ -754,8 +774,8 @@ export class VoicePipeline {
   private matchBareQueueCommand(transcript: string): VoiceCommand | null {
     const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
-    // "next", "next one", "next response", "next message", "next channel"
-    if (/^next(?:\s+(?:response|one|message|channel))?$/.test(input)) {
+    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on"
+    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(input)) {
       return { type: 'inbox-next' };
     }
 

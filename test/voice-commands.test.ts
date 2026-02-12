@@ -228,6 +228,31 @@ describe('parseVoiceCommand — inbox next', () => {
     const result = parseVoiceCommand('Hey Watson, next channel', BOT);
     expect(result).toEqual({ type: 'inbox-next' });
   });
+
+  it('parses "done"', () => {
+    const result = parseVoiceCommand('Hey Watson, done', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "I\'m done"', () => {
+    const result = parseVoiceCommand("Hey Watson, I'm done", BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "im done" (no apostrophe)', () => {
+    const result = parseVoiceCommand('Hey Watson, im done', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "I am done"', () => {
+    const result = parseVoiceCommand('Hey Watson, I am done', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "move on"', () => {
+    const result = parseVoiceCommand('Hey Watson, move on', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
 });
 
 describe('matchQueueChoice', () => {
