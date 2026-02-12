@@ -235,6 +235,7 @@ export class VoicePipeline {
     if (result.success) {
       await this.onChannelSwitch();
       console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
+      await this.speakResponse(`Created a new post in ${result.forumName}.`);
     } else {
       console.warn(`Forum post creation failed: ${result.error} — continuing in current channel`);
     }
