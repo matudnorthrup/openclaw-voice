@@ -19,6 +19,7 @@ export interface QueuedResponse {
 interface QueueStateData {
   mode: VoiceMode;
   items: QueuedResponse[];
+  channelSnapshots?: Record<string, number>;
 }
 
 const STATE_PATH = `${process.env['HOME']}/clawd/voice-queue-state.json`;
@@ -26,6 +27,7 @@ const STATE_PATH = `${process.env['HOME']}/clawd/voice-queue-state.json`;
 export class QueueState {
   private mode: VoiceMode = 'wait';
   private items: QueuedResponse[] = [];
+  private channelSnapshots: Record<string, number> = {};
 
   constructor() {
     this.load();
@@ -97,21 +99,37 @@ export class QueueState {
     return this.items.find((i) => i.status === 'ready' && i.channel === channel) ?? null;
   }
 
+  getSnapshots(): Record<string, number> {
+    return { ...this.channelSnapshots };
+  }
+
+  setSnapshots(snapshots: Record<string, number>): void {
+    this.channelSnapshots = { ...snapshots };
+    this.save();
+  }
+
+  clearSnapshots(): void {
+    this.channelSnapshots = {};
+    this.save();
+  }
+
   private load(): void {
     try {
       const raw = readFileSync(STATE_PATH, 'utf-8');
       const data: QueueStateData = JSON.parse(raw);
       this.mode = data.mode || 'wait';
       this.items = data.items || [];
+      this.channelSnapshots = data.channelSnapshots || {};
     } catch {
       // File doesn't exist or is corrupt — start fresh
       this.mode = 'wait';
       this.items = [];
+      this.channelSnapshots = {};
     }
   }
 
   private save(): void {
-    const data: QueueStateData = { mode: this.mode, items: this.items };
+    const data: QueueStateData = { mode: this.mode, items: this.items, channelSnapshots: this.channelSnapshots };
     try {
       mkdirSync(dirname(STATE_PATH), { recursive: true });
       writeFileSync(STATE_PATH, JSON.stringify(data, null, 2));

@@ -8,6 +8,7 @@ import { GatewaySync } from './services/gateway-sync.js';
 import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
 import { QueueState, type VoiceMode } from './services/queue-state.js';
 import { ResponsePoller } from './services/response-poller.js';
+import { InboxTracker } from './services/inbox-tracker.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
@@ -244,6 +245,19 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       responsePoller = new ResponsePoller(queueState, gatewaySync);
       pipeline.setResponsePoller(responsePoller);
       responsePoller.start(); // starts only if pending items exist from previous session
+
+      // Wire inbox tracker
+      const inboxTracker = new InboxTracker(queueState, gatewaySync);
+      pipeline.setInboxTracker(inboxTracker);
+
+      // Auto-activate inbox if already in queue/ask mode (restart recovery)
+      const currentMode = queueState.getMode();
+      if (currentMode === 'queue' || currentMode === 'ask') {
+        const channels = router.getAllChannelSessionKeys();
+        inboxTracker.activate(channels).catch((err) => {
+          console.warn(`InboxTracker auto-activate failed: ${err.message}`);
+        });
+      }
     }
 
     pipeline.start();

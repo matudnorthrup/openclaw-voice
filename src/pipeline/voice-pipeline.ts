@@ -14,6 +14,7 @@ import type { GatewaySync } from '../services/gateway-sync.js';
 import type { QueueState } from '../services/queue-state.js';
 import type { ResponsePoller } from '../services/response-poller.js';
 import type { VoiceMode } from '../services/queue-state.js';
+import type { InboxTracker, ChannelActivity } from '../services/inbox-tracker.js';
 
 export class VoicePipeline {
   private receiver: AudioReceiver;
@@ -27,6 +28,9 @@ export class VoicePipeline {
   private queueState: QueueState | null = null;
   private responsePoller: ResponsePoller | null = null;
   private awaitingQueueChoice: { timeout: NodeJS.Timeout } | null = null;
+  private inboxTracker: InboxTracker | null = null;
+  private inboxFlow: ChannelActivity[] | null = null;
+  private inboxFlowIndex = 0;
 
   constructor(
     connection: VoiceConnection,
@@ -57,6 +61,10 @@ export class VoicePipeline {
 
   setResponsePoller(poller: ResponsePoller): void {
     this.responsePoller = poller;
+  }
+
+  setInboxTracker(tracker: InboxTracker): void {
+    this.inboxTracker = tracker;
   }
 
   async onChannelSwitch(): Promise<void> {
@@ -206,11 +214,11 @@ export class VoicePipeline {
       case 'mode':
         await this.handleModeSwitch(command.mode);
         break;
-      case 'queue-status':
-        await this.handleQueueStatus();
+      case 'inbox-check':
+        await this.handleInboxCheck();
         break;
-      case 'queue-next':
-        await this.handleQueueNext();
+      case 'inbox-next':
+        await this.handleInboxNext();
         break;
     }
   }
@@ -255,6 +263,13 @@ export class VoicePipeline {
         if (readyItem) {
           responseText += ` You have a queued response here.`;
         }
+      }
+
+      // Update inbox snapshot for this channel so it drops from inbox
+      if (this.inboxTracker?.isActive() && this.router) {
+        const sessionKey = this.router.getActiveSessionKey();
+        const count = await this.getCurrentMessageCount(sessionKey);
+        this.inboxTracker.markSeen(sessionKey, count);
       }
     } else {
       responseText = `I couldn't find a channel called ${channelName}.`;
@@ -422,13 +437,23 @@ export class VoicePipeline {
     this.dispatchToLLMFireAndForget(userId, transcript, item.id);
 
     // Brief confirmation — stop waiting loop quickly
-    // Confirm dispatch + list ready items by channel
-    const readyItems = this.queueState.getReadyItems();
+    // Confirm dispatch + summarize inbox activity
     let readySuffix = '';
-    if (readyItems.length > 0) {
-      const channels = [...new Set(readyItems.map((r) => r.displayName))];
-      const channelList = channels.map((ch, i) => `${i + 1}. ${ch}`).join('. ');
-      readySuffix = ` ${readyItems.length} response${readyItems.length > 1 ? 's' : ''} ready. ${channelList}.`;
+    if (this.inboxTracker?.isActive() && this.router) {
+      const channels = this.router.getAllChannelSessionKeys();
+      const activities = await this.inboxTracker.checkInbox(channels);
+      if (activities.length > 0) {
+        const channelList = activities.map((a, i) => `${i + 1}. ${a.displayName}`).join('. ');
+        const totalReady = activities.reduce((sum, a) => sum + a.queuedReadyCount + a.newMessageCount, 0);
+        readySuffix = ` ${totalReady} item${totalReady > 1 ? 's' : ''} across ${activities.length} channel${activities.length > 1 ? 's' : ''}. ${channelList}.`;
+      }
+    } else {
+      const readyItems = this.queueState.getReadyItems();
+      if (readyItems.length > 0) {
+        const channels = [...new Set(readyItems.map((r) => r.displayName))];
+        const channelList = channels.map((ch, i) => `${i + 1}. ${ch}`).join('. ');
+        readySuffix = ` ${readyItems.length} response${readyItems.length > 1 ? 's' : ''} ready. ${channelList}.`;
+      }
     }
     await this.speakResponse(`Sent to ${displayName}.${readySuffix}`);
   }
@@ -539,6 +564,22 @@ export class VoicePipeline {
     }
 
     this.queueState.setMode(mode);
+
+    // Activate/deactivate inbox based on mode
+    if (mode === 'queue' || mode === 'ask') {
+      if (this.inboxTracker && this.router) {
+        const channels = this.router.getAllChannelSessionKeys();
+        await this.inboxTracker.activate(channels);
+      }
+    } else {
+      // wait mode — deactivate inbox
+      if (this.inboxTracker) {
+        this.inboxTracker.deactivate();
+      }
+      this.inboxFlow = null;
+      this.inboxFlowIndex = 0;
+    }
+
     const labels: Record<VoiceMode, string> = {
       wait: 'Wait mode. I will wait for each response before you can speak again.',
       queue: 'Queue mode. Your messages will be dispatched and you can keep talking.',
@@ -547,17 +588,60 @@ export class VoicePipeline {
     await this.speakResponse(labels[mode]);
   }
 
-  private async handleQueueStatus(): Promise<void> {
+  private async handleInboxCheck(): Promise<void> {
     if (!this.queueState) {
       await this.speakResponse('Queue mode is not available.');
       return;
     }
 
+    // If inbox tracker is active, do a unified check
+    if (this.inboxTracker?.isActive() && this.router) {
+      const channels = this.router.getAllChannelSessionKeys();
+      const activities = await this.inboxTracker.checkInbox(channels);
+
+      if (activities.length === 0) {
+        // Also check pending queue items
+        const pending = this.queueState.getPendingItems();
+        if (pending.length > 0) {
+          await this.speakResponse(`Nothing new yet. ${pending.length} still processing.`);
+        } else {
+          await this.speakResponse('Nothing new.');
+        }
+        return;
+      }
+
+      // Store as inbox flow for "next" traversal
+      this.inboxFlow = activities;
+      this.inboxFlowIndex = 0;
+
+      const channelCount = activities.length;
+      const summaryParts = activities.map((a) => {
+        const parts: string[] = [];
+        if (a.newMessageCount > 0) {
+          parts.push(`${a.newMessageCount} new message${a.newMessageCount > 1 ? 's' : ''}`);
+        }
+        if (a.queuedReadyCount > 0) {
+          parts.push(`${a.queuedReadyCount} queued response${a.queuedReadyCount > 1 ? 's' : ''}`);
+        }
+        return `${a.displayName} has ${parts.join(' and ')}`;
+      });
+
+      const pending = this.queueState.getPendingItems();
+      const pendingSuffix = pending.length > 0 ? ` ${pending.length} still processing.` : '';
+
+      await this.speakResponse(
+        `You have new activity in ${channelCount} channel${channelCount > 1 ? 's' : ''}. ` +
+        `${summaryParts.join('. ')}.${pendingSuffix} Say next to start reading.`,
+      );
+      return;
+    }
+
+    // Fallback: queue-only check (wait mode or no inbox tracker)
     const ready = this.queueState.getReadyItems();
     const pending = this.queueState.getPendingItems();
 
     if (ready.length === 0 && pending.length === 0) {
-      await this.speakResponse('Your queue is empty.');
+      await this.speakResponse('Nothing new.');
       return;
     }
 
@@ -573,19 +657,94 @@ export class VoicePipeline {
     await this.speakResponse(`You have ${parts.join(', and ')}.`);
   }
 
-  private async handleQueueNext(): Promise<void> {
+  private async handleInboxNext(): Promise<void> {
     if (!this.queueState) {
       await this.speakResponse('Queue mode is not available.');
       return;
     }
 
+    // If we have an inbox flow from a prior check, use it
+    let activity: ChannelActivity | null = null;
+
+    if (this.inboxFlow && this.inboxFlowIndex < this.inboxFlow.length) {
+      activity = this.inboxFlow[this.inboxFlowIndex];
+      this.inboxFlowIndex++;
+    } else if (this.inboxTracker?.isActive() && this.router) {
+      // Fresh check if flow is exhausted or not started
+      const channels = this.router.getAllChannelSessionKeys();
+      const activities = await this.inboxTracker.checkInbox(channels);
+      if (activities.length > 0) {
+        this.inboxFlow = activities;
+        this.inboxFlowIndex = 1;
+        activity = activities[0];
+      }
+    }
+
+    if (activity) {
+      // Switch to the channel
+      if (this.router) {
+        const result = await this.router.switchTo(activity.channelName);
+        if (result.success) {
+          await this.onChannelSwitch();
+        }
+      }
+
+      // Build TTS content
+      const parts: string[] = [];
+      parts.push(`${activity.displayName}.`);
+
+      // Read new gateway messages
+      if (activity.newMessages.length > 0 && this.inboxTracker) {
+        const formatted = this.inboxTracker.formatForTTS(activity.newMessages);
+        if (formatted) {
+          parts.push(formatted);
+        }
+      }
+
+      // Read voice-queued ready items for this channel
+      const readyItems = this.queueState.getReadyItems().filter(
+        (i) => i.sessionKey === activity!.sessionKey,
+      );
+      for (const item of readyItems) {
+        parts.push(item.responseText);
+        this.queueState.markHeard(item.id);
+      }
+      this.responsePoller?.check();
+
+      // Update snapshot to mark this channel as seen
+      if (this.inboxTracker) {
+        const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
+        this.inboxTracker.markSeen(activity.sessionKey, currentCount);
+      }
+
+      // Report remaining
+      const remaining = this.inboxFlow
+        ? this.inboxFlow.length - this.inboxFlowIndex
+        : 0;
+
+      if (remaining > 0) {
+        parts.push(`${remaining} more channel${remaining > 1 ? 's' : ''}. Say next.`);
+      } else {
+        parts.push("That's everything.");
+        this.inboxFlow = null;
+        this.inboxFlowIndex = 0;
+      }
+
+      const ttsStream = await textToSpeechStream(parts.join(' '));
+      this.player.stopWaitingLoop();
+      this.player.stopPlayback();
+      await this.player.playStream(ttsStream);
+      return;
+    }
+
+    // Fallback: try old-style queue next (single item)
     const item = this.queueState.getNextReady();
     if (!item) {
       const pending = this.queueState.getPendingItems();
       if (pending.length > 0) {
         await this.speakResponse(`Nothing ready yet. ${pending.length} still waiting.`);
       } else {
-        await this.speakResponse('Your queue is empty.');
+        await this.speakResponse("That's everything.");
       }
       return;
     }
@@ -612,12 +771,18 @@ export class VoicePipeline {
     await this.player.playStream(ttsStream);
   }
 
+  private async getCurrentMessageCount(sessionKey: string): Promise<number> {
+    if (!this.gatewaySync?.isConnected()) return 0;
+    const result = await this.gatewaySync.getHistory(sessionKey, 40);
+    return result?.messages?.length ?? 0;
+  }
+
   private matchBareQueueCommand(transcript: string): VoiceCommand | null {
     const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
-    // "next", "next one", "next response", "next message"
-    if (/^next(?:\s+(?:response|one|message))?$/.test(input)) {
-      return { type: 'queue-next' };
+    // "next", "next one", "next response", "next message", "next channel"
+    if (/^next(?:\s+(?:response|one|message|channel))?$/.test(input)) {
+      return { type: 'inbox-next' };
     }
 
     // "go to X", "switch to X"
@@ -631,9 +796,9 @@ export class VoicePipeline {
       return { type: 'default' };
     }
 
-    // "what do I have", "check queue", etc.
-    if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?queue|what'?s\s+(?:waiting|ready)|queue\s+status)$/.test(input)) {
-      return { type: 'queue-status' };
+    // "what do I have", "check queue", "check inbox", "what's new", "inbox", etc.
+    if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status|inbox)$/.test(input)) {
+      return { type: 'inbox-check' };
     }
 
     return null;

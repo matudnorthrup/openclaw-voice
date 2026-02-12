@@ -136,57 +136,87 @@ describe('parseVoiceCommand — mode commands', () => {
   });
 });
 
-describe('parseVoiceCommand — queue status', () => {
+describe('parseVoiceCommand — inbox check', () => {
   it('parses "what do I have"', () => {
     const result = parseVoiceCommand('Hey Watson, what do I have', BOT);
-    expect(result).toEqual({ type: 'queue-status' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('parses "check queue"', () => {
     const result = parseVoiceCommand('Hey Watson, check queue', BOT);
-    expect(result).toEqual({ type: 'queue-status' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('parses "check the queue"', () => {
     const result = parseVoiceCommand('Hey Watson, check the queue', BOT);
-    expect(result).toEqual({ type: 'queue-status' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('parses "what\'s waiting"', () => {
     const result = parseVoiceCommand("Hey Watson, what's waiting", BOT);
-    expect(result).toEqual({ type: 'queue-status' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('parses "whats waiting" (no apostrophe)', () => {
     const result = parseVoiceCommand('Hey Watson, whats waiting', BOT);
-    expect(result).toEqual({ type: 'queue-status' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('parses "queue status"', () => {
     const result = parseVoiceCommand('Hey Watson, queue status', BOT);
-    expect(result).toEqual({ type: 'queue-status' });
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses "check inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, check inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses "check the inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, check the inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses "what\'s new"', () => {
+    const result = parseVoiceCommand("Hey Watson, what's new", BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses "whats new" (no apostrophe)', () => {
+    const result = parseVoiceCommand('Hey Watson, whats new', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses "inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 });
 
-describe('parseVoiceCommand — queue next', () => {
+describe('parseVoiceCommand — inbox next', () => {
   it('parses "next"', () => {
     const result = parseVoiceCommand('Hey Watson, next', BOT);
-    expect(result).toEqual({ type: 'queue-next' });
+    expect(result).toEqual({ type: 'inbox-next' });
   });
 
   it('parses "next response"', () => {
     const result = parseVoiceCommand('Hey Watson, next response', BOT);
-    expect(result).toEqual({ type: 'queue-next' });
+    expect(result).toEqual({ type: 'inbox-next' });
   });
 
   it('parses "next one"', () => {
     const result = parseVoiceCommand('Hey Watson, next one', BOT);
-    expect(result).toEqual({ type: 'queue-next' });
+    expect(result).toEqual({ type: 'inbox-next' });
   });
 
   it('parses "next message"', () => {
     const result = parseVoiceCommand('Hey Watson, next message', BOT);
-    expect(result).toEqual({ type: 'queue-next' });
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "next channel"', () => {
+    const result = parseVoiceCommand('Hey Watson, next channel', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
   });
 });
 

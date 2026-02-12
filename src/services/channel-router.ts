@@ -259,6 +259,17 @@ export class ChannelRouter {
     console.log(`Cleared history for channel: ${this.activeChannelName}`);
   }
 
+  getAllChannelSessionKeys(): { name: string; displayName: string; sessionKey: string }[] {
+    const result: { name: string; displayName: string; sessionKey: string }[] = [];
+    for (const [name, def] of Object.entries(channels)) {
+      if (!def.channelId && !def.sessionKey) continue;
+      const sessionKey = def.sessionKey
+        || (def.channelId ? GatewaySync.sessionKeyForChannel(def.channelId) : GatewaySync.defaultSessionKey);
+      result.push({ name, displayName: def.displayName, sessionKey });
+    }
+    return result;
+  }
+
   getActiveSessionKey(): string {
     const def = channels[this.activeChannelName];
     if (def?.sessionKey) return def.sessionKey;

@@ -10,8 +10,8 @@ export type VoiceCommand =
   | { type: 'settings' }
   | { type: 'new-post'; forum: string; title: string }
   | { type: 'mode'; mode: VoiceMode }
-  | { type: 'queue-status' }
-  | { type: 'queue-next' };
+  | { type: 'inbox-check' }
+  | { type: 'inbox-next' };
 
 export interface ChannelOption {
   index: number;
@@ -81,14 +81,14 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
   }
 
-  // "what do I have", "what do you have", "check queue", "what's waiting", "queue status"
-  if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?queue|what'?s\s+waiting|what'?s\s+ready|queue\s+status)$/.test(rest)) {
-    return { type: 'queue-status' };
+  // "what do I have", "what do you have", "check queue", "what's waiting", "queue status", "check inbox", "what's new", "inbox"
+  if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status|inbox)$/.test(rest)) {
+    return { type: 'inbox-check' };
   }
 
-  // "next", "next response", "next one", "next message"
-  if (/^next(?:\s+(?:response|one|message))?$/.test(rest)) {
-    return { type: 'queue-next' };
+  // "next", "next response", "next one", "next message", "next channel"
+  if (/^next(?:\s+(?:response|one|message|channel))?$/.test(rest)) {
+    return { type: 'inbox-next' };
   }
 
   return null;
