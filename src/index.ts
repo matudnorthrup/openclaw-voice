@@ -78,10 +78,11 @@ client.on('messageCreate', async (message) => {
     await message.reply(`Switched back to **default** channel. Loaded ${result.historyCount} history messages.`);
   } else if (message.content === '~voice') {
     const s = getVoiceSettings();
-    const mode = queueState?.getMode() ?? 'wait';
+    const rawMode = queueState?.getMode() ?? 'wait';
+    const modeLabel = rawMode === 'queue' ? 'inbox' : rawMode;
     await message.reply(
       `**Voice settings:**\n` +
-      `  Voice mode: **${mode}**\n` +
+      `  Voice mode: **${modeLabel}**\n` +
       `  Silence delay: **${s.silenceDurationMs}ms**\n` +
       `  Noise threshold: **${s.speechThreshold}** (higher = ignores more noise)\n` +
       `  Min speech duration: **${s.minSpeechDurationMs}ms**`,
@@ -105,9 +106,10 @@ client.on('messageCreate', async (message) => {
     setSpeechThreshold(result.threshold);
     await message.reply(`Noise threshold set to **${result.label}** (${result.threshold}). Higher = ignores more background noise.`);
   } else if (message.content.startsWith('~mode ')) {
-    const mode = message.content.slice('~mode '.length).trim().toLowerCase();
+    let mode = message.content.slice('~mode '.length).trim().toLowerCase();
+    if (mode === 'inbox') mode = 'queue';
     if (!['wait', 'queue', 'ask'].includes(mode)) {
-      await message.reply('Usage: `~mode <wait|queue|ask>`');
+      await message.reply('Usage: `~mode <wait|inbox|ask>`');
       return;
     }
     if (!queueState) {

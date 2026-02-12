@@ -27,10 +27,12 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
 
   const rest = trimmed.slice(match[0].length).trim().toLowerCase().replace(/[.!?,]+$/, '');
 
-  // Mode switch — must come before "switch to X" to avoid matching "switch to queue mode" as a channel switch
-  const modeMatch = rest.match(/^(?:switch\s+to\s+)?(queue|wait|ask)\s+mode$/);
+  // Mode switch — must come before "switch to X" to avoid matching "switch to inbox mode" as a channel switch
+  const modeMatch = rest.match(/^(?:switch\s+to\s+)?(inbox|queue|wait|ask)\s+mode$/);
   if (modeMatch) {
-    return { type: 'mode', mode: modeMatch[1] as VoiceMode };
+    const spoken = modeMatch[1];
+    const mode: VoiceMode = spoken === 'inbox' ? 'queue' : spoken as VoiceMode;
+    return { type: 'mode', mode };
   }
 
   // "switch to X", "go to X", "change to X", "move to X"

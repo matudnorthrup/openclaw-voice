@@ -580,8 +580,8 @@ export class VoicePipeline {
 
     const labels: Record<VoiceMode, string> = {
       wait: 'Wait mode. I will wait for each response before you can speak again.',
-      queue: 'Queue mode. Your messages will be dispatched and you can keep talking.',
-      ask: 'Ask mode. I will ask you whether to queue or wait for each message.',
+      queue: 'Inbox mode. Your messages will be dispatched and you can keep talking.',
+      ask: 'Ask mode. I will ask you whether to inbox or wait for each message.',
     };
     await this.speakResponse(labels[mode]);
   }

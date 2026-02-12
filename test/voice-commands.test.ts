@@ -105,13 +105,18 @@ describe('parseVoiceCommand — existing commands still work', () => {
 });
 
 describe('parseVoiceCommand — mode commands', () => {
-  it('parses "queue mode"', () => {
-    const result = parseVoiceCommand('Hey Watson, queue mode', BOT);
+  it('parses "inbox mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, inbox mode', BOT);
     expect(result).toEqual({ type: 'mode', mode: 'queue' });
   });
 
-  it('parses "switch to queue mode"', () => {
-    const result = parseVoiceCommand('Hey Watson, switch to queue mode', BOT);
+  it('parses "switch to inbox mode"', () => {
+    const result = parseVoiceCommand('Hey Watson, switch to inbox mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'queue' });
+  });
+
+  it('parses "queue mode" (legacy)', () => {
+    const result = parseVoiceCommand('Hey Watson, queue mode', BOT);
     expect(result).toEqual({ type: 'mode', mode: 'queue' });
   });
 
