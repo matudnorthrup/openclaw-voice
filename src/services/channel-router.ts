@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { Guild, ChannelType, TextChannel, type GuildBasedChannel } from 'discord.js';
+import { Guild, ChannelType, TextChannel, ForumChannel, type GuildBasedChannel } from 'discord.js';
 import { WATSON_SYSTEM_PROMPT } from '../prompts/watson-system.js';
 import { config } from '../config.js';
 import type { Message } from './claude.js';
@@ -214,6 +214,39 @@ export class ChannelRouter {
 
   switchToDefault(): Promise<{ success: boolean; error?: string; historyCount: number; displayName?: string }> {
     return this.switchTo('default');
+  }
+
+  async createForumPost(forumQuery: string, title: string): Promise<{ success: boolean; error?: string; threadId?: string; forumName?: string }> {
+    const lower = forumQuery.toLowerCase();
+
+    // Search guild channels cache for forum channels
+    const forums = this.guild.channels.cache.filter(
+      (ch): ch is ForumChannel => ch.type === ChannelType.GuildForum,
+    );
+
+    // Fuzzy match: exact, includes, contained-by
+    const match = forums.find((f) => f.name.toLowerCase() === lower)
+      ?? forums.find((f) => f.name.toLowerCase().includes(lower))
+      ?? forums.find((f) => lower.includes(f.name.toLowerCase()));
+
+    if (!match) {
+      return { success: false, error: `No forum channel matching "${forumQuery}" found.` };
+    }
+
+    try {
+      const thread = await match.threads.create({
+        name: title,
+        message: { content: title.charAt(0).toUpperCase() + title.slice(1) },
+      });
+
+      // Switch the active session to the new thread
+      await this.switchTo(thread.id);
+
+      console.log(`Created forum post "${title}" in #${match.name} (thread ${thread.id})`);
+      return { success: true, threadId: thread.id, forumName: match.name };
+    } catch (err: any) {
+      return { success: false, error: `Failed to create thread: ${err.message}` };
+    }
   }
 
   clearActiveHistory(): void {

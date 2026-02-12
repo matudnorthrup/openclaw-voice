@@ -5,7 +5,8 @@ export type VoiceCommand =
   | { type: 'noise'; level: string }
   | { type: 'delay'; value: number }
   | { type: 'delay-adjust'; direction: 'longer' | 'shorter' }
-  | { type: 'settings' };
+  | { type: 'settings' }
+  | { type: 'new-post'; forum: string; title: string };
 
 export interface ChannelOption {
   index: number;
@@ -59,6 +60,14 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "voice settings", "settings", "what are my settings", "what are the settings"
   if (/^(?:voice\s+)?settings$|^what\s+are\s+(?:my|the)\s+settings$/.test(rest)) {
     return { type: 'settings' };
+  }
+
+  // "make/create/start a (new) post/thread in [forum] about/called/titled [title]"
+  const newPostMatch = rest.match(
+    /^(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?(?:post|thread)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
+  );
+  if (newPostMatch) {
+    return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
   }
 
   return null;

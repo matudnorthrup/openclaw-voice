@@ -114,11 +114,17 @@ export class VoicePipeline {
 
       const command = parseVoiceCommand(transcript, config.botName);
       if (command) {
-        console.log(`Voice command detected: ${command.type}`);
-        await this.handleVoiceCommand(command);
-        const totalMs = Date.now() - pipelineStart;
-        console.log(`Voice command complete: ${totalMs}ms total`);
-        return;
+        if (command.type === 'new-post') {
+          console.log(`New-post command: forum="${command.forum}" title="${command.title}"`);
+          await this.handleNewPost(command.forum, command.title);
+          // Fall through to LLM — do NOT return
+        } else {
+          console.log(`Voice command detected: ${command.type}`);
+          await this.handleVoiceCommand(command);
+          const totalMs = Date.now() - pipelineStart;
+          console.log(`Voice command complete: ${totalMs}ms total`);
+          return;
+        }
       }
 
       const channelName = this.router?.getActiveChannel().name;
@@ -195,6 +201,18 @@ export class VoicePipeline {
       case 'settings':
         await this.handleReadSettings();
         break;
+    }
+  }
+
+  private async handleNewPost(forum: string, title: string): Promise<void> {
+    if (!this.router) return;
+
+    const result = await this.router.createForumPost(forum, title);
+    if (result.success) {
+      await this.onChannelSwitch();
+      console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
+    } else {
+      console.warn(`Forum post creation failed: ${result.error} — continuing in current channel`);
     }
   }
 
