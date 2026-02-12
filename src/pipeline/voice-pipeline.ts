@@ -266,9 +266,10 @@ export class VoicePipeline {
       if (llmResult) {
         if ('best' in llmResult) {
           match = allChannels.find((c) => c.name === llmResult.best.name) ?? undefined;
-          // If not a static channel, it might be a forum thread — switch by ID
+          // If not a static channel, it might be a forum thread — switch by numeric ID
           if (!match && llmResult.best.name.startsWith('id:')) {
-            const threadResult = await this.router.switchTo(llmResult.best.name);
+            const threadId = llmResult.best.name.slice(3);
+            const threadResult = await this.router.switchTo(threadId);
             if (threadResult.success) {
               await this.onChannelSwitch();
               await this.speakResponse(
