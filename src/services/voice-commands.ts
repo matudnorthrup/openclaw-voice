@@ -25,7 +25,7 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   const match = trimmed.match(trigger);
   if (!match) return null;
 
-  const rest = trimmed.slice(match[0].length).trim().toLowerCase();
+  const rest = trimmed.slice(match[0].length).trim().toLowerCase().replace(/[.!?,]+$/, '');
 
   // Mode switch — must come before "switch to X" to avoid matching "switch to queue mode" as a channel switch
   const modeMatch = rest.match(/^(?:switch\s+to\s+)?(queue|wait|ask)\s+mode$/);
