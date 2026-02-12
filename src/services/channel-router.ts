@@ -234,9 +234,14 @@ export class ChannelRouter {
     }
 
     try {
+      // First sentence becomes thread title, full text becomes post body
+      const sentenceEnd = title.search(/[.!?]\s/);
+      const threadName = sentenceEnd > 0 ? title.slice(0, sentenceEnd) : title;
+      const body = title.charAt(0).toUpperCase() + title.slice(1);
+
       const thread = await match.threads.create({
-        name: title,
-        message: { content: title.charAt(0).toUpperCase() + title.slice(1) },
+        name: threadName,
+        message: { content: body },
       });
 
       // Switch the active session to the new thread

@@ -44,6 +44,18 @@ describe('parseVoiceCommand — new-post', () => {
     expect(result).toEqual({ type: 'new-post', forum: 'music', title: 'favorite albums' });
   });
 
+  it('captures extended description after title', () => {
+    const result = parseVoiceCommand(
+      'Hey Watson, make a new post in 3D printing about multi-color printing. I have been experimenting with filament swapping and wanted to discuss approaches',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'new-post',
+      forum: '3d printing',
+      title: 'multi-color printing. i have been experimenting with filament swapping and wanted to discuss approaches',
+    });
+  });
+
   it('forum capture is non-greedy (stops at delimiter)', () => {
     const result = parseVoiceCommand('Hey Watson, make a new post in stuff about things about the topic', BOT);
     expect(result).toEqual({ type: 'new-post', forum: 'stuff', title: 'things about the topic' });
