@@ -278,7 +278,7 @@ export class VoicePipeline {
       responseText = `I couldn't find a channel called ${channelName}.`;
     }
 
-    await this.speakResponse(responseText);
+    await this.speakResponse(responseText, { inbox: true });
   }
 
   private async handleListChannels(): Promise<void> {
