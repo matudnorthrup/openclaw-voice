@@ -78,7 +78,7 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
 
   // "make/create/start a (new) (forum) post/thread/topic/discussion in [forum] about/called/titled [title]"
   const newPostMatch = rest.match(
-    /^(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?(?:forum\s+)?(?:post|thread|topic|discussion)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
+    /^(?:please\s+)?(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?(?:forum\s+)?(?:post|thread|topic|discussion)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
   );
   if (newPostMatch) {
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
