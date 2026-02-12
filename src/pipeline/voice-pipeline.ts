@@ -31,6 +31,7 @@ export class VoicePipeline {
   private inboxTracker: InboxTracker | null = null;
   private inboxFlow: ChannelActivity[] | null = null;
   private inboxFlowIndex = 0;
+  private inboxLogChannel: TextChannel | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -39,6 +40,7 @@ export class VoicePipeline {
     this.player = new DiscordAudioPlayer();
     this.player.attach(connection);
     this.logChannel = logChannel || null;
+    this.inboxLogChannel = logChannel || null;
     this.session = new SessionTranscript();
 
     this.receiver = new AudioReceiver(
@@ -265,14 +267,11 @@ export class VoicePipeline {
         }
       }
 
-      // Direct switch exits inbox mode — user wants to work in this channel
-      if (this.queueState && this.queueState.getMode() !== 'wait') {
-        this.queueState.setMode('wait');
-        if (this.inboxTracker) {
-          this.inboxTracker.deactivate();
-        }
-        this.inboxFlow = null;
-        this.inboxFlowIndex = 0;
+      // Update inbox snapshot for this channel so it's marked as "seen"
+      if (this.inboxTracker?.isActive()) {
+        const sessionKey = this.router.getActiveSessionKey();
+        const currentCount = await this.getCurrentMessageCount(sessionKey);
+        this.inboxTracker.markSeen(sessionKey, currentCount);
       }
     } else {
       responseText = `I couldn't find a channel called ${channelName}.`;
@@ -437,15 +436,15 @@ export class VoicePipeline {
       userMessage: transcript,
     });
 
-    this.dispatchToLLMFireAndForget(userId, transcript, item.id);
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
 
     // Brief confirmation — speak immediately, don't block on inbox check
-    await this.speakResponse(`Queued to ${displayName}.`);
+    await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
     // Speak the prompt, then await choice
-    await this.speakResponse('Inbox, or wait?');
+    await this.speakResponse('Inbox, or wait?', { inbox: true });
 
     this.awaitingQueueChoice = {
       timeout: setTimeout(() => {
@@ -489,7 +488,7 @@ export class VoicePipeline {
     }
   }
 
-  private dispatchToLLMFireAndForget(userId: string, transcript: string, queueItemId: string): void {
+  private dispatchToLLMFireAndForget(userId: string, transcript: string, queueItemId: string, sessionKey: string): void {
     if (!this.router || !this.queueState) return;
 
     const activeChannel = this.router.getActiveChannel();
@@ -527,10 +526,15 @@ export class VoicePipeline {
         session.appendAssistantMessage(response, channelName);
 
         // Sync to OpenClaw
-        if (gatewaySync?.isConnected() && routerRef) {
-          const sessionKey = routerRef.getActiveSessionKey();
+        if (gatewaySync?.isConnected()) {
           await gatewaySync.inject(sessionKey, transcript, 'voice-user');
           await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+
+          // Update inbox snapshot so our own messages don't appear as "new"
+          if (this.inboxTracker?.isActive()) {
+            const count = await this.getCurrentMessageCount(sessionKey);
+            this.inboxTracker.markSeen(sessionKey, count);
+          }
         }
 
         pollerRef?.check();
@@ -570,7 +574,7 @@ export class VoicePipeline {
       queue: 'Inbox mode. Your messages will be dispatched and you can keep talking.',
       ask: 'Ask mode. I will ask you whether to inbox or wait for each message.',
     };
-    await this.speakResponse(labels[mode]);
+    await this.speakResponse(labels[mode], { inbox: true });
   }
 
   private async handleInboxCheck(): Promise<void> {
@@ -588,9 +592,9 @@ export class VoicePipeline {
         // Also check pending queue items
         const pending = this.queueState.getPendingItems();
         if (pending.length > 0) {
-          await this.speakResponse(`Nothing new yet. ${pending.length} still processing.`);
+          await this.speakResponse(`Nothing new yet. ${pending.length} still processing.`, { inbox: true });
         } else {
-          await this.speakResponse('Nothing new.');
+          await this.speakResponse('Nothing new.', { inbox: true });
         }
         return;
       }
@@ -605,6 +609,7 @@ export class VoicePipeline {
 
       await this.speakResponse(
         `New activity in ${channelNames.join(', ')}.${pendingSuffix} Say next to start reading.`,
+        { inbox: true },
       );
       return;
     }
@@ -627,7 +632,7 @@ export class VoicePipeline {
       parts.push(`${pending.length} still waiting`);
     }
 
-    await this.speakResponse(`You have ${parts.join(', and ')}.`);
+    await this.speakResponse(`You have ${parts.join(', and ')}.`, { inbox: true });
   }
 
   private async handleInboxNext(): Promise<void> {
@@ -790,12 +795,23 @@ export class VoicePipeline {
     return text;
   }
 
-  private async speakResponse(text: string): Promise<void> {
-    this.log(`**${config.botName}:** ${text}`);
+  private async speakResponse(text: string, options?: { inbox?: boolean }): Promise<void> {
+    if (options?.inbox) {
+      this.logToInbox(`**${config.botName}:** ${text}`);
+    } else {
+      this.log(`**${config.botName}:** ${text}`);
+    }
     const ttsStream = await textToSpeechStream(text);
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
+  }
+
+  private logToInbox(message: string): void {
+    if (!this.inboxLogChannel) return;
+    this.sendChunked(this.inboxLogChannel, message).catch((err) => {
+      console.error('Failed to log to inbox channel:', err.message);
+    });
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {
@@ -805,6 +821,12 @@ export class VoicePipeline {
       const sessionKey = this.router.getActiveSessionKey();
       await this.gatewaySync.inject(sessionKey, userText, 'voice-user');
       await this.gatewaySync.inject(sessionKey, assistantText, 'voice-assistant');
+
+      // Update inbox snapshot so our own messages don't appear as "new"
+      if (this.inboxTracker?.isActive()) {
+        const count = await this.getCurrentMessageCount(sessionKey);
+        this.inboxTracker.markSeen(sessionKey, count);
+      }
     } catch (err: any) {
       console.warn(`OpenClaw sync failed: ${err.message}`);
     }
