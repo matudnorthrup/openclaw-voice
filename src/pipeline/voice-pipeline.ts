@@ -3,7 +3,7 @@ import { TextChannel } from 'discord.js';
 import { AudioReceiver } from '../discord/audio-receiver.js';
 import { DiscordAudioPlayer } from '../discord/audio-player.js';
 import { transcribe } from '../services/whisper.js';
-import { getResponse } from '../services/claude.js';
+import { getResponse, quickCompletion } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
@@ -246,7 +246,7 @@ export class VoicePipeline {
     // Try to find the channel by fuzzy matching against known channels
     const allChannels = this.router.listChannels();
     const lower = channelName.toLowerCase();
-    const match = allChannels.find(
+    let match = allChannels.find(
       (c) =>
         c.name.toLowerCase() === lower ||
         c.displayName.toLowerCase() === lower ||
@@ -254,6 +254,14 @@ export class VoicePipeline {
         lower.includes(c.name.toLowerCase()) ||
         lower.includes(c.displayName.toLowerCase()),
     );
+
+    // LLM fallback: if string matching failed, ask the utility model
+    if (!match) {
+      const llmMatch = await this.matchChannelWithLLM(channelName, allChannels);
+      if (llmMatch) {
+        match = allChannels.find((c) => c.name === llmMatch.name) ?? undefined;
+      }
+    }
 
     const target = match ? match.name : channelName;
     const result = await this.router.switchTo(target);
@@ -291,6 +299,34 @@ export class VoicePipeline {
     }
 
     await this.speakResponse(responseText, { inbox: true });
+  }
+
+  private async matchChannelWithLLM(
+    userPhrase: string,
+    channels: { name: string; displayName: string }[],
+  ): Promise<{ name: string; displayName: string } | null> {
+    try {
+      const channelList = channels.map((c) => `${c.name}: ${c.displayName}`).join('\n');
+
+      const result = await quickCompletion(
+        'You are a channel matcher. Given a list of channels and a user description, reply with ONLY the channel name (the part before the colon) that best matches. If nothing matches, reply with NONE. Do not explain.',
+        `Channels:\n${channelList}\n\nUser wants: "${userPhrase}"`,
+      );
+
+      const cleaned = result.trim().toLowerCase();
+      if (cleaned === 'none') return null;
+
+      const matched = channels.find((c) => c.name.toLowerCase() === cleaned);
+      if (matched) {
+        console.log(`LLM channel match: "${userPhrase}" → ${matched.name}`);
+        return matched;
+      }
+
+      return null;
+    } catch (err: any) {
+      console.warn(`LLM channel match failed: ${err.message}`);
+      return null;
+    }
   }
 
   private async handleListChannels(): Promise<void> {

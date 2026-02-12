@@ -77,6 +77,44 @@ export async function getResponse(
   return { response: assistantText, history };
 }
 
+export async function quickCompletion(systemPrompt: string, userMessage: string): Promise<string> {
+  const start = Date.now();
+
+  const messages: Message[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userMessage },
+  ];
+
+  const sessionKey = `agent:${config.gatewayAgentId}:discord:channel:${config.utilityChannelId}`;
+
+  const apiResponse = await fetch(`${config.gatewayUrl}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.gatewayToken}`,
+    },
+    body: JSON.stringify({
+      model: `openclaw:${config.gatewayAgentId}`,
+      max_tokens: 50,
+      messages,
+      user: sessionKey,
+    }),
+  });
+
+  if (!apiResponse.ok) {
+    const body = await apiResponse.text();
+    throw new Error(`Gateway API error ${apiResponse.status}: ${body}`);
+  }
+
+  const data = await apiResponse.json() as any;
+  const result = data.choices?.[0]?.message?.content?.trim() || '';
+
+  const elapsed = Date.now() - start;
+  console.log(`Quick completion (${elapsed}ms): "${result}"`);
+
+  return result;
+}
+
 export function clearConversation(userId: string): void {
   conversations.delete(userId);
   console.log(`Cleared conversation for ${userId}`);

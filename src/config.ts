@@ -30,6 +30,7 @@ export const config = {
   minSpeechDurationMs: parseInt(process.env['MIN_SPEECH_DURATION_MS'] || '300', 10),
   botName: process.env['BOT_NAME'] || 'Assistant',
   logChannelId: process.env['LOG_CHANNEL_ID'] || '',
+  utilityChannelId: process.env['UTILITY_CHANNEL_ID'] || '1471563603625775124',
   sessionsDir: process.env['SESSIONS_DIR'] || `${process.env['HOME']}/.clawdbot/agents/main/sessions`,
   gatewayWsEnabled: process.env['GATEWAY_WS_SYNC'] !== 'false',
 };
