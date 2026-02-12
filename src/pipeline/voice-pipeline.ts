@@ -443,16 +443,14 @@ export class VoicePipeline {
       const channels = this.router.getAllChannelSessionKeys();
       const activities = await this.inboxTracker.checkInbox(channels);
       if (activities.length > 0) {
-        const channelList = activities.map((a, i) => `${i + 1}. ${a.displayName}`).join('. ');
-        const totalReady = activities.reduce((sum, a) => sum + a.queuedReadyCount + a.newMessageCount, 0);
-        readySuffix = ` ${totalReady} item${totalReady > 1 ? 's' : ''} across ${activities.length} channel${activities.length > 1 ? 's' : ''}. ${channelList}.`;
+        const channelNames = activities.map((a) => a.displayName);
+        readySuffix = ` Inbox: ${channelNames.join(', ')}.`;
       }
     } else {
       const readyItems = this.queueState.getReadyItems();
       if (readyItems.length > 0) {
         const channels = [...new Set(readyItems.map((r) => r.displayName))];
-        const channelList = channels.map((ch, i) => `${i + 1}. ${ch}`).join('. ');
-        readySuffix = ` ${readyItems.length} response${readyItems.length > 1 ? 's' : ''} ready. ${channelList}.`;
+        readySuffix = ` Ready: ${channels.join(', ')}.`;
       }
     }
     await this.speakResponse(`Sent to ${displayName}.${readySuffix}`);
@@ -614,24 +612,12 @@ export class VoicePipeline {
       this.inboxFlow = activities;
       this.inboxFlowIndex = 0;
 
-      const channelCount = activities.length;
-      const summaryParts = activities.map((a) => {
-        const parts: string[] = [];
-        if (a.newMessageCount > 0) {
-          parts.push(`${a.newMessageCount} new message${a.newMessageCount > 1 ? 's' : ''}`);
-        }
-        if (a.queuedReadyCount > 0) {
-          parts.push(`${a.queuedReadyCount} queued response${a.queuedReadyCount > 1 ? 's' : ''}`);
-        }
-        return `${a.displayName} has ${parts.join(' and ')}`;
-      });
-
+      const channelNames = activities.map((a) => a.displayName);
       const pending = this.queueState.getPendingItems();
       const pendingSuffix = pending.length > 0 ? ` ${pending.length} still processing.` : '';
 
       await this.speakResponse(
-        `You have new activity in ${channelCount} channel${channelCount > 1 ? 's' : ''}. ` +
-        `${summaryParts.join('. ')}.${pendingSuffix} Say next to start reading.`,
+        `New activity in ${channelNames.join(', ')}.${pendingSuffix} Say next to start reading.`,
       );
       return;
     }
