@@ -297,6 +297,23 @@ describe('parseVoiceCommand — Hello Watson trigger', () => {
   });
 });
 
+describe('parseVoiceCommand — voice status', () => {
+  it('parses "voice status"', () => {
+    const result = parseVoiceCommand('Hey Watson, voice status', BOT);
+    expect(result).toEqual({ type: 'voice-status' });
+  });
+
+  it('parses "status"', () => {
+    const result = parseVoiceCommand('Hey Watson, status', BOT);
+    expect(result).toEqual({ type: 'voice-status' });
+  });
+
+  it('parses "Hello Watson, voice status"', () => {
+    const result = parseVoiceCommand('Hello Watson, voice status', BOT);
+    expect(result).toEqual({ type: 'voice-status' });
+  });
+});
+
 describe('matchQueueChoice', () => {
   it('returns "queue" for "inbox"', () => {
     expect(matchQueueChoice('inbox')).toBe('queue');

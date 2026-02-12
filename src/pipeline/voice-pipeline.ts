@@ -8,7 +8,7 @@ import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import { parseVoiceCommand, matchChannelSelection, matchQueueChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
-import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel } from '../services/voice-settings.js';
+import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
 import type { QueueState } from '../services/queue-state.js';
@@ -222,6 +222,9 @@ export class VoicePipeline {
       case 'inbox-next':
         await this.handleInboxNext();
         break;
+      case 'voice-status':
+        await this.handleVoiceStatus();
+        break;
     }
   }
 
@@ -386,6 +389,47 @@ export class VoicePipeline {
       `Noise threshold: ${s.speechThreshold}. ` +
       `Minimum speech duration: ${s.minSpeechDurationMs} milliseconds.`,
     );
+  }
+
+  private async handleVoiceStatus(): Promise<void> {
+    const parts: string[] = [];
+
+    // Mode
+    const mode = this.queueState?.getMode() ?? 'wait';
+    const modeLabel = mode === 'queue' ? 'inbox' : mode;
+    parts.push(`Mode: ${modeLabel}.`);
+
+    // Active channel
+    if (this.router) {
+      const active = this.router.getActiveChannel();
+      const displayName = (active as any).displayName || active.name;
+      parts.push(`Channel: ${displayName}.`);
+    }
+
+    // Inbox status
+    if (this.inboxTracker?.isActive()) {
+      parts.push('Inbox is active.');
+    }
+
+    // Queue items
+    if (this.queueState) {
+      const ready = this.queueState.getReadyItems().length;
+      const pending = this.queueState.getPendingItems().length;
+      if (ready > 0 || pending > 0) {
+        const qParts: string[] = [];
+        if (ready > 0) qParts.push(`${ready} ready`);
+        if (pending > 0) qParts.push(`${pending} processing`);
+        parts.push(`Queue: ${qParts.join(', ')}.`);
+      }
+    }
+
+    // Voice settings
+    const s = getVoiceSettings();
+    const presetMap: Record<number, string> = { 300: 'low', 500: 'medium', 800: 'high' };
+    const noiseLabel = presetMap[s.speechThreshold] ?? String(s.speechThreshold);
+    parts.push(`Noise: ${noiseLabel}. Delay: ${s.silenceDurationMs} milliseconds.`);
+
+    await this.speakResponse(parts.join(' '), { inbox: true });
   }
 
   private async handleWaitMode(userId: string, transcript: string): Promise<void> {

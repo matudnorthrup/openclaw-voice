@@ -11,7 +11,8 @@ export type VoiceCommand =
   | { type: 'new-post'; forum: string; title: string }
   | { type: 'mode'; mode: VoiceMode }
   | { type: 'inbox-check' }
-  | { type: 'inbox-next' };
+  | { type: 'inbox-next' }
+  | { type: 'voice-status' };
 
 export interface ChannelOption {
   index: number;
@@ -81,6 +82,11 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   );
   if (newPostMatch) {
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
+  }
+
+  // "voice status", "status"
+  if (/^(?:voice\s+)?status$/.test(rest)) {
+    return { type: 'voice-status' };
   }
 
   // "inbox list", "what do I have", "check inbox", "what's new", "inbox"
