@@ -417,7 +417,7 @@ export class VoicePipeline {
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
     // Speak the prompt, then await choice
-    await this.speakResponse('Send it, or wait?');
+    await this.speakResponse('Inbox, or wait?');
 
     this.awaitingQueueChoice = {
       timeout: setTimeout(() => {
