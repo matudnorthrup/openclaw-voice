@@ -436,24 +436,8 @@ export class VoicePipeline {
 
     this.dispatchToLLMFireAndForget(userId, transcript, item.id);
 
-    // Brief confirmation — stop waiting loop quickly
-    // Confirm dispatch + summarize inbox activity
-    let readySuffix = '';
-    if (this.inboxTracker?.isActive() && this.router) {
-      const channels = this.router.getAllChannelSessionKeys();
-      const activities = await this.inboxTracker.checkInbox(channels);
-      if (activities.length > 0) {
-        const channelNames = activities.map((a) => a.displayName);
-        readySuffix = ` Inbox: ${channelNames.join(', ')}.`;
-      }
-    } else {
-      const readyItems = this.queueState.getReadyItems();
-      if (readyItems.length > 0) {
-        const channels = [...new Set(readyItems.map((r) => r.displayName))];
-        readySuffix = ` Ready: ${channels.join(', ')}.`;
-      }
-    }
-    await this.speakResponse(`Sent to ${displayName}.${readySuffix}`);
+    // Brief confirmation — speak immediately, don't block on inbox check
+    await this.speakResponse(`Queued to ${displayName}.`);
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
