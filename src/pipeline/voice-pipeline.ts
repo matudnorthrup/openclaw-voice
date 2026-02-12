@@ -248,7 +248,8 @@ export class VoicePipeline {
         c.name.toLowerCase() === lower ||
         c.displayName.toLowerCase() === lower ||
         c.displayName.toLowerCase().includes(lower) ||
-        lower.includes(c.name.toLowerCase()),
+        lower.includes(c.name.toLowerCase()) ||
+        lower.includes(c.displayName.toLowerCase()),
     );
 
     const target = match ? match.name : channelName;
