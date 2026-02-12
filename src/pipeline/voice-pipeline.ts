@@ -662,6 +662,11 @@ export class VoicePipeline {
       activity = this.inboxFlow[this.inboxFlowIndex];
       this.inboxFlowIndex++;
     } else if (this.inboxTracker?.isActive() && this.router) {
+      // Mark current channel as seen BEFORE fresh check so it doesn't re-appear
+      const currentSessionKey = this.router.getActiveSessionKey();
+      const currentCount = await this.getCurrentMessageCount(currentSessionKey);
+      this.inboxTracker.markSeen(currentSessionKey, currentCount);
+
       // Fresh check if flow is exhausted or not started
       const channels = this.router.getAllChannelSessionKeys();
       const activities = await this.inboxTracker.checkInbox(channels);
@@ -787,8 +792,8 @@ export class VoicePipeline {
   private matchBareQueueCommand(transcript: string): VoiceCommand | null {
     const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
-    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on"
-    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(input)) {
+    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on", "skip"
+    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(input)) {
       return { type: 'inbox-next' };
     }
 

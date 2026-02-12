@@ -21,7 +21,7 @@ export interface ChannelOption {
 
 export function parseVoiceCommand(transcript: string, botName: string): VoiceCommand | null {
   const trimmed = transcript.trim();
-  const trigger = new RegExp(`^(?:hey,?\\s+)?${escapeRegex(botName)}[,.]?\\s+`, 'i');
+  const trigger = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}[,.]?\\s+`, 'i');
   const match = trimmed.match(trigger);
   if (!match) return null;
 
@@ -88,8 +88,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'inbox-check' };
   }
 
-  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on"
-  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(rest)) {
+  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip"
+  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(rest)) {
     return { type: 'inbox-next' };
   }
 

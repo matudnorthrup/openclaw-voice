@@ -253,6 +253,48 @@ describe('parseVoiceCommand — inbox next', () => {
     const result = parseVoiceCommand('Hey Watson, move on', BOT);
     expect(result).toEqual({ type: 'inbox-next' });
   });
+
+  it('parses "skip"', () => {
+    const result = parseVoiceCommand('Hey Watson, skip', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "skip this"', () => {
+    const result = parseVoiceCommand('Hey Watson, skip this', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "skip this one"', () => {
+    const result = parseVoiceCommand('Hey Watson, skip this one', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "skip it"', () => {
+    const result = parseVoiceCommand('Hey Watson, skip it', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+});
+
+describe('parseVoiceCommand — Hello Watson trigger', () => {
+  it('parses "Hello Watson, inbox"', () => {
+    const result = parseVoiceCommand('Hello Watson, inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses "Hello Watson, switch to health"', () => {
+    const result = parseVoiceCommand('Hello Watson, switch to health', BOT);
+    expect(result).toEqual({ type: 'switch', channel: 'health' });
+  });
+
+  it('parses "Hello Watson, done"', () => {
+    const result = parseVoiceCommand('Hello Watson, done', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
+
+  it('parses "Hello Watson, skip"', () => {
+    const result = parseVoiceCommand('Hello Watson, skip', BOT);
+    expect(result).toEqual({ type: 'inbox-next' });
+  });
 });
 
 describe('matchQueueChoice', () => {
