@@ -149,8 +149,18 @@ export class VoicePipeline {
         }
       }
 
-      // Branch based on voice mode
+      // In queue/ask mode, also match bare navigation commands without "Hey Watson" prefix
       const mode = this.queueState?.getMode() ?? 'wait';
+      if (mode !== 'wait') {
+        const bareCommand = this.matchBareQueueCommand(transcript);
+        if (bareCommand) {
+          console.log(`Bare queue command detected: ${bareCommand.type}`);
+          await this.handleVoiceCommand(bareCommand);
+          const totalMs = Date.now() - pipelineStart;
+          console.log(`Voice command complete: ${totalMs}ms total`);
+          return;
+        }
+      }
       if (mode === 'queue') {
         await this.handleQueueMode(userId, transcript);
       } else if (mode === 'ask') {
@@ -600,6 +610,33 @@ export class VoicePipeline {
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
+  }
+
+  private matchBareQueueCommand(transcript: string): VoiceCommand | null {
+    const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+
+    // "next", "next one", "next response", "next message"
+    if (/^next(?:\s+(?:response|one|message))?$/.test(input)) {
+      return { type: 'queue-next' };
+    }
+
+    // "go to X", "switch to X"
+    const switchMatch = input.match(/^(?:go|switch|change|move)\s+to\s+(.+)$/);
+    if (switchMatch) {
+      return { type: 'switch', channel: switchMatch[1].trim() };
+    }
+
+    // "go back", "go home", "default"
+    if (/^(?:go\s+back|go\s+home|default)$/.test(input)) {
+      return { type: 'default' };
+    }
+
+    // "what do I have", "check queue", etc.
+    if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?queue|what'?s\s+(?:waiting|ready)|queue\s+status)$/.test(input)) {
+      return { type: 'queue-status' };
+    }
+
+    return null;
   }
 
   private buildSwitchConfirmation(displayName: string): string {
