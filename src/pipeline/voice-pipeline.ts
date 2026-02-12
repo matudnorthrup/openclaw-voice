@@ -271,6 +271,7 @@ export class VoicePipeline {
       if (this.inboxTracker?.isActive()) {
         const sessionKey = this.router.getActiveSessionKey();
         const currentCount = await this.getCurrentMessageCount(sessionKey);
+        console.log(`InboxTracker: markSeen ${target} (${sessionKey}) count=${currentCount}`);
         this.inboxTracker.markSeen(sessionKey, currentCount);
       }
     } else {
@@ -750,6 +751,7 @@ export class VoicePipeline {
     // Mark this channel as seen
     if (this.inboxTracker) {
       const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
+      console.log(`InboxTracker: markSeen ${activity.channelName} (${activity.sessionKey}) count=${currentCount}`);
       this.inboxTracker.markSeen(activity.sessionKey, currentCount);
     }
 

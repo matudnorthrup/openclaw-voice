@@ -59,6 +59,8 @@ export class InboxTracker {
       // Get queued ready items for this channel
       const readyItems = this.queueState.getReadyItems().filter((i) => i.sessionKey === ch.sessionKey);
 
+      console.log(`InboxTracker: check ${ch.name} — snapshot=${baselineCount} current=${currentCount} new=${newMessageCount} ready=${readyItems.length}`);
+
       if (newMessageCount > 0 || readyItems.length > 0) {
         // Extract new messages (the ones beyond the snapshot)
         const allMessages = result?.messages ?? [];
