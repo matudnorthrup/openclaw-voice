@@ -245,6 +245,9 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     pipeline.setQueueState(queueState);
     if (gatewaySync) {
       responsePoller = new ResponsePoller(queueState, gatewaySync);
+      responsePoller.setOnReady((displayName) => {
+        pipeline?.notifyIfIdle(`Response ready from ${displayName}.`);
+      });
       pipeline.setResponsePoller(responsePoller);
       responsePoller.start(); // starts only if pending items exist from previous session
 

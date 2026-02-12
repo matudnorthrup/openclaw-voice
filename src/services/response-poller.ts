@@ -8,10 +8,15 @@ export class ResponsePoller {
   private gatewaySync: GatewaySync;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
+  private onReady: ((displayName: string) => void) | null = null;
 
   constructor(queueState: QueueState, gatewaySync: GatewaySync) {
     this.queueState = queueState;
     this.gatewaySync = gatewaySync;
+  }
+
+  setOnReady(callback: (displayName: string) => void): void {
+    this.onReady = callback;
   }
 
   start(): void {
@@ -74,6 +79,7 @@ export class ResponsePoller {
 
           this.queueState.markReady(item.id, summary, content);
           console.log(`ResponsePoller: marked ${item.id} as ready (channel: ${item.displayName})`);
+          this.onReady?.(item.displayName);
         }
       }
     } catch (err: any) {

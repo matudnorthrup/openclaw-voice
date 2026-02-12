@@ -705,6 +705,10 @@ Use channel names (the part before the colon). Do not explain.`,
         }
 
         pollerRef?.check();
+
+        // Notify user if idle
+        const displayName = (activeChannel as any).displayName || channelName;
+        this.notifyIfIdle(`Response ready from ${displayName}.`);
       } catch (err: any) {
         console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
       }
@@ -1003,6 +1007,27 @@ Use channel names (the part before the colon). Do not explain.`,
     this.sendChunked(this.inboxLogChannel, message).catch((err) => {
       console.error('Failed to log to inbox channel:', err.message);
     });
+  }
+
+  notifyIfIdle(message: string): void {
+    if (this.processing || this.player.isPlaying()) {
+      console.log(`Idle notify skipped (busy): "${message}"`);
+      return;
+    }
+
+    console.log(`Idle notify: "${message}"`);
+    this.logToInbox(`**${config.botName}:** ${message}`);
+
+    textToSpeechStream(message)
+      .then((stream) => {
+        // Re-check idle — user may have started speaking while TTS was generating
+        if (!this.processing && !this.player.isPlaying()) {
+          this.player.playStream(stream);
+        }
+      })
+      .catch((err) => {
+        console.warn(`Idle notify TTS failed: ${err.message}`);
+      });
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {
