@@ -412,11 +412,14 @@ export class VoicePipeline {
     this.dispatchToLLMFireAndForget(userId, transcript, item.id);
 
     // Brief confirmation — stop waiting loop quickly
-    // Confirm dispatch + mention ready items if any
-    const readyCount = this.queueState.getReadyItems().length;
-    const readySuffix = readyCount > 0
-      ? ` ${readyCount} response${readyCount > 1 ? 's' : ''} ready.`
-      : '';
+    // Confirm dispatch + list ready items by channel
+    const readyItems = this.queueState.getReadyItems();
+    let readySuffix = '';
+    if (readyItems.length > 0) {
+      const channels = [...new Set(readyItems.map((r) => r.displayName))];
+      const channelList = channels.map((ch, i) => `${i + 1}. ${ch}`).join('. ');
+      readySuffix = ` ${readyItems.length} response${readyItems.length > 1 ? 's' : ''} ready. ${channelList}.`;
+    }
     await this.speakResponse(`Sent to ${displayName}.${readySuffix}`);
   }
 
