@@ -28,9 +28,9 @@ export class InboxTracker {
   async activate(channels: ChannelInfo[]): Promise<void> {
     const snapshots: Record<string, number> = {};
 
+    // Snapshot at zero — all existing channel activity is "unread"
     for (const ch of channels) {
-      const count = await this.getMessageCount(ch.sessionKey);
-      snapshots[ch.sessionKey] = count;
+      snapshots[ch.sessionKey] = 0;
     }
 
     this.queueState.setSnapshots(snapshots);

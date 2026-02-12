@@ -35,28 +35,17 @@ const testChannels: ChannelInfo[] = [
 
 describe('InboxTracker', () => {
   describe('activate / deactivate / isActive', () => {
-    it('activates and snapshots all channels', async () => {
-      const historyMap: Record<string, ChatMessage[]> = {
-        'session:health': [
-          { role: 'user', content: 'hi' },
-          { role: 'assistant', content: 'hello' },
-        ],
-        'session:finance': [
-          { role: 'user', content: 'budget' },
-        ],
-        'session:planning': [],
-      };
-
+    it('activates and snapshots all channels at zero', async () => {
       const qs = createMockQueueState();
-      const gs = createMockGatewaySync(historyMap);
+      const gs = createMockGatewaySync();
       const tracker = new InboxTracker(qs as any, gs as any);
 
       await tracker.activate(testChannels);
 
       expect(tracker.isActive()).toBe(true);
       const snapshots = qs.getSnapshots();
-      expect(snapshots['session:health']).toBe(2);
-      expect(snapshots['session:finance']).toBe(1);
+      expect(snapshots['session:health']).toBe(0);
+      expect(snapshots['session:finance']).toBe(0);
       expect(snapshots['session:planning']).toBe(0);
     });
 
