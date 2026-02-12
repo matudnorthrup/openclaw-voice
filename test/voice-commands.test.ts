@@ -196,6 +196,11 @@ describe('parseVoiceCommand — inbox check', () => {
     const result = parseVoiceCommand('Hey Watson, inbox', BOT);
     expect(result).toEqual({ type: 'inbox-check' });
   });
+
+  it('parses "inbox list"', () => {
+    const result = parseVoiceCommand('Hey Watson, inbox list', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
 });
 
 describe('parseVoiceCommand — inbox next', () => {

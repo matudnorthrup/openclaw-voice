@@ -766,8 +766,8 @@ export class VoicePipeline {
       return { type: 'default' };
     }
 
-    // "what do I have", "check queue", "check inbox", "what's new", "inbox", etc.
-    if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status|inbox)$/.test(input)) {
+    // "inbox list", "inbox", "what do I have", "check inbox", "what's new", etc.
+    if (/^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(input)) {
       return { type: 'inbox-check' };
     }
 

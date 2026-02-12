@@ -83,8 +83,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
   }
 
-  // "what do I have", "what do you have", "check queue", "what's waiting", "queue status", "check inbox", "what's new", "inbox"
-  if (/^(?:what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status|inbox)$/.test(rest)) {
+  // "inbox list", "what do I have", "check inbox", "what's new", "inbox"
+  if (/^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(rest)) {
     return { type: 'inbox-check' };
   }
 
