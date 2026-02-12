@@ -255,10 +255,17 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       // Auto-activate inbox if already in queue/ask mode (restart recovery)
       const currentMode = queueState.getMode();
       if (currentMode === 'queue' || currentMode === 'ask') {
-        const channels = router.getAllChannelSessionKeys();
-        inboxTracker.activate(channels).catch((err) => {
-          console.warn(`InboxTracker auto-activate failed: ${err.message}`);
-        });
+        const existingSnapshots = queueState.getSnapshots();
+        if (Object.keys(existingSnapshots).length > 0) {
+          // Snapshots survived restart — preserve them, don't reset to 0
+          console.log(`InboxTracker: preserving ${Object.keys(existingSnapshots).length} existing snapshots from restart`);
+        } else {
+          // No snapshots — fresh activation
+          const channels = router.getAllChannelSessionKeys();
+          inboxTracker.activate(channels).catch((err) => {
+            console.warn(`InboxTracker auto-activate failed: ${err.message}`);
+          });
+        }
       }
     }
 
