@@ -253,19 +253,23 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       pipeline.setInboxTracker(inboxTracker);
 
       // Auto-activate inbox if already in queue/ask mode (restart recovery)
+      // Snapshot at CURRENT message counts so everything starts as "seen"
       const currentMode = queueState.getMode();
       if (currentMode === 'queue' || currentMode === 'ask') {
-        const existingSnapshots = queueState.getSnapshots();
-        if (Object.keys(existingSnapshots).length > 0) {
-          // Snapshots survived restart — preserve them, don't reset to 0
-          console.log(`InboxTracker: preserving ${Object.keys(existingSnapshots).length} existing snapshots from restart`);
-        } else {
-          // No snapshots — fresh activation
-          const channels = router.getAllChannelSessionKeys();
-          inboxTracker.activate(channels).catch((err) => {
-            console.warn(`InboxTracker auto-activate failed: ${err.message}`);
-          });
-        }
+        const channels = router.getAllChannelSessionKeys();
+        void (async () => {
+          try {
+            const snapshots: Record<string, number> = {};
+            for (const ch of channels) {
+              const result = await gatewaySync.getHistory(ch.sessionKey, 40);
+              snapshots[ch.sessionKey] = result?.messages?.length ?? 0;
+            }
+            queueState.setSnapshots(snapshots);
+            console.log(`InboxTracker: restart snapshot — ${Object.entries(snapshots).map(([k, v]) => `${k.split(':').pop()}=${v}`).join(', ')}`);
+          } catch (err: any) {
+            console.warn(`InboxTracker restart snapshot failed: ${err.message}`);
+          }
+        })();
       }
     }
 
