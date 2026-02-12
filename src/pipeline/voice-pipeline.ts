@@ -265,11 +265,14 @@ export class VoicePipeline {
         }
       }
 
-      // Update inbox snapshot for this channel so it drops from inbox
-      if (this.inboxTracker?.isActive() && this.router) {
-        const sessionKey = this.router.getActiveSessionKey();
-        const count = await this.getCurrentMessageCount(sessionKey);
-        this.inboxTracker.markSeen(sessionKey, count);
+      // Direct switch exits inbox mode — user wants to work in this channel
+      if (this.queueState && this.queueState.getMode() !== 'wait') {
+        this.queueState.setMode('wait');
+        if (this.inboxTracker) {
+          this.inboxTracker.deactivate();
+        }
+        this.inboxFlow = null;
+        this.inboxFlowIndex = 0;
       }
     } else {
       responseText = `I couldn't find a channel called ${channelName}.`;
