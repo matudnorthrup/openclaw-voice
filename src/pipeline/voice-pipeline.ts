@@ -659,29 +659,25 @@ export class VoicePipeline {
         }
       }
 
-      // Build TTS content
+      // Build TTS content — brief context, not full message dump
       const parts: string[] = [];
-      parts.push(`${activity.displayName}.`);
 
-      // Read new gateway messages
-      if (activity.newMessages.length > 0 && this.inboxTracker) {
-        const formatted = this.inboxTracker.formatForTTS(activity.newMessages);
-        if (formatted) {
-          parts.push(formatted);
-        }
-      }
+      // Channel name + last message context (like a normal switch)
+      parts.push(this.buildSwitchConfirmation(activity.displayName));
 
       // Read voice-queued ready items for this channel
       const readyItems = this.queueState.getReadyItems().filter(
         (i) => i.sessionKey === activity!.sessionKey,
       );
-      for (const item of readyItems) {
-        parts.push(item.responseText);
-        this.queueState.markHeard(item.id);
+      if (readyItems.length > 0) {
+        for (const item of readyItems) {
+          parts.push(item.responseText);
+          this.queueState.markHeard(item.id);
+        }
+        this.responsePoller?.check();
       }
-      this.responsePoller?.check();
 
-      // Update snapshot to mark this channel as seen
+      // Mark this channel as seen
       if (this.inboxTracker) {
         const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
         this.inboxTracker.markSeen(activity.sessionKey, currentCount);
@@ -693,7 +689,7 @@ export class VoicePipeline {
         : 0;
 
       if (remaining > 0) {
-        parts.push(`${remaining} more channel${remaining > 1 ? 's' : ''}. Say next.`);
+        parts.push(`${remaining} more. Say next.`);
       } else {
         parts.push("That's everything.");
         this.inboxFlow = null;
