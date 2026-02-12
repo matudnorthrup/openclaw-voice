@@ -97,17 +97,13 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
 export function matchQueueChoice(transcript: string): 'queue' | 'wait' | null {
   const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
-  // Match "queue" and common Whisper misrecognitions
-  if (/^(?:queue|cue|q|cute|cu|thank you|que)$/.test(input)) return 'queue';
-
-  // Also match if "queue" appears anywhere in the transcript
-  if (/\bqueue\b|\bcue\b/.test(input)) return 'queue';
+  // Match "send" and variants — the prompt asks "Send it, or wait?"
+  if (/\bsend\b|\bqueue\b|\bcue\b|\bsent\b/.test(input)) return 'queue';
+  if (/^(?:queue|cue|q|cute|cu|send|sent|yes|yep|yeah)$/.test(input)) return 'queue';
 
   // Match "wait" and common Whisper misrecognitions
-  if (/^(?:wait|weight|wade|weigh|way)$/.test(input)) return 'wait';
-
-  // Also match if "wait" appears anywhere
   if (/\bwait\b/.test(input)) return 'wait';
+  if (/^(?:wait|weight|wade|weigh|way|no|nope)$/.test(input)) return 'wait';
 
   return null;
 }

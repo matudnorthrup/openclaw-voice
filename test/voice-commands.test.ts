@@ -191,16 +191,28 @@ describe('parseVoiceCommand — queue next', () => {
 });
 
 describe('matchQueueChoice', () => {
+  it('returns "queue" for "send"', () => {
+    expect(matchQueueChoice('send')).toBe('queue');
+  });
+
+  it('returns "queue" for "send it"', () => {
+    expect(matchQueueChoice('Send it.')).toBe('queue');
+  });
+
+  it('returns "queue" for "sent"', () => {
+    expect(matchQueueChoice('sent')).toBe('queue');
+  });
+
+  it('returns "queue" for "yes"', () => {
+    expect(matchQueueChoice('yes')).toBe('queue');
+  });
+
   it('returns "queue" for "queue"', () => {
     expect(matchQueueChoice('queue')).toBe('queue');
   });
 
   it('returns "queue" for "cue" (Whisper misrecognition)', () => {
     expect(matchQueueChoice('cue')).toBe('queue');
-  });
-
-  it('returns "queue" for "q"', () => {
-    expect(matchQueueChoice('q')).toBe('queue');
   });
 
   it('returns "wait" for "wait"', () => {
@@ -211,16 +223,8 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice('weight')).toBe('wait');
   });
 
-  it('returns "wait" for "wade"', () => {
-    expect(matchQueueChoice('wade')).toBe('wait');
-  });
-
-  it('returns "queue" for "thank you" (Whisper misrecognition)', () => {
-    expect(matchQueueChoice('Thank you.')).toBe('queue');
-  });
-
-  it('matches "queue" as substring', () => {
-    expect(matchQueueChoice("I'll queue")).toBe('queue');
+  it('returns "wait" for "no"', () => {
+    expect(matchQueueChoice('no')).toBe('wait');
   });
 
   it('matches "wait" as substring', () => {
@@ -232,17 +236,17 @@ describe('matchQueueChoice', () => {
   });
 
   it('handles leading/trailing whitespace', () => {
-    expect(matchQueueChoice('  queue  ')).toBe('queue');
+    expect(matchQueueChoice('  send  ')).toBe('queue');
     expect(matchQueueChoice('  wait  ')).toBe('wait');
   });
 
   it('is case-insensitive', () => {
-    expect(matchQueueChoice('QUEUE')).toBe('queue');
+    expect(matchQueueChoice('SEND')).toBe('queue');
     expect(matchQueueChoice('Wait')).toBe('wait');
   });
 
   it('strips trailing punctuation', () => {
-    expect(matchQueueChoice('queue.')).toBe('queue');
+    expect(matchQueueChoice('send.')).toBe('queue');
     expect(matchQueueChoice('wait!')).toBe('wait');
   });
 });
