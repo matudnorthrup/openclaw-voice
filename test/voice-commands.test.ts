@@ -49,6 +49,21 @@ describe('parseVoiceCommand — new-post', () => {
     expect(result).toEqual({ type: 'new-post', forum: 'open cloth forum', title: 'testing switching' });
   });
 
+  it('handles "please" before the verb', () => {
+    const result = parseVoiceCommand('Hey Watson, please create a new forum topic in my research forum called motorcycle gear', BOT);
+    expect(result).toEqual({ type: 'new-post', forum: 'research forum', title: 'motorcycle gear' });
+  });
+
+  it('handles "can you" before the verb', () => {
+    const result = parseVoiceCommand('Hey Watson, can you create a post in general about weekend plans', BOT);
+    expect(result).toEqual({ type: 'new-post', forum: 'general', title: 'weekend plans' });
+  });
+
+  it('handles "I want to" before the verb', () => {
+    const result = parseVoiceCommand('Hey Watson, I want to make a new thread in dev logs about deployment issues', BOT);
+    expect(result).toEqual({ type: 'new-post', forum: 'dev logs', title: 'deployment issues' });
+  });
+
   it('captures extended description after title', () => {
     const result = parseVoiceCommand(
       'Hey Watson, make a new post in 3D printing about multi-color printing. I have been experimenting with filament swapping and wanted to discuss approaches',

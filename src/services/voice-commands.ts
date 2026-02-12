@@ -76,9 +76,10 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'settings' };
   }
 
-  // "make/create/start a (new) (forum) post/thread/topic/discussion in [forum] about/called/titled [title]"
+  // Flexible: [filler] create/make/start [filler] post/thread/topic/discussion in [forum] about/called/titled [title]
+  // Drops ^ anchor and absorbs filler words so natural speech like "please create", "can you make", "I want to start" all work
   const newPostMatch = rest.match(
-    /^(?:please\s+)?(?:make|create|start)\s+(?:a\s+)?(?:new\s+)?(?:forum\s+)?(?:post|thread|topic|discussion)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
+    /(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)\s+in\s+(?:the\s+|my\s+)?(.+?)\s+(?:about|called|titled)\s+(.+)$/
   );
   if (newPostMatch) {
     return { type: 'new-post', forum: newPostMatch[1].trim(), title: newPostMatch[2].trim() };
