@@ -21,7 +21,7 @@ export interface ChannelOption {
 
 export function parseVoiceCommand(transcript: string, botName: string): VoiceCommand | null {
   const trimmed = transcript.trim();
-  const trigger = new RegExp(`^hey,?\\s+${escapeRegex(botName)}[,.]?\\s+`, 'i');
+  const trigger = new RegExp(`^(?:hey,?\\s+)?${escapeRegex(botName)}[,.]?\\s+`, 'i');
   const match = trimmed.match(trigger);
   if (!match) return null;
 
