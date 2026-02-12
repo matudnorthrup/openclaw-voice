@@ -257,9 +257,32 @@ export class VoicePipeline {
 
     // LLM fallback: if string matching failed, ask the utility model
     if (!match) {
-      const llmMatch = await this.matchChannelWithLLM(channelName, allChannels);
-      if (llmMatch) {
-        match = allChannels.find((c) => c.name === llmMatch.name) ?? undefined;
+      const llmResult = await this.matchChannelWithLLM(channelName, allChannels);
+      if (llmResult) {
+        if ('best' in llmResult) {
+          match = allChannels.find((c) => c.name === llmResult.best.name) ?? undefined;
+        } else if ('options' in llmResult && llmResult.options.length > 0) {
+          // Ambiguous — present options using the selection flow
+          const options: ChannelOption[] = llmResult.options.map((ch, i) => ({
+            index: i + 1,
+            name: ch.name,
+            displayName: ch.displayName,
+          }));
+
+          const lines = options.map((o) => `${o.index}: ${o.displayName}`);
+          const responseText = `No exact match for ${channelName}. Did you mean: ${lines.join('. ')}? Say a number or channel name.`;
+
+          this.awaitingSelection = {
+            options,
+            timeout: setTimeout(() => {
+              console.log('Channel selection timed out');
+              this.awaitingSelection = null;
+            }, 15_000),
+          };
+
+          await this.speakResponse(responseText, { inbox: true });
+          return;
+        }
       }
     }
 
@@ -304,22 +327,51 @@ export class VoicePipeline {
   private async matchChannelWithLLM(
     userPhrase: string,
     channels: { name: string; displayName: string }[],
-  ): Promise<{ name: string; displayName: string } | null> {
+  ): Promise<{ best: { name: string; displayName: string }; confident: boolean } | { options: { name: string; displayName: string }[] } | null> {
     try {
       const channelList = channels.map((c) => `${c.name}: ${c.displayName}`).join('\n');
 
       const result = await quickCompletion(
-        'You are a channel matcher. Given a list of channels and a user description, reply with ONLY the channel name (the part before the colon) that best matches. If nothing matches, reply with NONE. Do not explain.',
+        `You are a channel matcher. Given a list of channels and a user description, rank the top matches.
+Reply in this exact format:
+- If one channel is a clear match: BEST: channel_name
+- If 2-3 channels could match: OPTIONS: channel1, channel2, channel3
+- If nothing matches: NONE
+Use channel names (the part before the colon). Do not explain.`,
         `Channels:\n${channelList}\n\nUser wants: "${userPhrase}"`,
       );
 
-      const cleaned = result.trim().toLowerCase();
-      if (cleaned === 'none') return null;
+      const cleaned = result.trim();
+      console.log(`LLM channel match result: "${cleaned}"`);
 
-      const matched = channels.find((c) => c.name.toLowerCase() === cleaned);
-      if (matched) {
-        console.log(`LLM channel match: "${userPhrase}" → ${matched.name}`);
-        return matched;
+      // Parse BEST: single confident match
+      const bestMatch = cleaned.match(/^BEST:\s*(.+)$/i);
+      if (bestMatch) {
+        const name = bestMatch[1].trim().toLowerCase();
+        const matched = channels.find((c) => c.name.toLowerCase() === name);
+        if (matched) {
+          console.log(`LLM channel match: "${userPhrase}" → ${matched.name} (confident)`);
+          return { best: matched, confident: true };
+        }
+      }
+
+      // Parse OPTIONS: multiple candidates
+      const optionsMatch = cleaned.match(/^OPTIONS:\s*(.+)$/i);
+      if (optionsMatch) {
+        const names = optionsMatch[1].split(',').map((n) => n.trim().toLowerCase());
+        const resolved = names
+          .map((n) => channels.find((c) => c.name.toLowerCase() === n))
+          .filter((c): c is { name: string; displayName: string; active: boolean } => c != null);
+        if (resolved.length > 0) {
+          console.log(`LLM channel match: "${userPhrase}" → ${resolved.length} options`);
+          return { options: resolved };
+        }
+      }
+
+      // Single name without prefix (backwards compat / fallback)
+      const fallback = channels.find((c) => c.name.toLowerCase() === cleaned.toLowerCase());
+      if (fallback) {
+        return { best: fallback, confident: true };
       }
 
       return null;
