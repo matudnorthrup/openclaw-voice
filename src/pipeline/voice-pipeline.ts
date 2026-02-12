@@ -255,12 +255,29 @@ export class VoicePipeline {
         lower.includes(c.displayName.toLowerCase()),
     );
 
-    // LLM fallback: if string matching failed, ask the utility model
+    // LLM fallback: if string matching failed, ask the utility model (include forum threads)
     if (!match) {
-      const llmResult = await this.matchChannelWithLLM(channelName, allChannels);
+      const forumThreads = await this.router.getForumThreads();
+      const allCandidates = [
+        ...allChannels.map((c) => ({ name: c.name, displayName: c.displayName })),
+        ...forumThreads.map((t) => ({ name: t.name, displayName: t.displayName })),
+      ];
+      const llmResult = await this.matchChannelWithLLM(channelName, allCandidates);
       if (llmResult) {
         if ('best' in llmResult) {
           match = allChannels.find((c) => c.name === llmResult.best.name) ?? undefined;
+          // If not a static channel, it might be a forum thread — switch by ID
+          if (!match && llmResult.best.name.startsWith('id:')) {
+            const threadResult = await this.router.switchTo(llmResult.best.name);
+            if (threadResult.success) {
+              await this.onChannelSwitch();
+              await this.speakResponse(
+                this.buildSwitchConfirmation(threadResult.displayName || llmResult.best.displayName),
+                { inbox: true },
+              );
+              return;
+            }
+          }
         } else if ('options' in llmResult && llmResult.options.length > 0) {
           // Ambiguous — present options using the selection flow
           const options: ChannelOption[] = llmResult.options.map((ch, i) => ({

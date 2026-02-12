@@ -254,6 +254,29 @@ export class ChannelRouter {
     }
   }
 
+  async getForumThreads(): Promise<{ name: string; displayName: string; threadId: string }[]> {
+    const forums = this.guild.channels.cache.filter(
+      (ch): ch is ForumChannel => ch.type === ChannelType.GuildForum,
+    );
+
+    const results: { name: string; displayName: string; threadId: string }[] = [];
+    for (const forum of forums.values()) {
+      try {
+        const active = await forum.threads.fetchActive();
+        for (const thread of active.threads.values()) {
+          results.push({
+            name: `id:${thread.id}`,
+            displayName: `${thread.name} (in ${forum.name})`,
+            threadId: thread.id,
+          });
+        }
+      } catch (err: any) {
+        console.warn(`Failed to fetch threads from forum ${forum.name}: ${err.message}`);
+      }
+    }
+    return results;
+  }
+
   clearActiveHistory(): void {
     this.historyMap.delete(this.activeChannelName);
     console.log(`Cleared history for channel: ${this.activeChannelName}`);
