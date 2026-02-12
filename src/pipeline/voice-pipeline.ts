@@ -683,9 +683,9 @@ export class VoicePipeline {
       if (remaining > 0) {
         parts.push(`${remaining} more. Say next or done.`);
       } else {
-        parts.push("That's everything.");
         this.inboxFlow = null;
         this.inboxFlowIndex = 0;
+        parts.push(await this.switchHomeWithMessage("That's everything."));
       }
 
       const ttsStream = await textToSpeechStream(parts.join(' '));
@@ -700,9 +700,9 @@ export class VoicePipeline {
     if (!item) {
       const pending = this.queueState.getPendingItems();
       if (pending.length > 0) {
-        await this.speakResponse(`Nothing ready yet. ${pending.length} still waiting.`);
+        await this.speakResponse(`Nothing ready yet. ${pending.length} still waiting.`, { inbox: true });
       } else {
-        await this.speakResponse("That's everything.");
+        await this.speakResponse(await this.switchHomeWithMessage("Nothing new in the inbox."), { inbox: true });
       }
       return;
     }
@@ -727,6 +727,17 @@ export class VoicePipeline {
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
+  }
+
+  private async switchHomeWithMessage(prefix: string): Promise<string> {
+    if (this.router) {
+      const result = await this.router.switchToDefault();
+      if (result.success) {
+        await this.onChannelSwitch();
+        return `${prefix} Switching to ${result.displayName || 'General'}.`;
+      }
+    }
+    return prefix;
   }
 
   private async readInboxItem(activity: ChannelActivity): Promise<string[]> {
