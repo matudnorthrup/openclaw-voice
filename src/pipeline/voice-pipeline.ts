@@ -777,12 +777,15 @@ export class VoicePipeline {
     const lastMsg = this.router?.getLastMessage();
     let text = `Switched to ${displayName}.`;
     if (lastMsg) {
-      const speaker = lastMsg.role === 'user' ? 'you' : config.botName;
       // Truncate long messages for TTS
       const content = lastMsg.content.length > 200
         ? lastMsg.content.slice(0, 200) + '...'
         : lastMsg.content;
-      text += ` The last message was from ${speaker}: ${content}`;
+      if (lastMsg.role === 'user') {
+        text += ` You last said: ${content}`;
+      } else {
+        text += ` ${content}`;
+      }
     }
     return text;
   }
