@@ -25,7 +25,7 @@ interface QueueStateData {
 const STATE_PATH = `${process.env['HOME']}/clawd/voice-queue-state.json`;
 
 export class QueueState {
-  private mode: VoiceMode = 'wait';
+  private mode: VoiceMode = 'ask';
   private items: QueuedResponse[] = [];
   private channelSnapshots: Record<string, number> = {};
 
@@ -117,12 +117,12 @@ export class QueueState {
     try {
       const raw = readFileSync(STATE_PATH, 'utf-8');
       const data: QueueStateData = JSON.parse(raw);
-      this.mode = data.mode || 'wait';
+      this.mode = data.mode || 'ask';
       this.items = data.items || [];
       this.channelSnapshots = data.channelSnapshots || {};
     } catch {
       // File doesn't exist or is corrupt — start fresh
-      this.mode = 'wait';
+      this.mode = 'ask';
       this.items = [];
       this.channelSnapshots = {};
     }
