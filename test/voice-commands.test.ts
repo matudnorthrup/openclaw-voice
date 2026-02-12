@@ -215,6 +215,18 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice('wade')).toBe('wait');
   });
 
+  it('returns "queue" for "thank you" (Whisper misrecognition)', () => {
+    expect(matchQueueChoice('Thank you.')).toBe('queue');
+  });
+
+  it('matches "queue" as substring', () => {
+    expect(matchQueueChoice("I'll queue")).toBe('queue');
+  });
+
+  it('matches "wait" as substring', () => {
+    expect(matchQueueChoice("let's wait")).toBe('wait');
+  });
+
   it('returns null for unrecognized input', () => {
     expect(matchQueueChoice('hello')).toBeNull();
   });
@@ -227,5 +239,10 @@ describe('matchQueueChoice', () => {
   it('is case-insensitive', () => {
     expect(matchQueueChoice('QUEUE')).toBe('queue');
     expect(matchQueueChoice('Wait')).toBe('wait');
+  });
+
+  it('strips trailing punctuation', () => {
+    expect(matchQueueChoice('queue.')).toBe('queue');
+    expect(matchQueueChoice('wait!')).toBe('wait');
   });
 });
