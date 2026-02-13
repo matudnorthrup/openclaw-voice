@@ -10,6 +10,7 @@ import {
 } from '@discordjs/voice';
 import { Readable } from 'node:stream';
 import { generateWaitingTone } from '../audio/waiting-sound.js';
+import { getEarcon, type EarconName } from '../audio/earcons.js';
 
 export class DiscordAudioPlayer {
   private player: AudioPlayer;
@@ -106,6 +107,43 @@ export class DiscordAudioPlayer {
     stream.push(null);
     const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
     this.player.play(resource);
+  }
+
+  async playEarcon(name: EarconName): Promise<void> {
+    const buf = getEarcon(name);
+    const stream = new Readable({ read() {} });
+    stream.push(buf);
+    stream.push(null);
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    this.player.play(resource);
+
+    return new Promise<void>((resolve) => {
+      const onIdle = () => {
+        this.player.removeListener(AudioPlayerStatus.Idle, onIdle);
+        if (this.waitingLoop) {
+          this.playNextWaitingTone();
+        }
+        resolve();
+      };
+      this.player.on(AudioPlayerStatus.Idle, onIdle);
+    });
+  }
+
+  playEarconSync(name: EarconName): void {
+    const buf = getEarcon(name);
+    const stream = new Readable({ read() {} });
+    stream.push(buf);
+    stream.push(null);
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    this.player.play(resource);
+
+    const onIdle = () => {
+      this.player.removeListener(AudioPlayerStatus.Idle, onIdle);
+      if (this.waitingLoop) {
+        this.playNextWaitingTone();
+      }
+    };
+    this.player.on(AudioPlayerStatus.Idle, onIdle);
   }
 
   stopPlayback(): void {

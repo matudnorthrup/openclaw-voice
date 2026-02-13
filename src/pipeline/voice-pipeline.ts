@@ -9,6 +9,8 @@ import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import { parseVoiceCommand, matchesWakeWord, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
 import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
+import { PipelineStateMachine, type TransitionEffect } from './pipeline-state.js';
+import { initEarcons } from '../audio/earcons.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
 import type { QueueState } from '../services/queue-state.js';
@@ -19,26 +21,14 @@ import type { InboxTracker, ChannelActivity } from '../services/inbox-tracker.js
 export class VoicePipeline {
   private receiver: AudioReceiver;
   private player: DiscordAudioPlayer;
-  private processing = false;
+  private stateMachine: PipelineStateMachine;
   private logChannel: TextChannel | null = null;
   private session: SessionTranscript;
   private router: ChannelRouter | null = null;
   private gatewaySync: GatewaySync | null = null;
-  private awaitingSelection: { options: ChannelOption[]; timeout: NodeJS.Timeout } | null = null;
   private queueState: QueueState | null = null;
   private responsePoller: ResponsePoller | null = null;
-  private awaitingQueueChoice: { timeout: NodeJS.Timeout } | null = null;
-  private newPostFlow: {
-    step: 'forum' | 'title' | 'body';
-    forumId?: string;
-    forumName?: string;
-    title?: string;
-    timeout: NodeJS.Timeout;
-  } | null = null;
-  private awaitingSwitchChoice: { lastMessage: string; timeout: NodeJS.Timeout } | null = null;
   private inboxTracker: InboxTracker | null = null;
-  private inboxFlow: ChannelActivity[] | null = null;
-  private inboxFlowIndex = 0;
   private inboxLogChannel: TextChannel | null = null;
   private lastSpokenText: string = '';
   private silentWait = false;
@@ -53,6 +43,11 @@ export class VoicePipeline {
     this.logChannel = logChannel || null;
     this.inboxLogChannel = logChannel || null;
     this.session = new SessionTranscript();
+
+    // Initialize earcon cache and state machine
+    initEarcons();
+    this.stateMachine = new PipelineStateMachine();
+    this.stateMachine.setTimeoutHandler((effects) => this.applyEffects(effects));
 
     this.receiver = new AudioReceiver(
       connection,
@@ -97,6 +92,7 @@ export class VoicePipeline {
   stop(): void {
     this.receiver.stop();
     this.player.stopPlayback();
+    this.stateMachine.destroy();
     console.log('Voice pipeline stopped');
   }
 
@@ -108,6 +104,36 @@ export class VoicePipeline {
     if (this.player.isPlaying()) {
       console.log('Interrupting playback');
       this.player.stopPlayback();
+    }
+  }
+
+  private isProcessing(): boolean {
+    const st = this.stateMachine.getStateType();
+    return st === 'PROCESSING' || st === 'TRANSCRIBING' || st === 'SPEAKING';
+  }
+
+  /**
+   * Apply a list of transition effects produced by the state machine.
+   */
+  private async applyEffects(effects: TransitionEffect[]): Promise<void> {
+    for (const effect of effects) {
+      switch (effect.type) {
+        case 'earcon':
+          this.player.playEarconSync(effect.name);
+          break;
+        case 'speak':
+          await this.speakResponse(effect.text);
+          break;
+        case 'stop-playback':
+          this.player.stopPlayback();
+          break;
+        case 'start-waiting-loop':
+          this.player.startWaitingLoop();
+          break;
+        case 'stop-waiting-loop':
+          this.player.stopWaitingLoop();
+          break;
+      }
     }
   }
 
@@ -123,12 +149,23 @@ export class VoicePipeline {
 
     const gatedInterrupt = wasPlayingResponse && getVoiceSettings().gated;
 
-    if (this.processing) {
-      console.log('Already processing an utterance, skipping');
+    // Check if busy — buffer utterance instead of silently dropping
+    if (this.isProcessing()) {
+      console.log('Already processing — buffering utterance');
+      const effects = this.stateMachine.transition({ type: 'UTTERANCE_RECEIVED' });
+      this.stateMachine.bufferUtterance(userId, wavBuffer, durationMs);
+      await this.applyEffects(effects);
       return;
     }
 
-    this.processing = true;
+    // Transition to TRANSCRIBING
+    this.stateMachine.transition({ type: 'UTTERANCE_RECEIVED' });
+
+    // Play listening earcon in gated mode (pre-STT feedback)
+    if (getVoiceSettings().gated) {
+      this.player.playEarconSync('listening');
+    }
+
     const pipelineStart = Date.now();
 
     try {
@@ -144,11 +181,15 @@ export class VoicePipeline {
       if (!transcript || transcript.trim().length === 0) {
         console.log('Empty transcript, skipping');
         this.player.stopWaitingLoop();
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         return;
       }
 
+      this.stateMachine.transition({ type: 'TRANSCRIPT_READY', transcript });
+
       // Step 1.5: Check for awaiting responses (bypass LLM)
-      if (this.awaitingSelection) {
+      if (this.stateMachine.getStateType() === 'AWAITING_CHANNEL_SELECTION' ||
+          this.stateMachine.getChannelSelectionState()) {
         console.log(`Channel selection input: "${transcript}"`);
         await this.handleChannelSelection(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -156,7 +197,7 @@ export class VoicePipeline {
         return;
       }
 
-      if (this.awaitingQueueChoice) {
+      if (this.stateMachine.getQueueChoiceState()) {
         console.log(`Queue choice input: "${transcript}"`);
         await this.handleQueueChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -164,7 +205,7 @@ export class VoicePipeline {
         return;
       }
 
-      if (this.awaitingSwitchChoice) {
+      if (this.stateMachine.getSwitchChoiceState()) {
         console.log(`Switch choice input: "${transcript}"`);
         await this.handleSwitchChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -172,8 +213,9 @@ export class VoicePipeline {
         return;
       }
 
-      if (this.newPostFlow) {
-        console.log(`New-post flow (${this.newPostFlow.step}): "${transcript}"`);
+      if (this.stateMachine.getNewPostFlowState()) {
+        const flowState = this.stateMachine.getNewPostFlowState()!;
+        console.log(`New-post flow (${flowState.step}): "${transcript}"`);
         const fallThrough = await this.handleNewPostStep(transcript);
         if (!fallThrough) {
           const totalMs = Date.now() - pipelineStart;
@@ -196,6 +238,7 @@ export class VoicePipeline {
           console.log(`Gated: discarded "${transcript}"`);
           this.player.stopWaitingLoop();
         }
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         return;
       }
 
@@ -240,6 +283,9 @@ export class VoicePipeline {
           return;
         }
       }
+
+      this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
+
       if (mode === 'queue') {
         await this.handleQueueMode(userId, transcript);
       } else if (mode === 'ask') {
@@ -255,7 +301,17 @@ export class VoicePipeline {
       this.player.stopWaitingLoop();
       this.player.stopPlayback();
     } finally {
-      this.processing = false;
+      this.stateMachine.transition({ type: 'PROCESSING_COMPLETE' });
+
+      // Re-process buffered utterance if any
+      const buffered = this.stateMachine.getBufferedUtterance();
+      if (buffered) {
+        console.log('Re-processing buffered utterance');
+        // Use setImmediate to avoid deep recursion
+        setImmediate(() => {
+          this.handleUtterance(buffered.userId, buffered.wavBuffer, buffered.durationMs);
+        });
+      }
     }
   }
 
@@ -306,16 +362,6 @@ export class VoicePipeline {
     }
   }
 
-  private resetNewPostTimeout(ms: number): void {
-    if (this.newPostFlow) {
-      clearTimeout(this.newPostFlow.timeout);
-      this.newPostFlow.timeout = setTimeout(() => {
-        console.log('New-post flow timed out');
-        this.newPostFlow = null;
-      }, ms);
-    }
-  }
-
   private async startNewPostFlow(): Promise<void> {
     if (!this.router) return;
 
@@ -326,48 +372,50 @@ export class VoicePipeline {
     }
 
     const names = forums.map((f) => f.name).join(', ');
-    this.newPostFlow = {
+    this.stateMachine.transition({
+      type: 'ENTER_NEW_POST_FLOW',
       step: 'forum',
-      timeout: setTimeout(() => {}, 0), // placeholder, reset after speak
-    };
+      timeoutMs: 30_000,
+    });
 
     await this.speakResponse(`Which forum? Available: ${names}.`);
-    this.resetNewPostTimeout(30_000);
   }
 
   private async handleNewPostStep(transcript: string): Promise<string | null> {
-    if (!this.newPostFlow || !this.router) return null;
+    const flowState = this.stateMachine.getNewPostFlowState();
+    if (!flowState || !this.router) return null;
 
-    const { step } = this.newPostFlow;
+    const { step } = flowState;
 
     if (step === 'forum') {
       const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
       // Check for cancel
       if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/.test(input)) {
-        clearTimeout(this.newPostFlow.timeout);
-        this.newPostFlow = null;
+        const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+        await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
         return null;
       }
 
       const match = this.router.findForumChannel(input);
       if (!match) {
+        const effects = this.stateMachine.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+        await this.applyEffects(effects);
         await this.speakResponse(`I couldn't find a forum matching "${transcript}". Try again, or say cancel.`);
-        this.resetNewPostTimeout(30_000);
         return null;
       }
 
-      clearTimeout(this.newPostFlow.timeout);
-      this.newPostFlow = {
+      this.stateMachine.transition({
+        type: 'NEW_POST_ADVANCE',
         step: 'title',
         forumId: match.id,
         forumName: match.name,
-        timeout: setTimeout(() => {}, 0),
-      };
+        timeoutMs: 30_000,
+      });
 
+      this.player.playEarconSync('acknowledged');
       await this.speakResponse(`Got it, ${match.name}. What should the post be called?`);
-      this.resetNewPostTimeout(30_000);
       return null;
     }
 
@@ -375,22 +423,23 @@ export class VoicePipeline {
       const input = transcript.trim().replace(/[.!?]+$/, '');
 
       if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(input)) {
-        clearTimeout(this.newPostFlow.timeout);
-        this.newPostFlow = null;
+        const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+        await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
         return null;
       }
 
-      clearTimeout(this.newPostFlow.timeout);
-      this.newPostFlow = {
-        ...this.newPostFlow,
+      this.stateMachine.transition({
+        type: 'NEW_POST_ADVANCE',
         step: 'body',
+        forumId: flowState.forumId,
+        forumName: flowState.forumName,
         title: input,
-        timeout: setTimeout(() => {}, 0),
-      };
+        timeoutMs: 60_000,
+      });
 
+      this.player.playEarconSync('acknowledged');
       await this.speakResponse(`Title: ${input}. What's the prompt?`);
-      this.resetNewPostTimeout(60_000);
       return null;
     }
 
@@ -398,20 +447,20 @@ export class VoicePipeline {
       const body = transcript.trim();
 
       if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(body.toLowerCase().replace(/[.!?,]+$/, ''))) {
-        clearTimeout(this.newPostFlow.timeout);
-        this.newPostFlow = null;
+        const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+        await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
         return null;
       }
 
-      const { forumId, forumName, title } = this.newPostFlow;
-      clearTimeout(this.newPostFlow.timeout);
-      this.newPostFlow = null;
+      const { forumId, forumName, title } = flowState;
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
 
       const result = await this.router.createForumPost(forumId!, title!, body);
       if (result.success) {
         await this.onChannelSwitch();
         console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
+        this.player.playEarconSync('acknowledged');
         await this.speakResponse(`Created ${title} in ${forumName}. You're now in the new thread.`);
         // Return body so pipeline falls through to LLM
         return body;
@@ -462,14 +511,13 @@ export class VoicePipeline {
                 const fullContent = lastMsg.role === 'user'
                   ? `You last said: ${lastMsg.content}`
                   : lastMsg.content;
-                this.awaitingSwitchChoice = {
+                this.stateMachine.transition({
+                  type: 'ENTER_SWITCH_CHOICE',
                   lastMessage: fullContent,
-                  timeout: setTimeout(() => {
-                    console.log('Switch choice timed out');
-                    this.awaitingSwitchChoice = null;
-                  }, 30_000),
-                };
+                  timeoutMs: 30_000,
+                });
                 await this.speakResponse(`Switched to ${displayName}. Read, or prompt?`, { inbox: true });
+                this.player.playEarconSync('ready');
               } else {
                 await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
               }
@@ -487,13 +535,11 @@ export class VoicePipeline {
           const lines = options.map((o) => `${o.index}: ${o.displayName}`);
           const responseText = `No exact match for ${channelName}. Did you mean: ${lines.join('. ')}? Say a number or channel name.`;
 
-          this.awaitingSelection = {
+          this.stateMachine.transition({
+            type: 'ENTER_CHANNEL_SELECTION',
             options,
-            timeout: setTimeout(() => {
-              console.log('Channel selection timed out');
-              this.awaitingSelection = null;
-            }, 15_000),
-          };
+            timeoutMs: 15_000,
+          });
 
           await this.speakResponse(responseText, { inbox: true });
           return;
@@ -532,13 +578,11 @@ export class VoicePipeline {
             ? `You last said: ${lastMsg.content}`
             : lastMsg.content;
 
-          this.awaitingSwitchChoice = {
+          this.stateMachine.transition({
+            type: 'ENTER_SWITCH_CHOICE',
             lastMessage: fullContent,
-            timeout: setTimeout(() => {
-              console.log('Switch choice timed out');
-              this.awaitingSwitchChoice = null;
-            }, 30_000),
-          };
+            timeoutMs: 30_000,
+          });
 
           // Update inbox snapshot now (don't wait for choice)
           if (this.inboxTracker?.isActive()) {
@@ -549,6 +593,7 @@ export class VoicePipeline {
           }
 
           await this.speakResponse(responseText, { inbox: true });
+          this.player.playEarconSync('ready');
           return;
         } else {
           responseText = `Switched to ${result.displayName || target}.`;
@@ -652,30 +697,34 @@ Use channel names (the part before the colon). Do not explain.`,
     const lines = options.map((o) => `${o.index}: ${o.displayName}`);
     const responseText = `Here are your recent channels. ${lines.join('. ')}. Say a number or channel name.`;
 
-    // Enter selection mode with 15s timeout
-    this.awaitingSelection = {
+    // Enter selection mode via state machine
+    this.stateMachine.transition({
+      type: 'ENTER_CHANNEL_SELECTION',
       options,
-      timeout: setTimeout(() => {
-        console.log('Channel selection timed out');
-        this.awaitingSelection = null;
-      }, 15_000),
-    };
+      timeoutMs: 15_000,
+    });
 
     await this.speakResponse(responseText);
+    this.player.playEarconSync('ready');
   }
 
   private async handleChannelSelection(transcript: string): Promise<void> {
-    if (!this.awaitingSelection || !this.router) return;
+    const selState = this.stateMachine.getChannelSelectionState();
+    if (!selState || !this.router) return;
 
-    const { options, timeout } = this.awaitingSelection;
-    clearTimeout(timeout);
-    this.awaitingSelection = null;
-
+    const { options } = selState;
     const selected = matchChannelSelection(transcript, options);
+
     if (!selected) {
-      await this.speakResponse("I didn't catch that. You can try again by saying hey " + config.botName + ", change channels.");
+      // Unrecognized — reprompt with error earcon
+      const effects = this.stateMachine.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+      await this.applyEffects(effects);
       return;
     }
+
+    // Recognized — clear the awaiting state
+    this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+    this.player.playEarconSync('acknowledged');
 
     const result = await this.router.switchTo(selected.name);
     if (result.success) {
@@ -802,7 +851,9 @@ Use channel names (the part before the colon). Do not explain.`,
     const ttsStream = await textToSpeechStream(responseText);
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
+    this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
     await this.player.playStream(ttsStream);
+    this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
     this.gateGraceUntil = Date.now() + 5_000;
   }
 
@@ -831,58 +882,44 @@ Use channel names (the part before the colon). Do not explain.`,
 
     this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
 
-    // Brief confirmation — speak immediately, don't block on inbox check
+    // Brief confirmation with acknowledged earcon
+    this.player.playEarconSync('acknowledged');
     await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
-    // Speak the prompt, then await choice
+    // Speak the prompt, then await choice via state machine
     await this.speakResponse('Inbox, or wait?', { inbox: true });
+    this.player.playEarconSync('ready');
 
-    this.awaitingQueueChoice = {
-      timeout: setTimeout(() => {
-        console.log('Queue choice timed out, defaulting to wait');
-        this.awaitingQueueChoice = null;
-        // Default to wait mode behavior
-        this.processing = true;
-        this.player.startWaitingLoop();
-        this.handleWaitMode(userId, transcript)
-          .catch((err) => {
-            console.error('Wait mode fallback error:', err);
-            this.player.stopWaitingLoop();
-            this.player.stopPlayback();
-          })
-          .finally(() => {
-            this.processing = false;
-          });
-      }, 20_000),
-    };
-
-    // Store transcript/userId for when choice comes in
-    (this.awaitingQueueChoice as any).userId = userId;
-    (this.awaitingQueueChoice as any).transcript = transcript;
+    this.stateMachine.transition({
+      type: 'ENTER_QUEUE_CHOICE',
+      userId,
+      transcript,
+      timeoutMs: 20_000,
+    });
   }
 
   private async handleQueueChoiceResponse(transcript: string): Promise<void> {
-    if (!this.awaitingQueueChoice) return;
+    const choiceState = this.stateMachine.getQueueChoiceState();
+    if (!choiceState) return;
 
-    const { timeout } = this.awaitingQueueChoice;
-    const userId = (this.awaitingQueueChoice as any).userId as string;
-    const originalTranscript = (this.awaitingQueueChoice as any).transcript as string;
-    clearTimeout(timeout);
-    this.awaitingQueueChoice = null;
+    const { userId, transcript: originalTranscript } = choiceState;
 
     const choice = matchQueueChoice(transcript);
     if (choice === 'queue') {
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
       await this.handleQueueMode(userId, originalTranscript);
       // Auto-check inbox after dispatch in ask mode
       if (this.inboxTracker?.isActive()) {
         await this.handleInboxCheck();
       }
     } else if (choice === 'silent') {
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
       this.silentWait = true;
       await this.handleSilentQueue(userId, originalTranscript);
     } else if (choice === 'wait') {
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
       await this.handleWaitMode(userId, originalTranscript);
     } else {
       // Try navigation commands — with or without wake word
@@ -891,12 +928,13 @@ Use channel names (the part before the colon). Do not explain.`,
         ?? this.matchBareQueueCommand(transcript);
       if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default')) {
         console.log(`Queue choice: navigation (${navCommand.type}), queuing original prompt first`);
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         await this.handleQueueMode(userId, originalTranscript);
         await this.handleVoiceCommand(navCommand);
       } else {
-        // Cancel or unrecognized — discard the utterance
-        console.log(`Queue choice: discarded (input: "${transcript}")`);
-        this.player.stopWaitingLoop();
+        // Unrecognized — reprompt with error earcon
+        const effects = this.stateMachine.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+        await this.applyEffects(effects);
       }
     }
   }
@@ -927,29 +965,35 @@ Use channel names (the part before the colon). Do not explain.`,
     // One confirmation tone, then silence
     console.log('Silent queue: dispatched, playing single tone');
     this.player.stopWaitingLoop();
-    this.player.playSingleTone();
+    this.player.playEarconSync('acknowledged');
   }
 
   private async handleSwitchChoiceResponse(transcript: string): Promise<void> {
-    if (!this.awaitingSwitchChoice) return;
+    const switchState = this.stateMachine.getSwitchChoiceState();
+    if (!switchState) return;
 
-    const { lastMessage, timeout } = this.awaitingSwitchChoice;
-    clearTimeout(timeout);
-    this.awaitingSwitchChoice = null;
+    const { lastMessage } = switchState;
 
     const choice = matchSwitchChoice(transcript);
     if (choice === 'read') {
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
       // Read the full last message
       await this.speakResponse(lastMessage, { inbox: true });
     } else if (choice === 'prompt') {
-      // Confirm with a single tone so user knows Watson is ready
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+      // Confirm with a ready earcon so user knows Watson is ready
       console.log('Switch choice: prompt');
       this.player.stopWaitingLoop();
-      this.player.playSingleTone();
-    } else {
-      // 'cancel' or unrecognized — just stop waiting
-      console.log(`Switch choice: ${choice ?? 'unrecognized'} (input: "${transcript}")`);
+      this.player.playEarconSync('ready');
+    } else if (choice === 'cancel') {
+      const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+      await this.applyEffects(effects);
+      console.log('Switch choice: cancel');
       this.player.stopWaitingLoop();
+    } else {
+      // Unrecognized — reprompt with error earcon
+      const effects = this.stateMachine.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+      await this.applyEffects(effects);
     }
   }
 
@@ -1042,8 +1086,10 @@ Use channel names (the part before the colon). Do not explain.`,
       if (this.inboxTracker) {
         this.inboxTracker.deactivate();
       }
-      this.inboxFlow = null;
-      this.inboxFlowIndex = 0;
+      // Clear inbox flow if active
+      if (this.stateMachine.getInboxFlowState()) {
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+      }
     }
 
     const labels: Record<VoiceMode, string> = {
@@ -1098,9 +1144,11 @@ Use channel names (the part before the colon). Do not explain.`,
         return;
       }
 
-      // Store as inbox flow for "next" traversal
-      this.inboxFlow = activities;
-      this.inboxFlowIndex = 0;
+      // Store as inbox flow for "next" traversal via state machine
+      this.stateMachine.transition({
+        type: 'ENTER_INBOX_FLOW',
+        items: activities,
+      });
 
       const channelNames = activities.map((a) => a.displayName);
       const pending = this.queueState.getPendingItems();
@@ -1142,10 +1190,11 @@ Use channel names (the part before the colon). Do not explain.`,
 
     // If we have an inbox flow from a prior check, use it
     let activity: ChannelActivity | null = null;
+    const flowState = this.stateMachine.getInboxFlowState();
 
-    if (this.inboxFlow && this.inboxFlowIndex < this.inboxFlow.length) {
-      activity = this.inboxFlow[this.inboxFlowIndex];
-      this.inboxFlowIndex++;
+    if (flowState && flowState.index < flowState.items.length) {
+      activity = flowState.items[flowState.index] as ChannelActivity;
+      this.stateMachine.transition({ type: 'INBOX_ADVANCE' });
     } else if (this.inboxTracker?.isActive() && this.router) {
       // Mark current channel as seen BEFORE fresh check so it doesn't re-appear
       const currentSessionKey = this.router.getActiveSessionKey();
@@ -1156,8 +1205,11 @@ Use channel names (the part before the colon). Do not explain.`,
       const channels = this.router.getAllChannelSessionKeys();
       const activities = await this.inboxTracker.checkInbox(channels);
       if (activities.length > 0) {
-        this.inboxFlow = activities;
-        this.inboxFlowIndex = 1;
+        this.stateMachine.transition({
+          type: 'ENTER_INBOX_FLOW',
+          items: activities,
+        });
+        this.stateMachine.transition({ type: 'INBOX_ADVANCE' });
         activity = activities[0];
       }
     }
@@ -1166,15 +1218,15 @@ Use channel names (the part before the colon). Do not explain.`,
       const parts = await this.readInboxItem(activity);
 
       // Report remaining
-      const remaining = this.inboxFlow
-        ? this.inboxFlow.length - this.inboxFlowIndex
+      const updatedFlow = this.stateMachine.getInboxFlowState();
+      const remaining = updatedFlow
+        ? updatedFlow.items.length - updatedFlow.index
         : 0;
 
       if (remaining > 0) {
         parts.push(`${remaining} more. Say next or done.`);
       } else {
-        this.inboxFlow = null;
-        this.inboxFlowIndex = 0;
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         parts.push(await this.switchHomeWithMessage("That's everything."));
       }
 
@@ -1352,7 +1404,7 @@ Use channel names (the part before the colon). Do not explain.`,
       console.log(`Idle notify skipped (silent wait): "${message.slice(0, 60)}..."`);
       return;
     }
-    if (this.processing || this.player.isPlaying()) {
+    if (this.isProcessing() || this.player.isPlaying()) {
       console.log(`Idle notify skipped (busy): "${message}"`);
       return;
     }
@@ -1363,7 +1415,7 @@ Use channel names (the part before the colon). Do not explain.`,
     textToSpeechStream(message)
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
-        if (!this.processing && !this.player.isPlaying()) {
+        if (!this.isProcessing() && !this.player.isPlaying()) {
           this.player.playStream(stream).then(() => {
             this.gateGraceUntil = Date.now() + 5_000;
           });
