@@ -42,6 +42,7 @@ export class VoicePipeline {
   private inboxLogChannel: TextChannel | null = null;
   private lastSpokenText: string = '';
   private silentWait = false;
+  private gateGraceUntil = 0;
 
   constructor(
     connection: VoiceConnection,
@@ -185,7 +186,9 @@ export class VoicePipeline {
       }
 
       // Gate check: in gated mode, discard utterances that don't start with the wake word
-      if (getVoiceSettings().gated && !matchesWakeWord(transcript, config.botName)) {
+      // Grace period: skip gate for 5s after Watson finishes speaking
+      const inGracePeriod = Date.now() < this.gateGraceUntil;
+      if (getVoiceSettings().gated && !inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
           // Don't stop playback — Watson keeps talking
@@ -196,8 +199,11 @@ export class VoicePipeline {
         return;
       }
 
-      // Gated mode: wake word confirmed — start waiting loop now
+      // Gated mode: passed gate check — start waiting loop now
       if (getVoiceSettings().gated) {
+        if (inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
+          console.log('Gate grace period: processing without wake word');
+        }
         if (gatedInterrupt) {
           console.log('Gated interrupt: wake word confirmed, interrupting playback');
           this.player.stopPlayback();
@@ -797,6 +803,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
+    this.gateGraceUntil = Date.now() + 5_000;
   }
 
   private async handleQueueMode(userId: string, transcript: string): Promise<void> {
@@ -1167,6 +1174,7 @@ Use channel names (the part before the colon). Do not explain.`,
       this.player.stopWaitingLoop();
       this.player.stopPlayback();
       await this.player.playStream(ttsStream);
+      this.gateGraceUntil = Date.now() + 5_000;
       return;
     }
 
@@ -1204,6 +1212,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
+    this.gateGraceUntil = Date.now() + 5_000;
   }
 
   private async switchHomeWithMessage(prefix: string): Promise<string> {
@@ -1318,6 +1327,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
+    this.gateGraceUntil = Date.now() + 5_000;
   }
 
   private logToInbox(message: string): void {
@@ -1344,7 +1354,9 @@ Use channel names (the part before the colon). Do not explain.`,
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
         if (!this.processing && !this.player.isPlaying()) {
-          this.player.playStream(stream);
+          this.player.playStream(stream).then(() => {
+            this.gateGraceUntil = Date.now() + 5_000;
+          });
         }
       })
       .catch((err) => {
