@@ -244,10 +244,12 @@ export class VoicePipeline {
         return;
       }
 
-      // Valid interaction confirmed — play listening earcon
-      this.player.playEarconSync('listening');
+      // Valid interaction confirmed — play listening earcon and wait for it to finish
+      await this.player.playEarcon('listening');
 
       // Gated mode: passed gate check — start waiting loop now
+      // Skip in ask mode — no LLM processing, Watson just speaks "Inbox, or wait?"
+      const mode = this.queueState?.getMode() ?? 'wait';
       if (getVoiceSettings().gated) {
         if (inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
           console.log('Gate grace period: processing without wake word');
@@ -256,7 +258,9 @@ export class VoicePipeline {
           console.log('Gated interrupt: wake word confirmed, interrupting playback');
           this.player.stopPlayback();
         }
-        this.player.startWaitingLoop();
+        if (mode !== 'ask') {
+          this.player.startWaitingLoop();
+        }
       }
 
       const command = parseVoiceCommand(transcript, config.botName);
@@ -277,7 +281,6 @@ export class VoicePipeline {
       }
 
       // In queue/ask mode, also match bare navigation commands without "Hey Watson" prefix
-      const mode = this.queueState?.getMode() ?? 'wait';
       if (mode !== 'wait') {
         const bareCommand = this.matchBareQueueCommand(transcript);
         if (bareCommand) {
