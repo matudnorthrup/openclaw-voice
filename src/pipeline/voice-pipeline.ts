@@ -40,6 +40,7 @@ export class VoicePipeline {
   private inboxFlow: ChannelActivity[] | null = null;
   private inboxFlowIndex = 0;
   private inboxLogChannel: TextChannel | null = null;
+  private lastSpokenText: string = '';
 
   constructor(
     connection: VoiceConnection,
@@ -110,10 +111,15 @@ export class VoicePipeline {
 
   private async handleUtterance(userId: string, wavBuffer: Buffer, durationMs: number): Promise<void> {
     // Interrupt TTS playback if user speaks — but don't kill the waiting tone
-    if (this.player.isPlaying() && !this.player.isWaiting()) {
+    const wasPlayingResponse = this.player.isPlaying() && !this.player.isWaiting();
+
+    // Open mode: interrupt immediately. Gated mode: defer until after transcription.
+    if (wasPlayingResponse && !getVoiceSettings().gated) {
       console.log('User spoke during playback — interrupting');
       this.player.stopPlayback();
     }
+
+    const gatedInterrupt = wasPlayingResponse && getVoiceSettings().gated;
 
     if (this.processing) {
       console.log('Already processing an utterance, skipping');
@@ -124,8 +130,10 @@ export class VoicePipeline {
     const pipelineStart = Date.now();
 
     try {
-      // Start waiting indicator sound
-      this.player.startWaitingLoop();
+      // Start waiting indicator sound (skip if gated interrupt — Watson is still talking)
+      if (!gatedInterrupt) {
+        this.player.startWaitingLoop();
+      }
 
       // Step 1: Speech-to-text
       let transcript = await transcribe(wavBuffer);
@@ -175,9 +183,21 @@ export class VoicePipeline {
 
       // Gate check: in gated mode, discard utterances that don't start with the wake word
       if (getVoiceSettings().gated && !matchesWakeWord(transcript, config.botName)) {
-        console.log(`Gated: discarded "${transcript}"`);
-        this.player.stopWaitingLoop();
+        if (gatedInterrupt) {
+          console.log(`Gated: discarded interrupt "${transcript}"`);
+          // Don't stop playback — Watson keeps talking
+        } else {
+          console.log(`Gated: discarded "${transcript}"`);
+          this.player.stopWaitingLoop();
+        }
         return;
+      }
+
+      // Gated interrupt passed wake word check — now actually interrupt
+      if (gatedInterrupt) {
+        console.log('Gated interrupt: wake word confirmed, interrupting playback');
+        this.player.stopPlayback();
+        this.player.startWaitingLoop();
       }
 
       const command = parseVoiceCommand(transcript, config.botName);
@@ -265,6 +285,12 @@ export class VoicePipeline {
         break;
       case 'gated-mode':
         await this.handleGatedMode(command.enabled);
+        break;
+      case 'pause':
+        this.handlePause();
+        break;
+      case 'replay':
+        await this.handleReplay();
         break;
     }
   }
@@ -761,6 +787,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
     void this.syncToOpenClaw(transcript, responseText);
 
+    this.lastSpokenText = responseText;
     const ttsStream = await textToSpeechStream(responseText);
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
@@ -968,6 +995,20 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.speakResponse(message, { inbox: true });
   }
 
+  private handlePause(): void {
+    console.log('Pause command: stopping playback');
+    this.player.stopPlayback();
+  }
+
+  private async handleReplay(): Promise<void> {
+    if (!this.lastSpokenText) {
+      await this.speakResponse("I haven't said anything yet.");
+      return;
+    }
+    console.log(`Replay: "${this.lastSpokenText.slice(0, 60)}..."`);
+    await this.speakResponse(this.lastSpokenText, { isReplay: true });
+  }
+
   private async handleInboxCheck(): Promise<void> {
     if (!this.queueState) {
       await this.speakResponse('Queue mode is not available.');
@@ -1070,7 +1111,9 @@ Use channel names (the part before the colon). Do not explain.`,
         parts.push(await this.switchHomeWithMessage("That's everything."));
       }
 
-      const ttsStream = await textToSpeechStream(parts.join(' '));
+      const fullText = parts.join(' ');
+      this.lastSpokenText = fullText;
+      const ttsStream = await textToSpeechStream(fullText);
       this.player.stopWaitingLoop();
       this.player.stopPlayback();
       await this.player.playStream(ttsStream);
@@ -1105,7 +1148,9 @@ Use channel names (the part before the colon). Do not explain.`,
     const prefix = `From ${item.displayName}: `;
     const suffix = remaining > 0 ? ` ${remaining} more in queue.` : '';
 
-    const ttsStream = await textToSpeechStream(prefix + item.responseText + suffix);
+    const fullText = prefix + item.responseText + suffix;
+    this.lastSpokenText = fullText;
+    const ttsStream = await textToSpeechStream(fullText);
     this.player.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
@@ -1210,11 +1255,14 @@ Use channel names (the part before the colon). Do not explain.`,
     return text;
   }
 
-  private async speakResponse(text: string, options?: { inbox?: boolean }): Promise<void> {
+  private async speakResponse(text: string, options?: { inbox?: boolean; isReplay?: boolean }): Promise<void> {
     if (options?.inbox) {
       this.logToInbox(`**${config.botName}:** ${text}`);
     } else {
       this.log(`**${config.botName}:** ${text}`);
+    }
+    if (!options?.isReplay) {
+      this.lastSpokenText = text;
     }
     const ttsStream = await textToSpeechStream(text);
     this.player.stopWaitingLoop();

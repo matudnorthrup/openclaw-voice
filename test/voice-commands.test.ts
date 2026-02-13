@@ -477,6 +477,60 @@ describe('matchesWakeWord', () => {
   });
 });
 
+describe('parseVoiceCommand — pause', () => {
+  const cases = [
+    'pause', 'stop', 'stop talking', 'be quiet', 'shut up',
+    'shush', 'hush', 'quiet', 'silence', 'enough',
+  ];
+
+  for (const phrase of cases) {
+    it(`parses "${phrase}"`, () => {
+      expect(parseVoiceCommand(`Hey Watson, ${phrase}`, BOT)).toEqual({ type: 'pause' });
+    });
+  }
+
+  it('parses with "Hello Watson" trigger', () => {
+    expect(parseVoiceCommand('Hello Watson, pause', BOT)).toEqual({ type: 'pause' });
+  });
+
+  it('parses with trailing punctuation', () => {
+    expect(parseVoiceCommand('Hey Watson, stop!', BOT)).toEqual({ type: 'pause' });
+  });
+
+  it('returns null for "stop the music" (not an exact match)', () => {
+    expect(parseVoiceCommand('Hey Watson, stop the music', BOT)).toBeNull();
+  });
+
+  it('returns null without wake word', () => {
+    expect(parseVoiceCommand('pause', BOT)).toBeNull();
+  });
+});
+
+describe('parseVoiceCommand — replay', () => {
+  const cases = [
+    'replay', 're-read', 'reread', 'read that again', 'say that again',
+    'repeat', 'repeat that', 'what did you say', 'come again',
+  ];
+
+  for (const phrase of cases) {
+    it(`parses "${phrase}"`, () => {
+      expect(parseVoiceCommand(`Hey Watson, ${phrase}`, BOT)).toEqual({ type: 'replay' });
+    });
+  }
+
+  it('parses with "Hello Watson" trigger', () => {
+    expect(parseVoiceCommand('Hello Watson, replay', BOT)).toEqual({ type: 'replay' });
+  });
+
+  it('parses with trailing punctuation', () => {
+    expect(parseVoiceCommand('Hey Watson, repeat that.', BOT)).toEqual({ type: 'replay' });
+  });
+
+  it('returns null without wake word', () => {
+    expect(parseVoiceCommand('replay', BOT)).toBeNull();
+  });
+});
+
 describe('parseVoiceCommand — gated-mode', () => {
   it('parses "gated mode"', () => {
     expect(parseVoiceCommand('Hey Watson, gated mode', BOT)).toEqual({ type: 'gated-mode', enabled: true });

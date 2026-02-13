@@ -13,7 +13,9 @@ export type VoiceCommand =
   | { type: 'inbox-check' }
   | { type: 'inbox-next' }
   | { type: 'voice-status' }
-  | { type: 'gated-mode'; enabled: boolean };
+  | { type: 'gated-mode'; enabled: boolean }
+  | { type: 'pause' }
+  | { type: 'replay' };
 
 export interface ChannelOption {
   index: number;
@@ -108,6 +110,16 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip"
   if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(rest)) {
     return { type: 'inbox-next' };
+  }
+
+  // "pause", "stop", "stop talking", "be quiet", "shut up", "shush", "hush", "quiet", "silence", "enough"
+  if (/^(?:pause|stop(?:\s+talking)?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough)$/.test(rest)) {
+    return { type: 'pause' };
+  }
+
+  // "replay", "re-read", "reread", "read that again", "say that again", "repeat", "repeat that", "what did you say", "come again"
+  if (/^(?:replay|re-?read|read\s+that\s+again|say\s+that\s+again|repeat(?:\s+that)?|what\s+did\s+you\s+say|come\s+again)$/.test(rest)) {
+    return { type: 'replay' };
   }
 
   return null;
