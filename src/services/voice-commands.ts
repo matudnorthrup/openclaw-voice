@@ -99,6 +99,21 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   return null;
 }
 
+export function matchSwitchChoice(transcript: string): 'read' | 'prompt' | 'cancel' | null {
+  const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+
+  // Match "read" and variants
+  if (/^(?:read|read it|read that|yes|yeah|yep|sure|go ahead|read it back|read back)$/.test(input)) return 'read';
+
+  // Match "prompt" and variants
+  if (/^(?:prompt|skip|no|nope|pass|just prompt|new prompt|skip it)$/.test(input)) return 'prompt';
+
+  // Match "cancel" — discard
+  if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|nothing)$/.test(input)) return 'cancel';
+
+  return null;
+}
+
 export function matchQueueChoice(transcript: string): 'queue' | 'wait' | 'cancel' | null {
   const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 

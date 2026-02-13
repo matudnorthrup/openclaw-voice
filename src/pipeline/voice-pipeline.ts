@@ -7,7 +7,7 @@ import { getResponse, quickCompletion } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
-import { parseVoiceCommand, matchChannelSelection, matchQueueChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
+import { parseVoiceCommand, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
 import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
@@ -35,6 +35,7 @@ export class VoicePipeline {
     title?: string;
     timeout: NodeJS.Timeout;
   } | null = null;
+  private awaitingSwitchChoice: { lastMessage: string; timeout: NodeJS.Timeout } | null = null;
   private inboxTracker: InboxTracker | null = null;
   private inboxFlow: ChannelActivity[] | null = null;
   private inboxFlowIndex = 0;
@@ -148,6 +149,14 @@ export class VoicePipeline {
         await this.handleQueueChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
         console.log(`Voice command (queue choice) complete: ${totalMs}ms total`);
+        return;
+      }
+
+      if (this.awaitingSwitchChoice) {
+        console.log(`Switch choice input: "${transcript}"`);
+        await this.handleSwitchChoiceResponse(transcript);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command (switch choice) complete: ${totalMs}ms total`);
         return;
       }
 
@@ -400,10 +409,23 @@ export class VoicePipeline {
             const threadResult = await this.router.switchTo(threadId);
             if (threadResult.success) {
               await this.onChannelSwitch();
-              await this.speakResponse(
-                this.buildSwitchConfirmation(threadResult.displayName || llmResult.best.displayName),
-                { inbox: true },
-              );
+              const displayName = threadResult.displayName || llmResult.best.displayName;
+              const lastMsg = this.router.getLastMessage();
+              if (lastMsg) {
+                const fullContent = lastMsg.role === 'user'
+                  ? `You last said: ${lastMsg.content}`
+                  : lastMsg.content;
+                this.awaitingSwitchChoice = {
+                  lastMessage: fullContent,
+                  timeout: setTimeout(() => {
+                    console.log('Switch choice timed out');
+                    this.awaitingSwitchChoice = null;
+                  }, 15_000),
+                };
+                await this.speakResponse(`Switched to ${displayName}. Read, or prompt?`, { inbox: true });
+              } else {
+                await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
+              }
               return;
             }
           }
@@ -452,8 +474,38 @@ export class VoicePipeline {
         }
         this.responsePoller?.check();
       } else {
-        // No queued responses — brief context from last message
-        responseText = this.buildSwitchConfirmation(result.displayName || target);
+        // No queued responses — check if there's a last message to offer
+        const lastMsg = this.router.getLastMessage();
+        if (lastMsg) {
+          const displayName = result.displayName || target;
+          responseText = `Switched to ${displayName}. Read, or prompt?`;
+
+          // Store full last message for reading if user says "read"
+          const fullContent = lastMsg.role === 'user'
+            ? `You last said: ${lastMsg.content}`
+            : lastMsg.content;
+
+          this.awaitingSwitchChoice = {
+            lastMessage: fullContent,
+            timeout: setTimeout(() => {
+              console.log('Switch choice timed out');
+              this.awaitingSwitchChoice = null;
+            }, 15_000),
+          };
+
+          // Update inbox snapshot now (don't wait for choice)
+          if (this.inboxTracker?.isActive()) {
+            const sessionKey = this.router.getActiveSessionKey();
+            const currentCount = await this.getCurrentMessageCount(sessionKey);
+            console.log(`InboxTracker: markSeen ${target} (${sessionKey}) count=${currentCount}`);
+            this.inboxTracker.markSeen(sessionKey, currentCount);
+          }
+
+          await this.speakResponse(responseText, { inbox: true });
+          return;
+        } else {
+          responseText = `Switched to ${result.displayName || target}.`;
+        }
       }
 
       // Update inbox snapshot for this channel so it's marked as "seen"
@@ -782,6 +834,24 @@ Use channel names (the part before the colon). Do not explain.`,
     } else {
       // Cancel or unrecognized — discard the utterance
       console.log(`Queue choice: discarded (input: "${transcript}")`);
+      this.player.stopWaitingLoop();
+    }
+  }
+
+  private async handleSwitchChoiceResponse(transcript: string): Promise<void> {
+    if (!this.awaitingSwitchChoice) return;
+
+    const { lastMessage, timeout } = this.awaitingSwitchChoice;
+    clearTimeout(timeout);
+    this.awaitingSwitchChoice = null;
+
+    const choice = matchSwitchChoice(transcript);
+    if (choice === 'read') {
+      // Read the full last message
+      await this.speakResponse(lastMessage, { inbox: true });
+    } else {
+      // 'prompt', 'cancel', or unrecognized — just stop waiting
+      console.log(`Switch choice: ${choice ?? 'unrecognized'} (input: "${transcript}")`);
       this.player.stopWaitingLoop();
     }
   }

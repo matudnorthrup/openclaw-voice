@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVoiceCommand, matchQueueChoice } from '../src/services/voice-commands.js';
+import { parseVoiceCommand, matchQueueChoice, matchSwitchChoice } from '../src/services/voice-commands.js';
 
 const BOT = 'Watson';
 
@@ -355,5 +355,82 @@ describe('matchQueueChoice', () => {
   it('strips trailing punctuation', () => {
     expect(matchQueueChoice('inbox.')).toBe('queue');
     expect(matchQueueChoice('wait!')).toBe('wait');
+  });
+});
+
+describe('matchSwitchChoice', () => {
+  it('returns "read" for "read"', () => {
+    expect(matchSwitchChoice('read')).toBe('read');
+  });
+
+  it('returns "read" for "read it"', () => {
+    expect(matchSwitchChoice('read it')).toBe('read');
+  });
+
+  it('returns "read" for "yes"', () => {
+    expect(matchSwitchChoice('yes')).toBe('read');
+  });
+
+  it('returns "read" for "yeah"', () => {
+    expect(matchSwitchChoice('yeah')).toBe('read');
+  });
+
+  it('returns "read" for "go ahead"', () => {
+    expect(matchSwitchChoice('go ahead')).toBe('read');
+  });
+
+  it('returns "read" for "read back"', () => {
+    expect(matchSwitchChoice('read back')).toBe('read');
+  });
+
+  it('returns "prompt" for "prompt"', () => {
+    expect(matchSwitchChoice('prompt')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "skip"', () => {
+    expect(matchSwitchChoice('skip')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "no"', () => {
+    expect(matchSwitchChoice('no')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "nope"', () => {
+    expect(matchSwitchChoice('nope')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "just prompt"', () => {
+    expect(matchSwitchChoice('just prompt')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "skip it"', () => {
+    expect(matchSwitchChoice('skip it')).toBe('prompt');
+  });
+
+  it('returns "cancel" for "cancel"', () => {
+    expect(matchSwitchChoice('cancel')).toBe('cancel');
+  });
+
+  it('returns "cancel" for "nevermind"', () => {
+    expect(matchSwitchChoice('nevermind')).toBe('cancel');
+  });
+
+  it('returns null for unrecognized input', () => {
+    expect(matchSwitchChoice('hello')).toBeNull();
+  });
+
+  it('handles trailing punctuation', () => {
+    expect(matchSwitchChoice('read.')).toBe('read');
+    expect(matchSwitchChoice('prompt!')).toBe('prompt');
+  });
+
+  it('is case-insensitive', () => {
+    expect(matchSwitchChoice('Read')).toBe('read');
+    expect(matchSwitchChoice('PROMPT')).toBe('prompt');
+  });
+
+  it('handles whitespace', () => {
+    expect(matchSwitchChoice('  read  ')).toBe('read');
+    expect(matchSwitchChoice('  prompt  ')).toBe('prompt');
   });
 });
