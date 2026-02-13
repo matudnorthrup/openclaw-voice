@@ -107,9 +107,21 @@ export class VoicePipeline {
     }
   }
 
+  /**
+   * Whether Watson is actively doing work (STT, LLM, TTS).
+   * AWAITING states are NOT "processing" — Watson is waiting for user input.
+   */
   private isProcessing(): boolean {
     const st = this.stateMachine.getStateType();
-    return st !== 'IDLE';
+    return st === 'PROCESSING' || st === 'TRANSCRIBING' || st === 'SPEAKING';
+  }
+
+  /**
+   * Whether Watson is busy in any non-IDLE state.
+   * Used by notifyIfIdle to prevent notifications during AWAITING prompts.
+   */
+  private isBusy(): boolean {
+    return this.stateMachine.getStateType() !== 'IDLE';
   }
 
   /**
@@ -119,7 +131,7 @@ export class VoicePipeline {
     for (const effect of effects) {
       switch (effect.type) {
         case 'earcon':
-          this.player.playEarconSync(effect.name);
+          await this.player.playEarcon(effect.name);
           break;
         case 'speak':
           await this.speakResponse(effect.text);
@@ -171,9 +183,9 @@ export class VoicePipeline {
 
     try {
       // Start waiting indicator sound
-      // In gated mode, defer until after wake word is confirmed (avoid chime on noise/side talk)
-      // In gated interrupt, defer because Watson is still talking
-      if (!getVoiceSettings().gated) {
+      // Skip for: gated mode (deferred until wake word), AWAITING states (no processing needed)
+      const isAwaiting = this.stateMachine.isAwaitingState() || this.stateMachine.getStateType() === 'INBOX_FLOW';
+      if (!getVoiceSettings().gated && !isAwaiting) {
         this.player.startWaitingLoop();
       }
 
@@ -426,7 +438,7 @@ export class VoicePipeline {
         timeoutMs: 30_000,
       });
 
-      this.player.playEarconSync('acknowledged');
+      await this.player.playEarcon('acknowledged');
       await this.speakResponse(`Got it, ${match.name}. What should the post be called?`);
       return null;
     }
@@ -450,7 +462,7 @@ export class VoicePipeline {
         timeoutMs: 60_000,
       });
 
-      this.player.playEarconSync('acknowledged');
+      await this.player.playEarcon('acknowledged');
       await this.speakResponse(`Title: ${input}. What's the prompt?`);
       return null;
     }
@@ -472,7 +484,7 @@ export class VoicePipeline {
       if (result.success) {
         await this.onChannelSwitch();
         console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
-        this.player.playEarconSync('acknowledged');
+        await this.player.playEarcon('acknowledged');
         await this.speakResponse(`Created ${title} in ${forumName}. You're now in the new thread.`);
         // Return body so pipeline falls through to LLM
         return body;
@@ -529,7 +541,7 @@ export class VoicePipeline {
                   timeoutMs: 30_000,
                 });
                 await this.speakResponse(`Switched to ${displayName}. Read, or prompt?`, { inbox: true });
-                this.player.playEarconSync('ready');
+                await this.player.playEarcon('ready');
               } else {
                 await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
               }
@@ -605,7 +617,7 @@ export class VoicePipeline {
           }
 
           await this.speakResponse(responseText, { inbox: true });
-          this.player.playEarconSync('ready');
+          await this.player.playEarcon('ready');
           return;
         } else {
           responseText = `Switched to ${result.displayName || target}.`;
@@ -717,7 +729,7 @@ Use channel names (the part before the colon). Do not explain.`,
     });
 
     await this.speakResponse(responseText);
-    this.player.playEarconSync('ready');
+    await this.player.playEarcon('ready');
   }
 
   private async handleChannelSelection(transcript: string): Promise<void> {
@@ -736,7 +748,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
     // Recognized — clear the awaiting state
     this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-    this.player.playEarconSync('acknowledged');
+    await this.player.playEarcon('acknowledged');
 
     const result = await this.router.switchTo(selected.name);
     if (result.success) {
@@ -894,15 +906,15 @@ Use channel names (the part before the colon). Do not explain.`,
 
     this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
 
-    // Brief confirmation with acknowledged earcon
-    this.player.playEarconSync('acknowledged');
+    // Brief confirmation with acknowledged earcon, then speak
+    await this.player.playEarcon('acknowledged');
     await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
-    // Speak the prompt, then await choice via state machine
+    // Speak the prompt, then play ready earcon when done
     await this.speakResponse('Inbox, or wait?', { inbox: true });
-    this.player.playEarconSync('ready');
+    await this.player.playEarcon('ready');
 
     this.stateMachine.transition({
       type: 'ENTER_QUEUE_CHOICE',
@@ -931,8 +943,8 @@ Use channel names (the part before the colon). Do not explain.`,
       this.silentWait = true;
       await this.handleSilentQueue(userId, originalTranscript);
     } else if (choice === 'wait') {
-      this.player.playEarconSync('acknowledged');
       this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
+      await this.player.playEarcon('acknowledged');
       this.player.startWaitingLoop();
       await this.handleWaitMode(userId, originalTranscript);
     } else {
@@ -1418,7 +1430,7 @@ Use channel names (the part before the colon). Do not explain.`,
       console.log(`Idle notify skipped (silent wait): "${message.slice(0, 60)}..."`);
       return;
     }
-    if (this.isProcessing() || this.player.isPlaying()) {
+    if (this.isBusy() || this.player.isPlaying()) {
       console.log(`Idle notify skipped (busy): "${message}"`);
       return;
     }
@@ -1429,7 +1441,7 @@ Use channel names (the part before the colon). Do not explain.`,
     textToSpeechStream(message)
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
-        if (!this.isProcessing() && !this.player.isPlaying()) {
+        if (!this.isBusy() && !this.player.isPlaying()) {
           this.player.playStream(stream).then(() => {
             this.gateGraceUntil = Date.now() + 5_000;
           });
