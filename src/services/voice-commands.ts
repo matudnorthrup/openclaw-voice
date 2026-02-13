@@ -107,6 +107,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   if (/^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(rest)) {
     return { type: 'inbox-check' };
   }
+  if (/\bback\s+to\s+inbox\b/.test(rest) || /\binbox\s+list\b/.test(rest)) {
+    return { type: 'inbox-check' };
+  }
 
   // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip"
   if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(rest)) {
@@ -134,34 +137,49 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
 export function matchSwitchChoice(transcript: string): 'read' | 'prompt' | 'cancel' | null {
   const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
-  // Match "read" and variants
-  if (/^(?:read|read it|read that|yes|yeah|yep|sure|go ahead|read it back|read back)$/.test(input)) return 'read';
+  // Match "cancel" first — discard
+  if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|nothing)$/.test(input)) return 'cancel';
+  if (/\b(?:cancel|nevermind|never\s*mind|forget\s*it)\b/.test(input)) return 'cancel';
 
   // Match "prompt" and variants
-  if (/^(?:prompt|skip|no|nope|pass|just prompt|new prompt|skip it)$/.test(input)) return 'prompt';
+  if (/^(?:prompt|skip|no|nope|pass|just prompt|new prompt|skip it|new message)$/.test(input)) return 'prompt';
+  if (/\b(?:prompt|frompt|prompts?|prompted|romped|ramped|skip|pass)\b/.test(input)) return 'prompt';
+  if (/\bnew\s+(?:prompt|message)\b/.test(input)) return 'prompt';
 
-  // Match "cancel" — discard
-  if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|nothing)$/.test(input)) return 'cancel';
+  // Match "read" and variants (including common STT confusions)
+  if (/^(?:read|read it|read that|yes|yeah|yep|sure|go ahead|read it back|read back|last message)$/.test(input)) return 'read';
+  if (/\b(?:read|reed|red)\b/.test(input)) return 'read';
+  if (/\blast\s+message\b/.test(input)) return 'read';
+  if (/\b(?:yes|yeah|yep|sure)\b/.test(input)) return 'read';
 
   return null;
 }
 
 export function matchQueueChoice(transcript: string): 'queue' | 'wait' | 'silent' | 'cancel' | null {
   const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+  const hasQueue = /\b(?:send\s+to\s+inbox|inbox|in box|queue|cue|q)\b/.test(input);
+  const hasWait = /\b(?:wait\s+here|wait|weight|wheat|wade|weigh|way)\b/.test(input);
 
   // Match "silent" / "silently" — queue but wait without tones
   if (/^(?:silent|silently|silence|quiet|quietly|shh)$/.test(input)) return 'silent';
+  if (/\b(?:silent|silently|silence|quiet|quietly|shh)\b/.test(input)) return 'silent';
 
   // Match "inbox" and variants — the prompt asks "Inbox, or wait?"
-  if (/\binbox\b|\bqueue\b|\bcue\b/.test(input)) return 'queue';
-  if (/^(?:inbox|in box|queue|cue|q|yes|yep|yeah)$/.test(input)) return 'queue';
+  if (hasQueue && hasWait) return null;
+  if (hasQueue) return 'queue';
+  if (/^(?:send\s+to\s+inbox|inbox|in box|queue|cue|q|yes|yep|yeah)$/.test(input)) return 'queue';
+  if (/\bsend\s+to\s+inbox\b/.test(input)) return 'queue';
+  if (/\b(?:yes|yep|yeah)\b/.test(input)) return 'queue';
 
   // Match "wait" and common Whisper misrecognitions
-  if (/\bwait\b/.test(input)) return 'wait';
-  if (/^(?:wait|weight|wade|weigh|way|no|nope)$/.test(input)) return 'wait';
+  if (hasWait) return 'wait';
+  if (/^(?:wait\s+here|wait|weight|wheat|wade|weigh|way|no|nope)$/.test(input)) return 'wait';
+  if (/\bwait\s+here\b/.test(input)) return 'wait';
+  if (/\b(?:no|nope)\b/.test(input)) return 'wait';
 
   // Match "cancel" — discard the utterance entirely
   if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|discard|nothing|ignore|ignore\s+that)$/.test(input)) return 'cancel';
+  if (/\b(?:cancel|nevermind|never\s*mind|forget\s*it|discard|nothing|ignore)\b/.test(input)) return 'cancel';
 
   return null;
 }

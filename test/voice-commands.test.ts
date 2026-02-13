@@ -160,6 +160,11 @@ describe('parseVoiceCommand — inbox check', () => {
     const result = parseVoiceCommand('Hey Watson, inbox list', BOT);
     expect(result).toEqual({ type: 'inbox-check' });
   });
+
+  it('parses "back to inbox, inbox list"', () => {
+    const result = parseVoiceCommand('Hey Watson, back to inbox, inbox list', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
 });
 
 describe('parseVoiceCommand — inbox next', () => {
@@ -278,6 +283,10 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice('inbox')).toBe('queue');
   });
 
+  it('returns "queue" for "send to inbox"', () => {
+    expect(matchQueueChoice('send to inbox')).toBe('queue');
+  });
+
   it('returns "queue" for "in box"', () => {
     expect(matchQueueChoice('in box')).toBe('queue');
   });
@@ -322,8 +331,20 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice('wait')).toBe('wait');
   });
 
+  it('returns "wait" for "wait here"', () => {
+    expect(matchQueueChoice('wait here')).toBe('wait');
+  });
+
   it('returns "wait" for "weight" (Whisper misrecognition)', () => {
     expect(matchQueueChoice('weight')).toBe('wait');
+  });
+
+  it('returns "wait" for "wheat" (Whisper misrecognition)', () => {
+    expect(matchQueueChoice('wheat')).toBe('wait');
+  });
+
+  it('returns "wait" for phrase with "wheat"', () => {
+    expect(matchQueueChoice('let us do wheat')).toBe('wait');
   });
 
   it('returns "wait" for "no"', () => {
@@ -362,6 +383,10 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice('hello')).toBeNull();
   });
 
+  it('returns null when both queue and wait words appear', () => {
+    expect(matchQueueChoice('inbox or wait')).toBeNull();
+  });
+
   it('handles leading/trailing whitespace', () => {
     expect(matchQueueChoice('  inbox  ')).toBe('queue');
     expect(matchQueueChoice('  wait  ')).toBe('wait');
@@ -383,6 +408,10 @@ describe('matchSwitchChoice', () => {
     expect(matchSwitchChoice('read')).toBe('read');
   });
 
+  it('returns "read" for "last message"', () => {
+    expect(matchSwitchChoice('last message')).toBe('read');
+  });
+
   it('returns "read" for "read it"', () => {
     expect(matchSwitchChoice('read it')).toBe('read');
   });
@@ -399,12 +428,32 @@ describe('matchSwitchChoice', () => {
     expect(matchSwitchChoice('go ahead')).toBe('read');
   });
 
+  it('returns "read" for phrase with read token', () => {
+    expect(matchSwitchChoice('could you read that')).toBe('read');
+  });
+
+  it('returns "read" for "reed" (Whisper misrecognition)', () => {
+    expect(matchSwitchChoice('reed')).toBe('read');
+  });
+
+  it('returns "read" for "red" (Whisper misrecognition)', () => {
+    expect(matchSwitchChoice('red')).toBe('read');
+  });
+
   it('returns "read" for "read back"', () => {
     expect(matchSwitchChoice('read back')).toBe('read');
   });
 
   it('returns "prompt" for "prompt"', () => {
     expect(matchSwitchChoice('prompt')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "new prompt"', () => {
+    expect(matchSwitchChoice('new prompt')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "new message"', () => {
+    expect(matchSwitchChoice('new message')).toBe('prompt');
   });
 
   it('returns "prompt" for "skip"', () => {
@@ -425,6 +474,18 @@ describe('matchSwitchChoice', () => {
 
   it('returns "prompt" for "skip it"', () => {
     expect(matchSwitchChoice('skip it')).toBe('prompt');
+  });
+
+  it('returns "prompt" for phrase with prompt token', () => {
+    expect(matchSwitchChoice('lets do prompt')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "romped" (Whisper misrecognition)', () => {
+    expect(matchSwitchChoice('romped')).toBe('prompt');
+  });
+
+  it('returns "prompt" for "ramped" (Whisper misrecognition)', () => {
+    expect(matchSwitchChoice('ramped')).toBe('prompt');
   });
 
   it('returns "cancel" for "cancel"', () => {

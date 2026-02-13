@@ -139,6 +139,11 @@ describe('PipelineStateMachine', () => {
       });
     });
 
+    it('uses contract default timeout when timeout is omitted', () => {
+      sm.transition({ type: 'ENTER_CHANNEL_SELECTION', options });
+      expect(sm.getChannelSelectionState()?.timeoutMs).toBe(15000);
+    });
+
     it('no effects on recognized input', () => {
       sm.transition({ type: 'ENTER_CHANNEL_SELECTION', options, timeoutMs: 15000 });
       const effects = sm.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: true });
@@ -198,8 +203,17 @@ describe('PipelineStateMachine', () => {
       expect(effects).toContainEqual({ type: 'earcon', name: 'error' });
       expect(effects).toContainEqual({
         type: 'speak',
-        text: 'Say inbox, wait, or cancel.',
+        text: 'Say send to inbox, wait here, or cancel.',
       });
+    });
+
+    it('uses contract default timeout when timeout is omitted', () => {
+      sm.transition({
+        type: 'ENTER_QUEUE_CHOICE',
+        userId: 'user1',
+        transcript: 'hello',
+      });
+      expect(sm.getQueueChoiceState()?.timeoutMs).toBe(20000);
     });
   });
 
@@ -225,8 +239,57 @@ describe('PipelineStateMachine', () => {
       expect(effects).toContainEqual({ type: 'earcon', name: 'error' });
       expect(effects).toContainEqual({
         type: 'speak',
-        text: 'Say read, prompt, or cancel.',
+        text: 'Say last message, new prompt, or cancel.',
       });
+    });
+
+    it('uses contract default timeout when timeout is omitted', () => {
+      sm.transition({
+        type: 'ENTER_SWITCH_CHOICE',
+        lastMessage: 'msg',
+      });
+      expect(sm.getSwitchChoiceState()?.timeoutMs).toBe(30000);
+    });
+
+    it('pauses timeout timers when utterance is received during awaiting', () => {
+      const timeoutEffects: TransitionEffect[][] = [];
+      sm.setTimeoutHandler((e) => timeoutEffects.push(e));
+
+      sm.transition({
+        type: 'ENTER_SWITCH_CHOICE',
+        lastMessage: 'msg',
+        timeoutMs: 7000,
+      });
+      vi.advanceTimersByTime(1200);
+      sm.transition({ type: 'UTTERANCE_RECEIVED' });
+      vi.advanceTimersByTime(7000);
+
+      expect(timeoutEffects.length).toBe(0);
+      expect(sm.getStateType()).toBe('AWAITING_SWITCH_CHOICE');
+    });
+
+    it('resets timeout window after unrecognized input reprompt', () => {
+      const timeoutEffects: TransitionEffect[][] = [];
+      sm.setTimeoutHandler((e) => timeoutEffects.push(e));
+
+      sm.transition({
+        type: 'ENTER_SWITCH_CHOICE',
+        lastMessage: 'msg',
+        timeoutMs: 7000,
+      });
+      vi.advanceTimersByTime(1200);
+
+      const effects = sm.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+      expect(effects).toContainEqual({ type: 'earcon', name: 'error' });
+
+      vi.advanceTimersByTime(6900);
+      expect(timeoutEffects.length).toBe(1);
+      expect(timeoutEffects[0]).toContainEqual({ type: 'earcon', name: 'timeout-warning' });
+
+      vi.advanceTimersByTime(100);
+      expect(timeoutEffects.length).toBe(2);
+      expect(timeoutEffects[1]).toContainEqual({ type: 'earcon', name: 'cancelled' });
+      expect(timeoutEffects[1]).toContainEqual({ type: 'speak', text: 'Switch choice timed out.' });
     });
   });
 
@@ -295,6 +358,14 @@ describe('PipelineStateMachine', () => {
       vi.advanceTimersByTime(25000);
       expect(timeoutEffects.length).toBe(1);
       expect(timeoutEffects[0]).toContainEqual({ type: 'earcon', name: 'timeout-warning' });
+    });
+
+    it('uses contract default timeout for body step', () => {
+      sm.transition({
+        type: 'ENTER_NEW_POST_FLOW',
+        step: 'body',
+      });
+      expect(sm.getNewPostFlowState()?.timeoutMs).toBe(60000);
     });
   });
 

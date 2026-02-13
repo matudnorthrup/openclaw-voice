@@ -262,6 +262,14 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
         const channels = router.getAllChannelSessionKeys();
         void (async () => {
           try {
+            const startedAt = Date.now();
+            while (!gatewaySync.isConnected() && Date.now() - startedAt < 8000) {
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+            if (!gatewaySync.isConnected()) {
+              console.warn('InboxTracker: restart snapshot skipped (gateway not connected yet)');
+              return;
+            }
             const snapshots: Record<string, number> = {};
             for (const ch of channels) {
               const result = await gatewaySync.getHistory(ch.sessionKey, 40);

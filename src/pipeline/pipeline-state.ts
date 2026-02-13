@@ -1,5 +1,6 @@
 import type { EarconName } from '../audio/earcons.js';
 import type { ChannelOption } from '../services/voice-commands.js';
+import { getInteractionContractById, getInteractionContractForState } from './interaction-contract.js';
 
 // ─── State types ────────────────────────────────────────────────────────────
 
@@ -115,7 +116,6 @@ export type PipelineEvent =
 
 // ─── Timeout configuration ─────────────────────────────────────────────────
 
-const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_WARNING_BEFORE_MS = 5_000;
 
 // ─── State machine ─────────────────────────────────────────────────────────
@@ -199,7 +199,8 @@ export class PipelineStateMachine {
 
       case 'ENTER_CHANNEL_SELECTION': {
         this.clearTimers();
-        const timeoutMs = event.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+        const contract = getInteractionContractById('channel-selection');
+        const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {
           type: 'AWAITING_CHANNEL_SELECTION',
           options: event.options,
@@ -207,13 +208,14 @@ export class PipelineStateMachine {
           timeoutMs,
           warningFired: false,
         };
-        this.scheduleTimers(timeoutMs, 'Selection timed out. You can try again.');
+        this.scheduleTimers(timeoutMs, contract.timeoutText);
         return effects;
       }
 
       case 'ENTER_QUEUE_CHOICE': {
         this.clearTimers();
-        const timeoutMs = event.timeoutMs ?? 20_000;
+        const contract = getInteractionContractById('queue-choice');
+        const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {
           type: 'AWAITING_QUEUE_CHOICE',
           userId: event.userId,
@@ -222,13 +224,14 @@ export class PipelineStateMachine {
           timeoutMs,
           warningFired: false,
         };
-        this.scheduleTimers(timeoutMs, 'Choice timed out.');
+        this.scheduleTimers(timeoutMs, contract.timeoutText);
         return effects;
       }
 
       case 'ENTER_SWITCH_CHOICE': {
         this.clearTimers();
-        const timeoutMs = event.timeoutMs ?? 30_000;
+        const contract = getInteractionContractById('switch-choice');
+        const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {
           type: 'AWAITING_SWITCH_CHOICE',
           lastMessage: event.lastMessage,
@@ -236,13 +239,16 @@ export class PipelineStateMachine {
           timeoutMs,
           warningFired: false,
         };
-        this.scheduleTimers(timeoutMs, 'Switch choice timed out.');
+        this.scheduleTimers(timeoutMs, contract.timeoutText);
         return effects;
       }
 
       case 'ENTER_NEW_POST_FLOW': {
         this.clearTimers();
-        const timeoutMs = event.timeoutMs ?? 30_000;
+        const contract = getInteractionContractById(
+          event.step === 'forum' ? 'new-post-forum' : event.step === 'title' ? 'new-post-title' : 'new-post-body',
+        );
+        const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {
           type: 'NEW_POST_FLOW',
           step: event.step,
@@ -253,13 +259,16 @@ export class PipelineStateMachine {
           timeoutMs,
           warningFired: false,
         };
-        this.scheduleTimers(timeoutMs, 'New post flow timed out.');
+        this.scheduleTimers(timeoutMs, contract.timeoutText);
         return effects;
       }
 
       case 'NEW_POST_ADVANCE': {
         this.clearTimers();
-        const timeoutMs = event.timeoutMs ?? (event.step === 'body' ? 60_000 : 30_000);
+        const contract = getInteractionContractById(
+          event.step === 'forum' ? 'new-post-forum' : event.step === 'title' ? 'new-post-title' : 'new-post-body',
+        );
+        const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {
           type: 'NEW_POST_FLOW',
           step: event.step,
@@ -270,7 +279,7 @@ export class PipelineStateMachine {
           timeoutMs,
           warningFired: false,
         };
-        this.scheduleTimers(timeoutMs, 'New post flow timed out.');
+        this.scheduleTimers(timeoutMs, contract.timeoutText);
         return effects;
       }
 
@@ -296,6 +305,7 @@ export class PipelineStateMachine {
         if (!event.recognized && this.isAwaitingState()) {
           effects.push({ type: 'earcon', name: 'error' });
           effects.push({ type: 'speak', text: this.getRepromptText() });
+          this.resetAwaitingTimers();
         }
         return effects;
 
@@ -321,6 +331,12 @@ export class PipelineStateMachine {
    * Handle an utterance arriving: if busy, buffer and produce busy earcon.
    */
   private handleUtteranceReceived(effects: TransitionEffect[]): TransitionEffect[] {
+    if (this.isAwaitingState()) {
+      // User is responding to a prompt; pause timeout timers while capture/STT runs.
+      this.clearTimers();
+      return effects;
+    }
+
     if (this.state.type === 'PROCESSING') {
       effects.push({ type: 'earcon', name: 'busy' });
       return effects;
@@ -383,22 +399,8 @@ export class PipelineStateMachine {
    * Get the reprompt text for the current AWAITING state.
    */
   getRepromptText(): string {
-    switch (this.state.type) {
-      case 'AWAITING_CHANNEL_SELECTION':
-        return 'Say a number or channel name, or cancel.';
-      case 'AWAITING_QUEUE_CHOICE':
-        return 'Say inbox, wait, or cancel.';
-      case 'AWAITING_SWITCH_CHOICE':
-        return 'Say read, prompt, or cancel.';
-      case 'NEW_POST_FLOW':
-        switch (this.state.step) {
-          case 'forum': return 'Say a forum name, or cancel.';
-          case 'title': return 'Say the title, or cancel.';
-          case 'body': return 'Say the prompt, or cancel.';
-        }
-        break;
-    }
-    return '';
+    const contract = getInteractionContractForState(this.state);
+    return contract?.repromptText ?? '';
   }
 
   /**
@@ -483,6 +485,19 @@ export class PipelineStateMachine {
       clearTimeout(this.timeoutTimer);
       this.timeoutTimer = null;
     }
+  }
+
+  private getTimeoutMessageForCurrentState(): string {
+    const contract = getInteractionContractForState(this.state);
+    return contract?.timeoutText ?? 'Choice timed out.';
+  }
+
+  private resetAwaitingTimers(): void {
+    if (!this.isAwaitingState()) return;
+    const timeoutMs = (this.state as AwaitingChannelSelectionState | AwaitingQueueChoiceState | AwaitingSwitchChoiceState | NewPostFlowState).timeoutMs;
+    (this.state as AwaitingChannelSelectionState | AwaitingQueueChoiceState | AwaitingSwitchChoiceState | NewPostFlowState).enteredAt = Date.now();
+    (this.state as AwaitingChannelSelectionState | AwaitingQueueChoiceState | AwaitingSwitchChoiceState | NewPostFlowState).warningFired = false;
+    this.scheduleTimers(timeoutMs, this.getTimeoutMessageForCurrentState());
   }
 
   /**
