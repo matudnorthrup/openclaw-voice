@@ -109,7 +109,7 @@ export class VoicePipeline {
 
   private isProcessing(): boolean {
     const st = this.stateMachine.getStateType();
-    return st === 'PROCESSING' || st === 'TRANSCRIBING' || st === 'SPEAKING';
+    return st !== 'IDLE';
   }
 
   /**
