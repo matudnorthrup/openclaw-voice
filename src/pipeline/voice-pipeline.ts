@@ -7,8 +7,8 @@ import { getResponse, quickCompletion } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
-import { parseVoiceCommand, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
-import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
+import { parseVoiceCommand, matchesWakeWord, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
+import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
 import type { QueueState } from '../services/queue-state.js';
@@ -173,6 +173,13 @@ export class VoicePipeline {
         console.log('New-post flow complete — falling through to LLM');
       }
 
+      // Gate check: in gated mode, discard utterances that don't start with the wake word
+      if (getVoiceSettings().gated && !matchesWakeWord(transcript, config.botName)) {
+        console.log(`Gated: discarded "${transcript}"`);
+        this.player.stopWaitingLoop();
+        return;
+      }
+
       const command = parseVoiceCommand(transcript, config.botName);
       if (command) {
         if (command.type === 'new-post') {
@@ -255,6 +262,9 @@ export class VoicePipeline {
         break;
       case 'voice-status':
         await this.handleVoiceStatus();
+        break;
+      case 'gated-mode':
+        await this.handleGatedMode(command.enabled);
         break;
     }
   }
@@ -691,7 +701,8 @@ Use channel names (the part before the colon). Do not explain.`,
     // Mode
     const mode = this.queueState?.getMode() ?? 'wait';
     const modeLabel = mode === 'queue' ? 'inbox' : mode;
-    parts.push(`Mode: ${modeLabel}.`);
+    const gateLabel = getVoiceSettings().gated ? 'gated' : 'open';
+    parts.push(`Mode: ${modeLabel}, ${gateLabel}.`);
 
     // Active channel
     if (this.router) {
@@ -947,6 +958,14 @@ Use channel names (the part before the colon). Do not explain.`,
       ask: 'Ask mode. I will ask you whether to inbox or wait for each message.',
     };
     await this.speakResponse(labels[mode], { inbox: true });
+  }
+
+  private async handleGatedMode(enabled: boolean): Promise<void> {
+    setGatedMode(enabled);
+    const message = enabled
+      ? "Gated mode. I'll only respond when you say Watson."
+      : "Open mode. I'll respond to everything.";
+    await this.speakResponse(message, { inbox: true });
   }
 
   private async handleInboxCheck(): Promise<void> {

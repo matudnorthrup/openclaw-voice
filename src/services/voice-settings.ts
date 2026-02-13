@@ -2,6 +2,7 @@ export interface VoiceSettingsValues {
   silenceDurationMs: number;
   speechThreshold: number;
   minSpeechDurationMs: number;
+  gated: boolean;
 }
 
 const NOISE_PRESETS: Record<string, number> = {
@@ -14,6 +15,7 @@ const settings: VoiceSettingsValues = {
   silenceDurationMs: 1500,
   speechThreshold: 500,
   minSpeechDurationMs: 300,
+  gated: false,
 };
 
 let initialized = false;
@@ -39,6 +41,10 @@ export function setSpeechThreshold(value: number): void {
 
 export function setMinSpeechDuration(ms: number): void {
   settings.minSpeechDurationMs = ms;
+}
+
+export function setGatedMode(on: boolean): void {
+  settings.gated = on;
 }
 
 export function resolveNoiseLevel(input: string): { threshold: number; label: string } | null {

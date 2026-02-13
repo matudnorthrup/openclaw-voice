@@ -12,12 +12,18 @@ export type VoiceCommand =
   | { type: 'mode'; mode: VoiceMode }
   | { type: 'inbox-check' }
   | { type: 'inbox-next' }
-  | { type: 'voice-status' };
+  | { type: 'voice-status' }
+  | { type: 'gated-mode'; enabled: boolean };
 
 export interface ChannelOption {
   index: number;
   name: string;
   displayName: string;
+}
+
+export function matchesWakeWord(transcript: string, botName: string): boolean {
+  const pattern = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}\\b`, 'i');
+  return pattern.test(transcript.trim());
 }
 
 export function parseVoiceCommand(transcript: string, botName: string): VoiceCommand | null {
@@ -84,6 +90,14 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "voice status", "status"
   if (/^(?:voice\s+)?status$/.test(rest)) {
     return { type: 'voice-status' };
+  }
+
+  // "gated mode", "gate on" → enable gated; "open mode", "gate off", "ungated mode" → disable
+  if (/^(?:gated\s+mode|gate\s+on)$/.test(rest)) {
+    return { type: 'gated-mode', enabled: true };
+  }
+  if (/^(?:open\s+mode|gate\s+off|ungated\s+mode)$/.test(rest)) {
+    return { type: 'gated-mode', enabled: false };
   }
 
   // "inbox list", "what do I have", "check inbox", "what's new", "inbox"

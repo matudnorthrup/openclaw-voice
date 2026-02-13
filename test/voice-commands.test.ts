@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVoiceCommand, matchQueueChoice, matchSwitchChoice } from '../src/services/voice-commands.js';
+import { parseVoiceCommand, matchesWakeWord, matchQueueChoice, matchSwitchChoice } from '../src/services/voice-commands.js';
 
 const BOT = 'Watson';
 
@@ -432,5 +432,69 @@ describe('matchSwitchChoice', () => {
   it('handles whitespace', () => {
     expect(matchSwitchChoice('  read  ')).toBe('read');
     expect(matchSwitchChoice('  prompt  ')).toBe('prompt');
+  });
+});
+
+describe('matchesWakeWord', () => {
+  it('matches "Watson, what time is it"', () => {
+    expect(matchesWakeWord('Watson, what time is it', BOT)).toBe(true);
+  });
+
+  it('matches "Hey Watson, do something"', () => {
+    expect(matchesWakeWord('Hey Watson, do something', BOT)).toBe(true);
+  });
+
+  it('matches "Hello Watson, do something"', () => {
+    expect(matchesWakeWord('Hello Watson, do something', BOT)).toBe(true);
+  });
+
+  it('matches case-insensitively: "watson help"', () => {
+    expect(matchesWakeWord('watson help', BOT)).toBe(true);
+  });
+
+  it('matches "hey watson" with comma: "Hey Watson, status"', () => {
+    expect(matchesWakeWord('Hey Watson, status', BOT)).toBe(true);
+  });
+
+  it('matches bare "Watson" with no trailing content', () => {
+    expect(matchesWakeWord('Watson', BOT)).toBe(true);
+  });
+
+  it('does not match random speech', () => {
+    expect(matchesWakeWord("what's on the agenda today", BOT)).toBe(false);
+  });
+
+  it('does not match "hey" alone', () => {
+    expect(matchesWakeWord('hey', BOT)).toBe(false);
+  });
+
+  it('does not match partial bot name in middle of word', () => {
+    expect(matchesWakeWord('Watsonia is a suburb', BOT)).toBe(false);
+  });
+
+  it('handles leading whitespace', () => {
+    expect(matchesWakeWord('  Watson, hello', BOT)).toBe(true);
+  });
+});
+
+describe('parseVoiceCommand — gated-mode', () => {
+  it('parses "gated mode"', () => {
+    expect(parseVoiceCommand('Hey Watson, gated mode', BOT)).toEqual({ type: 'gated-mode', enabled: true });
+  });
+
+  it('parses "gate on"', () => {
+    expect(parseVoiceCommand('Watson, gate on', BOT)).toEqual({ type: 'gated-mode', enabled: true });
+  });
+
+  it('parses "open mode"', () => {
+    expect(parseVoiceCommand('Hey Watson, open mode', BOT)).toEqual({ type: 'gated-mode', enabled: false });
+  });
+
+  it('parses "gate off"', () => {
+    expect(parseVoiceCommand('Watson, gate off', BOT)).toEqual({ type: 'gated-mode', enabled: false });
+  });
+
+  it('parses "ungated mode"', () => {
+    expect(parseVoiceCommand('Hello Watson, ungated mode', BOT)).toEqual({ type: 'gated-mode', enabled: false });
   });
 });
