@@ -179,6 +179,7 @@ export class PipelineStateMachine {
         return effects;
 
       case 'PROCESSING_STARTED':
+        this.clearTimers(); // Clear any AWAITING state timers
         this.state = { type: 'PROCESSING' };
         return effects;
 
