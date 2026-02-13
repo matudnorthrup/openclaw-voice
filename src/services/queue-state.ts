@@ -25,7 +25,7 @@ interface QueueStateData {
 const STATE_PATH = `${process.env['HOME']}/clawd/voice-queue-state.json`;
 
 export class QueueState {
-  private mode: VoiceMode = 'ask';
+  private mode: VoiceMode = 'wait';
   private items: QueuedResponse[] = [];
   private channelSnapshots: Record<string, number> = {};
 
