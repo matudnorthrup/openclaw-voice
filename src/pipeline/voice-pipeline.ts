@@ -161,10 +161,8 @@ export class VoicePipeline {
     // Transition to TRANSCRIBING
     this.stateMachine.transition({ type: 'UTTERANCE_RECEIVED' });
 
-    // Play listening earcon in gated mode (pre-STT feedback)
-    if (getVoiceSettings().gated) {
-      this.player.playEarconSync('listening');
-    }
+    // listening earcon is deferred until we know this is a valid interaction
+    // (post-wake-word in gated mode, or any AWAITING state input)
 
     const pipelineStart = Date.now();
 
@@ -188,8 +186,10 @@ export class VoicePipeline {
       this.stateMachine.transition({ type: 'TRANSCRIPT_READY', transcript });
 
       // Step 1.5: Check for awaiting responses (bypass LLM)
+      // These are valid interactions that don't need a wake word
       if (this.stateMachine.getStateType() === 'AWAITING_CHANNEL_SELECTION' ||
           this.stateMachine.getChannelSelectionState()) {
+        this.player.playEarconSync('listening');
         console.log(`Channel selection input: "${transcript}"`);
         await this.handleChannelSelection(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -198,6 +198,7 @@ export class VoicePipeline {
       }
 
       if (this.stateMachine.getQueueChoiceState()) {
+        this.player.playEarconSync('listening');
         console.log(`Queue choice input: "${transcript}"`);
         await this.handleQueueChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -206,6 +207,7 @@ export class VoicePipeline {
       }
 
       if (this.stateMachine.getSwitchChoiceState()) {
+        this.player.playEarconSync('listening');
         console.log(`Switch choice input: "${transcript}"`);
         await this.handleSwitchChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -214,6 +216,7 @@ export class VoicePipeline {
       }
 
       if (this.stateMachine.getNewPostFlowState()) {
+        this.player.playEarconSync('listening');
         const flowState = this.stateMachine.getNewPostFlowState()!;
         console.log(`New-post flow (${flowState.step}): "${transcript}"`);
         const fallThrough = await this.handleNewPostStep(transcript);
@@ -241,6 +244,9 @@ export class VoicePipeline {
         this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         return;
       }
+
+      // Valid interaction confirmed — play listening earcon
+      this.player.playEarconSync('listening');
 
       // Gated mode: passed gate check — start waiting loop now
       if (getVoiceSettings().gated) {
