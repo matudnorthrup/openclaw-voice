@@ -140,8 +140,11 @@ export function matchSwitchChoice(transcript: string): 'read' | 'prompt' | 'canc
   return null;
 }
 
-export function matchQueueChoice(transcript: string): 'queue' | 'wait' | 'cancel' | null {
+export function matchQueueChoice(transcript: string): 'queue' | 'wait' | 'silent' | 'cancel' | null {
   const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+
+  // Match "silent" / "silently" — queue but wait without tones
+  if (/^(?:silent|silently|silence|quiet|quietly|shh)$/.test(input)) return 'silent';
 
   // Match "inbox" and variants — the prompt asks "Inbox, or wait?"
   if (/\binbox\b|\bqueue\b|\bcue\b/.test(input)) return 'queue';

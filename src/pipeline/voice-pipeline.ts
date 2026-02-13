@@ -41,6 +41,7 @@ export class VoicePipeline {
   private inboxFlowIndex = 0;
   private inboxLogChannel: TextChannel | null = null;
   private lastSpokenText: string = '';
+  private silentWait = false;
 
   constructor(
     connection: VoiceConnection,
@@ -867,6 +868,9 @@ Use channel names (the part before the colon). Do not explain.`,
       if (this.inboxTracker?.isActive()) {
         await this.handleInboxCheck();
       }
+    } else if (choice === 'silent') {
+      this.silentWait = true;
+      await this.handleSilentQueue(userId, originalTranscript);
     } else if (choice === 'wait') {
       await this.handleWaitMode(userId, originalTranscript);
     } else {
@@ -874,6 +878,35 @@ Use channel names (the part before the colon). Do not explain.`,
       console.log(`Queue choice: discarded (input: "${transcript}")`);
       this.player.stopWaitingLoop();
     }
+  }
+
+  private async handleSilentQueue(userId: string, transcript: string): Promise<void> {
+    if (!this.router || !this.queueState) {
+      await this.handleWaitMode(userId, transcript);
+      return;
+    }
+
+    const activeChannel = this.router.getActiveChannel();
+    const channelName = activeChannel.name;
+    const displayName = (activeChannel as any).displayName || channelName;
+    const sessionKey = this.router.getActiveSessionKey();
+
+    this.log(`**You:** ${transcript}`);
+    this.session.appendUserMessage(userId, transcript, channelName);
+
+    const item = this.queueState.enqueue({
+      channel: channelName,
+      displayName,
+      sessionKey,
+      userMessage: transcript,
+    });
+
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+
+    // One confirmation tone, then silence
+    console.log('Silent queue: dispatched, playing single tone');
+    this.player.stopWaitingLoop();
+    this.player.playSingleTone();
   }
 
   private async handleSwitchChoiceResponse(transcript: string): Promise<void> {
@@ -945,9 +978,17 @@ Use channel names (the part before the colon). Do not explain.`,
 
         pollerRef?.check();
 
-        // Notify user if idle
-        const displayName = (activeChannel as any).displayName || channelName;
-        this.notifyIfIdle(`Response ready from ${displayName}.`);
+        // Silent wait: auto-read the full response instead of a brief notification
+        if (this.silentWait) {
+          this.silentWait = false;
+          queueRef.markHeard(queueItemId);
+          pollerRef?.check();
+          this.notifyIfIdle(response);
+        } else {
+          // Notify user if idle
+          const displayName = (activeChannel as any).displayName || channelName;
+          this.notifyIfIdle(`Response ready from ${displayName}.`);
+        }
       } catch (err: any) {
         console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
       }

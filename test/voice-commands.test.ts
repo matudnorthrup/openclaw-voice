@@ -298,6 +298,26 @@ describe('matchQueueChoice', () => {
     expect(matchQueueChoice('cue')).toBe('queue');
   });
 
+  it('returns "silent" for "silent"', () => {
+    expect(matchQueueChoice('silent')).toBe('silent');
+  });
+
+  it('returns "silent" for "silently"', () => {
+    expect(matchQueueChoice('silently')).toBe('silent');
+  });
+
+  it('returns "silent" for "quiet"', () => {
+    expect(matchQueueChoice('quiet')).toBe('silent');
+  });
+
+  it('returns "silent" for "quietly"', () => {
+    expect(matchQueueChoice('quietly')).toBe('silent');
+  });
+
+  it('returns "silent" for "shh"', () => {
+    expect(matchQueueChoice('shh')).toBe('silent');
+  });
+
   it('returns "wait" for "wait"', () => {
     expect(matchQueueChoice('wait')).toBe('wait');
   });

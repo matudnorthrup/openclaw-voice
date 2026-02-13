@@ -97,6 +97,17 @@ export class DiscordAudioPlayer {
     this.player.on(AudioPlayerStatus.Idle, onIdle);
   }
 
+  playSingleTone(): void {
+    if (!this.waitingTone) {
+      this.waitingTone = generateWaitingTone();
+    }
+    const stream = new Readable({ read() {} });
+    stream.push(this.waitingTone);
+    stream.push(null);
+    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+    this.player.play(resource);
+  }
+
   stopPlayback(): void {
     this.waitingLoop = false;
     this.player.stop(true);
