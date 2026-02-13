@@ -131,8 +131,10 @@ export class VoicePipeline {
     const pipelineStart = Date.now();
 
     try {
-      // Start waiting indicator sound (skip if gated interrupt — Watson is still talking)
-      if (!gatedInterrupt) {
+      // Start waiting indicator sound
+      // In gated mode, defer until after wake word is confirmed (avoid chime on noise/side talk)
+      // In gated interrupt, defer because Watson is still talking
+      if (!getVoiceSettings().gated) {
         this.player.startWaitingLoop();
       }
 
@@ -194,10 +196,12 @@ export class VoicePipeline {
         return;
       }
 
-      // Gated interrupt passed wake word check — now actually interrupt
-      if (gatedInterrupt) {
-        console.log('Gated interrupt: wake word confirmed, interrupting playback');
-        this.player.stopPlayback();
+      // Gated mode: wake word confirmed — start waiting loop now
+      if (getVoiceSettings().gated) {
+        if (gatedInterrupt) {
+          console.log('Gated interrupt: wake word confirmed, interrupting playback');
+          this.player.stopPlayback();
+        }
         this.player.startWaitingLoop();
       }
 
