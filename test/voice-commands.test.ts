@@ -572,3 +572,33 @@ describe('parseVoiceCommand — gated-mode', () => {
     expect(parseVoiceCommand('Hello Watson, ungated mode', BOT)).toEqual({ type: 'gated-mode', enabled: false });
   });
 });
+
+describe('parseVoiceCommand — earcon tour', () => {
+  it('parses "earcon tour"', () => {
+    expect(parseVoiceCommand('Hey Watson, earcon tour', BOT)).toEqual({ type: 'earcon-tour' });
+  });
+
+  it('parses "voice tour"', () => {
+    expect(parseVoiceCommand('Hey Watson, voice tour', BOT)).toEqual({ type: 'earcon-tour' });
+  });
+
+  it('parses "sound demo"', () => {
+    expect(parseVoiceCommand('Watson, sound demo', BOT)).toEqual({ type: 'earcon-tour' });
+  });
+
+  it('parses "audio check"', () => {
+    expect(parseVoiceCommand('Watson, audio check', BOT)).toEqual({ type: 'earcon-tour' });
+  });
+
+  it('parses "test earcons"', () => {
+    expect(parseVoiceCommand('Hello Watson, test earcons', BOT)).toEqual({ type: 'earcon-tour' });
+  });
+
+  it('parses common misrecognition "ear contour"', () => {
+    expect(parseVoiceCommand('Hello Watson, ear contour', BOT)).toEqual({ type: 'earcon-tour' });
+  });
+
+  it('returns null without wake word', () => {
+    expect(parseVoiceCommand('earcon tour', BOT)).toBeNull();
+  });
+});

@@ -38,6 +38,30 @@ function tone(
 }
 
 /**
+ * Warm bell/kalimba-like tone (closer to the processing loop timbre).
+ */
+function warmBellTone(
+  frequency: number,
+  amplitude: number,
+  durationSec: number,
+  decayRate: number,
+): Float64Array {
+  const samples = Math.floor(durationSec * SAMPLE_RATE);
+  const out = new Float64Array(samples);
+
+  for (let i = 0; i < samples; i++) {
+    const t = i / SAMPLE_RATE;
+    const env = Math.exp(-decayRate * t);
+    const fundamental = Math.sin(2 * Math.PI * frequency * t);
+    const harmonic2 = 0.3 * Math.sin(2 * Math.PI * frequency * 2 * t);
+    const harmonic3 = 0.08 * Math.sin(2 * Math.PI * frequency * 3 * t);
+    out[i] = amplitude * env * (fundamental + harmonic2 + harmonic3);
+  }
+
+  return out;
+}
+
+/**
  * Mixes a source signal into a destination buffer at a given sample offset.
  */
 function mixInto(dest: Float64Array, src: Float64Array, offsetSamples: number): void {
@@ -59,35 +83,42 @@ function mixToWav(mix: Float64Array): Buffer {
 }
 
 /**
- * Quick ascending C5→E5 — "I captured your speech" (~200ms)
+ * Soft C5→E5 with a bit more hold — "I captured your speech" (~230ms)
  */
 function generateListening(): Buffer {
-  const duration = 0.2;
+  const duration = 0.23;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
-  const amp = 4000;
+  const amp = 2500;
 
   // C5 (523 Hz) for first half
-  const note1 = tone(523, amp, 0.12, 10);
+  const note1 = warmBellTone(523, amp, 0.14, 9);
   mixInto(mix, note1, 0);
 
   // E5 (659 Hz) for second half
-  const note2 = tone(659, amp * 0.9, 0.12, 10);
-  mixInto(mix, note2, Math.floor(0.09 * SAMPLE_RATE));
+  const note2 = warmBellTone(659, amp * 0.72, 0.13, 9.5);
+  mixInto(mix, note2, Math.floor(0.1 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
 
 /**
- * Single bright G5 ping — "Got it" (~150ms)
+ * Warm ascending bell motif C4→E4→G4→C5 — "Got it" (~320ms)
  */
 function generateAcknowledged(): Buffer {
-  const duration = 0.15;
+  const duration = 0.32;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
+  const amp = 3300;
 
-  const note = tone(784, 4500, duration, 12);
-  mixInto(mix, note, 0);
+  const note1 = warmBellTone(262, amp, 0.11, 7.3); // C4
+  mixInto(mix, note1, 0);
+  const note2 = warmBellTone(330, amp * 0.93, 0.11, 7.6); // E4
+  mixInto(mix, note2, Math.floor(0.055 * SAMPLE_RATE));
+  const note3 = warmBellTone(392, amp * 0.88, 0.12, 7.8); // G4
+  mixInto(mix, note3, Math.floor(0.115 * SAMPLE_RATE));
+  const note4 = warmBellTone(523, amp * 0.84, 0.12, 7); // C5
+  mixInto(mix, note4, Math.floor(0.175 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
@@ -153,15 +184,22 @@ function generateCancelled(): Buffer {
 }
 
 /**
- * Single clear C5 bell — "Your turn to speak" (~200ms)
+ * Distinct warm cadence A4→D5→F#5→D5 — "Your turn to speak" (~360ms)
  */
 function generateReady(): Buffer {
-  const duration = 0.2;
+  const duration = 0.36;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
+  const amp = 3050;
 
-  const note = tone(523, 4500, duration, 8);
-  mixInto(mix, note, 0);
+  const strike1 = warmBellTone(440, amp, 0.13, 7.4); // A4
+  mixInto(mix, strike1, 0);
+  const strike2 = warmBellTone(587, amp * 0.96, 0.14, 7.1); // D5
+  mixInto(mix, strike2, Math.floor(0.085 * SAMPLE_RATE));
+  const strike3 = warmBellTone(740, amp * 0.84, 0.11, 7.6); // F#5
+  mixInto(mix, strike3, Math.floor(0.165 * SAMPLE_RATE));
+  const strike4 = warmBellTone(587, amp * 0.74, 0.12, 7.1); // D5 resolve
+  mixInto(mix, strike4, Math.floor(0.235 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }

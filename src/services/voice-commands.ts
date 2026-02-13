@@ -15,7 +15,8 @@ export type VoiceCommand =
   | { type: 'voice-status' }
   | { type: 'gated-mode'; enabled: boolean }
   | { type: 'pause' }
-  | { type: 'replay' };
+  | { type: 'replay' }
+  | { type: 'earcon-tour' };
 
 export interface ChannelOption {
   index: number;
@@ -120,6 +121,11 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "replay", "re-read", "reread", "read that again", "say that again", "repeat", "repeat that", "what did you say", "come again"
   if (/^(?:replay|re-?read|read\s+that\s+again|say\s+that\s+again|repeat(?:\s+that)?|what\s+did\s+you\s+say|come\s+again)$/.test(rest)) {
     return { type: 'replay' };
+  }
+
+  // Earcon/sound demo commands: "earcon tour", "voice tour", "sound check", etc.
+  if (/^(?:(?:earcon|earcons|sound|sounds|voice|audio)\s+(?:tour|demo|test|check)|test\s+(?:earcon|earcons|sounds?|audio)|ear\s+contour)$/.test(rest)) {
+    return { type: 'earcon-tour' };
   }
 
   return null;

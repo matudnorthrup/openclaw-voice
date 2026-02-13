@@ -84,6 +84,23 @@ describe('PipelineStateMachine', () => {
       // Consumed after retrieval
       expect(sm.hasBufferedUtterance()).toBe(false);
     });
+
+    it('buffers up to 3 utterances and drops the oldest when full', () => {
+      sm.bufferUtterance('u1', Buffer.from('a'), 100);
+      sm.bufferUtterance('u2', Buffer.from('b'), 200);
+      sm.bufferUtterance('u3', Buffer.from('c'), 300);
+      sm.bufferUtterance('u4', Buffer.from('d'), 400);
+
+      const first = sm.getBufferedUtterance();
+      const second = sm.getBufferedUtterance();
+      const third = sm.getBufferedUtterance();
+      const none = sm.getBufferedUtterance();
+
+      expect(first?.userId).toBe('u2');
+      expect(second?.userId).toBe('u3');
+      expect(third?.userId).toBe('u4');
+      expect(none).toBeNull();
+    });
   });
 
   describe('utterance during SPEAKING — stop playback + busy earcon', () => {

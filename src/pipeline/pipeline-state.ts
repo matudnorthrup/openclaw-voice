@@ -122,10 +122,11 @@ const DEFAULT_WARNING_BEFORE_MS = 5_000;
 
 export class PipelineStateMachine {
   private state: PipelineState = { type: 'IDLE' };
-  private bufferedUtterance: { userId: string; wavBuffer: Buffer; durationMs: number } | null = null;
+  private bufferedUtterances: { userId: string; wavBuffer: Buffer; durationMs: number }[] = [];
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private warningTimer: ReturnType<typeof setTimeout> | null = null;
   private onTimeout: ((effects: TransitionEffect[]) => void) | null = null;
+  private static readonly MAX_BUFFERED_UTTERANCES = 3;
 
   getState(): PipelineState {
     return this.state;
@@ -140,17 +141,18 @@ export class PipelineStateMachine {
    * The pipeline should re-process it when returning to IDLE.
    */
   bufferUtterance(userId: string, wavBuffer: Buffer, durationMs: number): void {
-    this.bufferedUtterance = { userId, wavBuffer, durationMs };
+    if (this.bufferedUtterances.length >= PipelineStateMachine.MAX_BUFFERED_UTTERANCES) {
+      this.bufferedUtterances.shift();
+    }
+    this.bufferedUtterances.push({ userId, wavBuffer, durationMs });
   }
 
   getBufferedUtterance(): { userId: string; wavBuffer: Buffer; durationMs: number } | null {
-    const buffered = this.bufferedUtterance;
-    this.bufferedUtterance = null;
-    return buffered;
+    return this.bufferedUtterances.shift() ?? null;
   }
 
   hasBufferedUtterance(): boolean {
-    return this.bufferedUtterance !== null;
+    return this.bufferedUtterances.length > 0;
   }
 
   /**
@@ -220,7 +222,7 @@ export class PipelineStateMachine {
           timeoutMs,
           warningFired: false,
         };
-        this.scheduleTimers(timeoutMs, 'Choice timed out, defaulting to wait.');
+        this.scheduleTimers(timeoutMs, 'Choice timed out.');
         return effects;
       }
 
@@ -488,7 +490,7 @@ export class PipelineStateMachine {
    */
   destroy(): void {
     this.clearTimers();
-    this.bufferedUtterance = null;
+    this.bufferedUtterances = [];
     this.state = { type: 'IDLE' };
   }
 }

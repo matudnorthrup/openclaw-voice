@@ -8,18 +8,25 @@ export interface UtteranceHandler {
   (userId: string, wavBuffer: Buffer, durationMs: number): void;
 }
 
+export interface RejectedAudioHandler {
+  (userId: string, durationMs: number): void;
+}
+
 export class AudioReceiver {
   private connection: VoiceConnection;
   private onUtterance: UtteranceHandler;
+  private onRejectedAudio: RejectedAudioHandler | null;
   private listening = false;
   private activeSubscriptions = new Set<string>();
 
   constructor(
     connection: VoiceConnection,
     onUtterance: UtteranceHandler,
+    onRejectedAudio?: RejectedAudioHandler,
   ) {
     this.connection = connection;
     this.onUtterance = onUtterance;
+    this.onRejectedAudio = onRejectedAudio ?? null;
   }
 
   start(): void {
@@ -85,6 +92,7 @@ export class AudioReceiver {
         this.onUtterance(userId, wavBuffer, durationMs);
       } else {
         console.log(`Discarded noise from ${userId}: ${durationMs}ms`);
+        this.onRejectedAudio?.(userId, durationMs);
       }
     });
 

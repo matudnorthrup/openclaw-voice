@@ -85,8 +85,12 @@ export class ChannelRouter {
   }
 
   async getLogChannel(): Promise<TextChannel | null> {
-    const active = this.getActiveChannel();
-    const channelId = active.channelId || config.logChannelId;
+    return this.getLogChannelFor(this.activeChannelName);
+  }
+
+  async getLogChannelFor(channelName: string): Promise<TextChannel | null> {
+    const def = channels[channelName] || channels['default'];
+    const channelId = def?.channelId || config.logChannelId;
     if (!channelId) return null;
 
     // Check our resolved cache first (handles threads/forum posts)
@@ -101,7 +105,7 @@ export class ChannelRouter {
     }
 
     // Fall back to default log channel
-    if (active.channelId && config.logChannelId) {
+    if (def?.channelId && config.logChannelId) {
       const fallback = await this.resolveChannel(config.logChannelId);
       if (fallback) return fallback;
     }
@@ -286,11 +290,22 @@ export class ChannelRouter {
 
   getAllChannelSessionKeys(): { name: string; displayName: string; sessionKey: string }[] {
     const result: { name: string; displayName: string; sessionKey: string }[] = [];
+    let hasDefaultMain = false;
     for (const [name, def] of Object.entries(channels)) {
       if (!def.channelId && !def.sessionKey) continue;
       const sessionKey = def.sessionKey
         || (def.channelId ? GatewaySync.sessionKeyForChannel(def.channelId) : GatewaySync.defaultSessionKey);
+      if (sessionKey === GatewaySync.defaultSessionKey) {
+        hasDefaultMain = true;
+      }
       result.push({ name, displayName: def.displayName, sessionKey });
+    }
+    if (!hasDefaultMain) {
+      result.push({
+        name: 'default',
+        displayName: channels['default']?.displayName || 'General',
+        sessionKey: GatewaySync.defaultSessionKey,
+      });
     }
     return result;
   }
