@@ -45,6 +45,9 @@ export class VoicePipeline {
   private fastCueTimer: NodeJS.Timeout | null = null;
   private pendingFastCue: EarconName | null = null;
   private pendingFastCueResolvers: Array<() => void> = [];
+  private pendingWaitCallback: ((responseText: string) => void) | null = null;
+  private activeWaitQueueItemId: string | null = null;
+  private speculativeQueueItemId: string | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -106,6 +109,9 @@ export class VoicePipeline {
     this.receiver.stop();
     this.clearFastCueQueue();
     this.player.stopPlayback();
+    this.pendingWaitCallback = null;
+    this.activeWaitQueueItemId = null;
+    this.speculativeQueueItemId = null;
     this.stateMachine.destroy();
     console.log('Voice pipeline stopped');
   }
@@ -164,6 +170,11 @@ export class VoicePipeline {
   }
 
   private async handleUtterance(userId: string, wavBuffer: Buffer, durationMs: number): Promise<void> {
+    // Clear stale speculative queue item (safety net for timeout edge case)
+    if (this.speculativeQueueItemId && !this.stateMachine.getQueueChoiceState()) {
+      this.speculativeQueueItemId = null;
+    }
+
     const stateAtStart = this.stateMachine.getStateType();
     const isSpeakingAtStart = stateAtStart === 'SPEAKING';
     const gatedMode = getVoiceSettings().gated;
@@ -363,6 +374,8 @@ export class VoicePipeline {
         }
       }
 
+      this.cancelPendingWait('new prompt dispatch');
+
       this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
 
       if (mode === 'queue') {
@@ -423,6 +436,7 @@ export class VoicePipeline {
   }
 
   private async handleVoiceCommand(command: VoiceCommand): Promise<void> {
+    this.cancelPendingWait(`voice command: ${command.type}`);
     if (command.type === 'switch' || command.type === 'list' || command.type === 'default') {
       this.clearInboxFlowIfActive(`voice command: ${command.type}`);
     }
@@ -930,29 +944,85 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private cancelPendingWait(reason: string): void {
+    if (this.pendingWaitCallback) {
+      console.log(`Cancelling pending wait (${reason})`);
+      this.pendingWaitCallback = null;
+      this.activeWaitQueueItemId = null;
+      this.stopWaitingLoop();
+      // Queue item stays as pending/ready — shows up in inbox
+    }
+  }
+
+  private deliverWaitResponse(responseText: string): void {
+    this.lastSpokenText = responseText;
+    void (async () => {
+      try {
+        const ttsStream = await textToSpeechStream(responseText);
+        this.stopWaitingLoop();
+        this.player.stopPlayback();
+        if (!this.isBusy() || this.player.isWaiting()) {
+          this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
+          await this.player.playStream(ttsStream);
+          this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
+          this.gateGraceUntil = Date.now() + 5_000;
+          await this.playReadyEarcon();
+        } else {
+          // Pipeline got busy — defer
+          this.notifyIfIdle(responseText);
+        }
+      } catch (err: any) {
+        console.error(`Wait response delivery failed: ${err.message}`);
+      }
+    })();
+  }
+
   private async handleWaitMode(userId: string, transcript: string): Promise<void> {
     const channelName = this.router?.getActiveChannel().name;
 
+    // Non-blocking path: dispatch fire-and-forget with a wait callback
+    if (this.router && this.queueState) {
+      const activeChannel = this.router.getActiveChannel();
+      const displayName = (activeChannel as any).displayName || activeChannel.name;
+      const sessionKey = this.router.getActiveSessionKey();
+
+      this.log(`**You:** ${transcript}`, channelName);
+      this.session.appendUserMessage(userId, transcript, channelName);
+
+      const item = this.queueState.enqueue({
+        channel: activeChannel.name,
+        displayName,
+        sessionKey,
+        userMessage: transcript,
+      });
+
+      // Register wait callback — will be invoked when LLM finishes
+      this.activeWaitQueueItemId = item.id;
+      this.pendingWaitCallback = (responseText: string) => {
+        this.deliverWaitResponse(responseText);
+      };
+
+      this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+
+      // Sync user message to OpenClaw
+      if (this.gatewaySync?.isConnected()) {
+        try {
+          await this.gatewaySync.inject(sessionKey, transcript, 'voice-user');
+        } catch (err: any) {
+          console.warn(`OpenClaw user sync failed: ${err.message}`);
+        }
+      }
+
+      // Return immediately — waiting loop keeps running, pipeline goes to IDLE via finally block
+      return;
+    }
+
+    // Synchronous fallback when queueState is not available
     this.log(`**You:** ${transcript}`, channelName);
     this.session.appendUserMessage(userId, transcript, channelName);
 
-    let responseText: string;
-    if (this.router) {
-      const activeChannel = this.router.getActiveChannel();
-      const systemPrompt = this.router.getSystemPrompt();
-      await this.router.refreshHistory();
-      const history = this.router.getHistory();
-      const scopedUserId = `${userId}:${activeChannel.name}`;
-      const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
-        systemPrompt,
-        history,
-      });
-      this.router.setHistory(updatedHistory);
-      responseText = response;
-    } else {
-      const { response } = await getResponse(userId, transcript);
-      responseText = response;
-    }
+    const { response } = await getResponse(userId, transcript);
+    const responseText = response;
 
     this.log(`**${config.botName}:** ${responseText}`, channelName);
     this.session.appendAssistantMessage(responseText, channelName);
@@ -1001,14 +1071,54 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
-    // Enter choice state before the ready cue so quick responses are captured reliably.
+    if (!this.router || !this.queueState) {
+      // Fall back to old behavior if no queue state
+      this.stateMachine.transition({
+        type: 'ENTER_QUEUE_CHOICE',
+        userId,
+        transcript,
+      });
+      await this.speakResponse('Send to inbox, or wait here?', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const activeChannel = this.router.getActiveChannel();
+    const channelName = activeChannel.name;
+    const displayName = (activeChannel as any).displayName || channelName;
+    const sessionKey = this.router.getActiveSessionKey();
+
+    this.log(`**You:** ${transcript}`, channelName);
+    this.session.appendUserMessage(userId, transcript, channelName);
+
+    // Enqueue and dispatch speculatively — LLM starts immediately
+    const item = this.queueState.enqueue({
+      channel: channelName,
+      displayName,
+      sessionKey,
+      userMessage: transcript,
+    });
+
+    this.speculativeQueueItemId = item.id;
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+
+    // Sync user message to OpenClaw
+    if (this.gatewaySync?.isConnected()) {
+      try {
+        await this.gatewaySync.inject(sessionKey, transcript, 'voice-user');
+      } catch (err: any) {
+        console.warn(`OpenClaw user sync failed: ${err.message}`);
+      }
+    }
+
+    // Enter choice state and prompt user — LLM works in parallel
     this.stateMachine.transition({
       type: 'ENTER_QUEUE_CHOICE',
       userId,
       transcript,
     });
 
-    // Speak the prompt, then play ready earcon when done.
+    this.stopWaitingLoop();
     await this.speakResponse('Send to inbox, or wait here?', { inbox: true });
     await this.playReadyEarcon();
   }
@@ -1018,40 +1128,98 @@ Use channel names (the part before the colon). Do not explain.`,
     if (!choiceState) return;
 
     const { userId, transcript: originalTranscript } = choiceState;
+    const specId = this.speculativeQueueItemId;
 
     const choice = matchQueueChoice(transcript);
     if (choice === 'queue') {
+      // Already dispatched speculatively — just confirm
       this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
       this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-      await this.handleQueueMode(userId, originalTranscript);
+      this.speculativeQueueItemId = null;
+
+      if (specId) {
+        // Already dispatched — play confirmation
+        const activeChannel = this.router?.getActiveChannel();
+        const displayName = activeChannel ? ((activeChannel as any).displayName || activeChannel.name) : 'inbox';
+        await this.player.playEarcon('acknowledged');
+        await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
+      } else {
+        // No speculative dispatch (fallback) — dispatch now
+        await this.handleQueueMode(userId, originalTranscript);
+      }
+
       // Auto-check inbox after dispatch in ask mode
       if (this.inboxTracker?.isActive()) {
         await this.handleInboxCheck();
       }
     } else if (choice === 'silent') {
+      // Already dispatched — set silentWait for auto-read
       this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
       this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
       this.silentWait = true;
-      await this.handleSilentQueue(userId, originalTranscript);
+      this.speculativeQueueItemId = null;
+
+      if (specId) {
+        await this.player.playEarcon('acknowledged');
+      } else {
+        await this.handleSilentQueue(userId, originalTranscript);
+      }
     } else if (choice === 'wait') {
       this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
-      this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
-      await this.sleep(150);
-      this.startWaitingLoop();
-      await this.handleWaitMode(userId, originalTranscript);
+      this.speculativeQueueItemId = null;
+
+      if (specId && this.queueState) {
+        // Check if speculative response is already ready
+        const readyItem = this.queueState.getReadyItems().find((i) => i.id === specId);
+        if (readyItem) {
+          // Instant response — already done
+          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+          this.queueState.markHeard(specId);
+          this.responsePoller?.check();
+          this.lastSpokenText = readyItem.responseText;
+          const ttsStream = await textToSpeechStream(readyItem.responseText);
+          this.stopWaitingLoop();
+          this.player.stopPlayback();
+          this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
+          await this.player.playStream(ttsStream);
+          this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
+          this.gateGraceUntil = Date.now() + 5_000;
+          await this.playReadyEarcon();
+        } else {
+          // Not ready yet — register callback and start waiting loop
+          this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
+          this.activeWaitQueueItemId = specId;
+          this.pendingWaitCallback = (responseText: string) => {
+            this.deliverWaitResponse(responseText);
+          };
+          await this.sleep(150);
+          this.startWaitingLoop();
+          // Return — callback will deliver response when ready
+        }
+      } else {
+        // No speculative dispatch — fall back to synchronous wait
+        this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
+        await this.sleep(150);
+        this.startWaitingLoop();
+        await this.handleWaitMode(userId, originalTranscript);
+      }
     } else {
       // Try navigation commands — with or without wake word
-      // Queue the original prompt first, then navigate
       const navCommand = parseVoiceCommand(transcript, config.botName)
         ?? this.matchBareQueueCommand(transcript);
       if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default')) {
         this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
-        console.log(`Queue choice: navigation (${navCommand.type}), queuing original prompt first`);
+        console.log(`Queue choice: navigation (${navCommand.type}), already dispatched speculatively`);
         this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-        await this.handleSilentQueue(userId, originalTranscript);
+        this.speculativeQueueItemId = null;
+
+        if (!specId) {
+          // No speculative dispatch — dispatch now before navigating
+          await this.handleSilentQueue(userId, originalTranscript);
+        }
         await this.handleVoiceCommand(navCommand);
       } else {
-        // Unrecognized — reprompt with error earcon
+        // Unrecognized — reprompt with error earcon (LLM continues in background)
         await this.repromptAwaiting();
         await this.playReadyEarcon();
       }
@@ -1152,6 +1320,33 @@ Use channel names (the part before the colon). Do not explain.`,
         queueRef.markReady(queueItemId, summary, response);
         console.log(`Queue item ${queueItemId} ready (channel: ${channelName})`);
 
+        // Check for pending wait callback — deliver response directly
+        if (this.pendingWaitCallback && this.activeWaitQueueItemId === queueItemId) {
+          const cb = this.pendingWaitCallback;
+          this.pendingWaitCallback = null;
+          this.activeWaitQueueItemId = null;
+          queueRef.markHeard(queueItemId);
+          pollerRef?.check();
+
+          // Log + session transcript
+          this.log(`**${config.botName}:** ${response}`, channelName);
+          session.appendAssistantMessage(response, channelName);
+
+          // Sync to OpenClaw
+          if (gatewaySync?.isConnected()) {
+            await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+            await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+
+            if (this.inboxTracker?.isActive()) {
+              const count = await this.getCurrentMessageCount(sessionKey);
+              this.inboxTracker.markSeen(sessionKey, count);
+            }
+          }
+
+          cb(response);
+          return;
+        }
+
         // Log + session transcript
         this.log(`**${config.botName}:** ${response}`, channelName);
         session.appendAssistantMessage(response, channelName);
@@ -1195,6 +1390,7 @@ Use channel names (the part before the colon). Do not explain.`,
       return;
     }
 
+    this.cancelPendingWait(`mode switch to ${mode}`);
     this.queueState.setMode(mode);
 
     // Activate/deactivate inbox based on mode
