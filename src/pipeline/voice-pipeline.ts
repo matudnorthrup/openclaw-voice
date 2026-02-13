@@ -457,7 +457,7 @@ export class VoicePipeline {
                   timeout: setTimeout(() => {
                     console.log('Switch choice timed out');
                     this.awaitingSwitchChoice = null;
-                  }, 15_000),
+                  }, 30_000),
                 };
                 await this.speakResponse(`Switched to ${displayName}. Read, or prompt?`, { inbox: true });
               } else {
@@ -527,7 +527,7 @@ export class VoicePipeline {
             timeout: setTimeout(() => {
               console.log('Switch choice timed out');
               this.awaitingSwitchChoice = null;
-            }, 15_000),
+            }, 30_000),
           };
 
           // Update inbox snapshot now (don't wait for choice)
@@ -920,8 +920,13 @@ Use channel names (the part before the colon). Do not explain.`,
     if (choice === 'read') {
       // Read the full last message
       await this.speakResponse(lastMessage, { inbox: true });
+    } else if (choice === 'prompt') {
+      // Confirm with a single tone so user knows Watson is ready
+      console.log('Switch choice: prompt');
+      this.player.stopWaitingLoop();
+      this.player.playSingleTone();
     } else {
-      // 'prompt', 'cancel', or unrecognized — just stop waiting
+      // 'cancel' or unrecognized — just stop waiting
       console.log(`Switch choice: ${choice ?? 'unrecognized'} (input: "${transcript}")`);
       this.player.stopWaitingLoop();
     }
