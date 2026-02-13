@@ -925,7 +925,9 @@ Use channel names (the part before the colon). Do not explain.`,
       this.silentWait = true;
       await this.handleSilentQueue(userId, originalTranscript);
     } else if (choice === 'wait') {
-      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+      this.player.playEarconSync('acknowledged');
+      this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
+      this.player.startWaitingLoop();
       await this.handleWaitMode(userId, originalTranscript);
     } else {
       // Try navigation commands — with or without wake word
