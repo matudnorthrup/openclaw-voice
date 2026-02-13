@@ -172,7 +172,10 @@ export class PipelineStateMachine {
         return this.handleUtteranceReceived(effects);
 
       case 'TRANSCRIPT_READY':
-        this.state = { type: 'PROCESSING' };
+        // Only transition from TRANSCRIBING — don't overwrite AWAITING states
+        if (this.state.type === 'TRANSCRIBING') {
+          this.state = { type: 'PROCESSING' };
+        }
         return effects;
 
       case 'PROCESSING_STARTED':
