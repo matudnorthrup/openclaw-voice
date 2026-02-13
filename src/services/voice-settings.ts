@@ -15,7 +15,7 @@ const settings: VoiceSettingsValues = {
   silenceDurationMs: 1500,
   speechThreshold: 500,
   minSpeechDurationMs: 300,
-  gated: false,
+  gated: true,
 };
 
 let initialized = false;
