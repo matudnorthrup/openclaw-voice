@@ -1324,6 +1324,10 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   notifyIfIdle(message: string): void {
+    if (this.silentWait) {
+      console.log(`Idle notify skipped (silent wait): "${message.slice(0, 60)}..."`);
+      return;
+    }
     if (this.processing || this.player.isPlaying()) {
       console.log(`Idle notify skipped (busy): "${message}"`);
       return;
