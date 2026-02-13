@@ -161,8 +161,11 @@ export class VoicePipeline {
     // Transition to TRANSCRIBING
     this.stateMachine.transition({ type: 'UTTERANCE_RECEIVED' });
 
-    // listening earcon is deferred until we know this is a valid interaction
-    // (post-wake-word in gated mode, or any AWAITING state input)
+    // For AWAITING states, play listening earcon immediately — no wake word needed,
+    // so we know this is a valid interaction before STT even runs
+    if (this.stateMachine.isAwaitingState() || this.stateMachine.getStateType() === 'INBOX_FLOW') {
+      this.player.playEarconSync('listening');
+    }
 
     const pipelineStart = Date.now();
 
@@ -189,7 +192,6 @@ export class VoicePipeline {
       // These are valid interactions that don't need a wake word
       if (this.stateMachine.getStateType() === 'AWAITING_CHANNEL_SELECTION' ||
           this.stateMachine.getChannelSelectionState()) {
-        this.player.playEarconSync('listening');
         console.log(`Channel selection input: "${transcript}"`);
         await this.handleChannelSelection(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -198,7 +200,6 @@ export class VoicePipeline {
       }
 
       if (this.stateMachine.getQueueChoiceState()) {
-        this.player.playEarconSync('listening');
         console.log(`Queue choice input: "${transcript}"`);
         await this.handleQueueChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -207,7 +208,6 @@ export class VoicePipeline {
       }
 
       if (this.stateMachine.getSwitchChoiceState()) {
-        this.player.playEarconSync('listening');
         console.log(`Switch choice input: "${transcript}"`);
         await this.handleSwitchChoiceResponse(transcript);
         const totalMs = Date.now() - pipelineStart;
@@ -216,7 +216,6 @@ export class VoicePipeline {
       }
 
       if (this.stateMachine.getNewPostFlowState()) {
-        this.player.playEarconSync('listening');
         const flowState = this.stateMachine.getNewPostFlowState()!;
         console.log(`New-post flow (${flowState.step}): "${transcript}"`);
         const fallThrough = await this.handleNewPostStep(transcript);
