@@ -886,10 +886,12 @@ Use channel names (the part before the colon). Do not explain.`,
       await this.handleWaitMode(userId, originalTranscript);
     } else {
       // Try navigation commands — with or without wake word
+      // Queue the original prompt first, then navigate
       const navCommand = parseVoiceCommand(transcript, config.botName)
         ?? this.matchBareQueueCommand(transcript);
       if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default')) {
-        console.log(`Queue choice: navigation (${navCommand.type}), discarding original prompt`);
+        console.log(`Queue choice: navigation (${navCommand.type}), queuing original prompt first`);
+        await this.handleQueueMode(userId, originalTranscript);
         await this.handleVoiceCommand(navCommand);
       } else {
         // Cancel or unrecognized — discard the utterance
