@@ -885,9 +885,17 @@ Use channel names (the part before the colon). Do not explain.`,
     } else if (choice === 'wait') {
       await this.handleWaitMode(userId, originalTranscript);
     } else {
-      // Cancel or unrecognized — discard the utterance
-      console.log(`Queue choice: discarded (input: "${transcript}")`);
-      this.player.stopWaitingLoop();
+      // Try navigation commands — with or without wake word
+      const navCommand = parseVoiceCommand(transcript, config.botName)
+        ?? this.matchBareQueueCommand(transcript);
+      if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default')) {
+        console.log(`Queue choice: navigation (${navCommand.type}), discarding original prompt`);
+        await this.handleVoiceCommand(navCommand);
+      } else {
+        // Cancel or unrecognized — discard the utterance
+        console.log(`Queue choice: discarded (input: "${transcript}")`);
+        this.player.stopWaitingLoop();
+      }
     }
   }
 
