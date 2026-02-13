@@ -307,7 +307,11 @@ export class VoicePipeline {
       this.player.stopWaitingLoop();
       this.player.stopPlayback();
     } finally {
-      this.stateMachine.transition({ type: 'PROCESSING_COMPLETE' });
+      // Don't overwrite AWAITING/flow states — they were set intentionally by handlers
+      const st = this.stateMachine.getStateType();
+      if (!this.stateMachine.isAwaitingState() && st !== 'INBOX_FLOW') {
+        this.stateMachine.transition({ type: 'PROCESSING_COMPLETE' });
+      }
 
       // Re-process buffered utterance if any
       const buffered = this.stateMachine.getBufferedUtterance();
