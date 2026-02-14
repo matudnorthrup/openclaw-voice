@@ -90,6 +90,7 @@ describe('earcon durations within expected ranges', () => {
     'cancelled': 370,
     'ready': 380,
     'busy': 170,
+    'gate-closed': 270,
   };
 
   for (const name of EARCON_NAMES) {

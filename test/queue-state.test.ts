@@ -18,8 +18,8 @@ describe('QueueState', () => {
     try { unlinkSync(STATE_PATH); } catch {}
   });
 
-  it('defaults to ask mode', () => {
-    expect(state.getMode()).toBe('ask');
+  it('defaults to wait mode', () => {
+    expect(state.getMode()).toBe('wait');
   });
 
   it('sets and persists mode', () => {

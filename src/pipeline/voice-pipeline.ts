@@ -48,6 +48,7 @@ export class VoicePipeline {
   private pendingWaitCallback: ((responseText: string) => void) | null = null;
   private activeWaitQueueItemId: string | null = null;
   private speculativeQueueItemId: string | null = null;
+  private graceExpiryTimer: NodeJS.Timeout | null = null;
 
   constructor(
     connection: VoiceConnection,
@@ -108,6 +109,7 @@ export class VoicePipeline {
   stop(): void {
     this.receiver.stop();
     this.clearFastCueQueue();
+    this.clearGraceTimer();
     this.player.stopPlayback();
     this.pendingWaitCallback = null;
     this.activeWaitQueueItemId = null;
@@ -326,6 +328,7 @@ export class VoicePipeline {
       }
 
       // Valid interaction confirmed — play listening earcon and wait for it to finish
+      this.clearGraceTimer();
       if (!playedListeningEarly) {
         await this.playFastCue('listening');
       }
@@ -970,7 +973,7 @@ Use channel names (the part before the colon). Do not explain.`,
           this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
           await this.player.playStream(ttsStream);
           this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-          this.gateGraceUntil = Date.now() + 5_000;
+          this.setGateGrace(5_000);
           await this.playReadyEarcon();
         } else {
           // Pipeline got busy — defer
@@ -980,6 +983,46 @@ Use channel names (the part before the colon). Do not explain.`,
         console.error(`Wait response delivery failed: ${err.message}`);
       }
     })();
+  }
+
+  private setGateGrace(ms: number): void {
+    this.gateGraceUntil = Date.now() + ms;
+    this.scheduleGraceExpiry();
+  }
+
+  private setPromptGrace(ms: number): void {
+    this.promptGraceUntil = Date.now() + ms;
+    this.scheduleGraceExpiry();
+  }
+
+  private scheduleGraceExpiry(): void {
+    if (this.graceExpiryTimer) {
+      clearTimeout(this.graceExpiryTimer);
+      this.graceExpiryTimer = null;
+    }
+    if (!getVoiceSettings().gated) return;
+    const latestGrace = Math.max(this.gateGraceUntil, this.promptGraceUntil);
+    const remaining = latestGrace - Date.now();
+    if (remaining <= 0) return;
+    this.graceExpiryTimer = setTimeout(() => {
+      this.graceExpiryTimer = null;
+      this.onGraceExpired();
+    }, remaining);
+  }
+
+  private clearGraceTimer(): void {
+    if (this.graceExpiryTimer) {
+      clearTimeout(this.graceExpiryTimer);
+      this.graceExpiryTimer = null;
+    }
+  }
+
+  private onGraceExpired(): void {
+    if (!getVoiceSettings().gated) return;
+    if (this.pendingWaitCallback) return;
+    if (this.isBusy() || this.player.isPlaying()) return;
+    console.log('Grace period expired — gate closed');
+    void this.playFastCue('gate-closed');
   }
 
   private async handleWaitMode(userId: string, transcript: string): Promise<void> {
@@ -1034,7 +1077,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
     await this.player.playStream(ttsStream);
     this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-    this.gateGraceUntil = Date.now() + 5_000;
+    this.setGateGrace(5_000);
     await this.playReadyEarcon();
   }
 
@@ -1173,7 +1216,7 @@ Use channel names (the part before the colon). Do not explain.`,
           this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
           await this.player.playStream(ttsStream);
           this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-          this.gateGraceUntil = Date.now() + 5_000;
+          this.setGateGrace(5_000);
           await this.playReadyEarcon();
         } else {
           // Not ready yet — register callback and start waiting loop
@@ -1263,7 +1306,7 @@ Use channel names (the part before the colon). Do not explain.`,
       // Confirm with a ready earcon so user knows Watson is ready
       console.log('Switch choice: prompt');
       this.stopWaitingLoop();
-      this.promptGraceUntil = Date.now() + 15_000;
+      this.setPromptGrace(15_000);
       this.playReadyEarconSync();
     } else if (choice === 'cancel') {
       const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
@@ -1600,7 +1643,7 @@ Use channel names (the part before the colon). Do not explain.`,
       this.stopWaitingLoop();
       this.player.stopPlayback();
       await this.player.playStream(ttsStream);
-      this.gateGraceUntil = Date.now() + 5_000;
+      this.setGateGrace(5_000);
       await this.playReadyEarcon();
       return;
     }
@@ -1640,7 +1683,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
-    this.gateGraceUntil = Date.now() + 5_000;
+    this.setGateGrace(5_000);
     await this.playReadyEarcon();
   }
 
@@ -1770,7 +1813,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.stopWaitingLoop();
     this.player.stopPlayback();
     await this.player.playStream(ttsStream);
-    this.gateGraceUntil = Date.now() + 5_000;
+    this.setGateGrace(5_000);
   }
 
   private logToInbox(message: string): void {
@@ -1802,7 +1845,7 @@ Use channel names (the part before the colon). Do not explain.`,
         // Re-check idle — user may have started speaking while TTS was generating
         if (!this.isBusy() && !this.player.isPlaying()) {
           this.player.playStream(stream).then(() => {
-            this.gateGraceUntil = Date.now() + 5_000;
+            this.setGateGrace(5_000);
           });
         }
       })
@@ -1843,13 +1886,13 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private async playReadyEarcon(): Promise<void> {
     console.log('Ready cue emitted (async) — opening grace window');
-    this.gateGraceUntil = Date.now() + VoicePipeline.READY_GRACE_MS;
+    this.setGateGrace(VoicePipeline.READY_GRACE_MS);
     await this.playFastCue('ready');
   }
 
   private playReadyEarconSync(): void {
     console.log('Ready cue emitted (sync) — opening grace window');
-    this.gateGraceUntil = Date.now() + VoicePipeline.READY_GRACE_MS;
+    this.setGateGrace(VoicePipeline.READY_GRACE_MS);
     void this.playFastCue('ready');
   }
 

@@ -10,7 +10,8 @@ export type EarconName =
   | 'timeout-warning'
   | 'cancelled'
   | 'ready'
-  | 'busy';
+  | 'busy'
+  | 'gate-closed';
 
 const cache = new Map<EarconName, Buffer>();
 
@@ -219,6 +220,23 @@ function generateBusy(): Buffer {
   return mixToWav(mix);
 }
 
+/**
+ * Soft descending D5→A4 — "Grace period ended, wake word required" (~250ms)
+ */
+function generateGateClosed(): Buffer {
+  const duration = 0.25;
+  const samples = Math.floor(duration * SAMPLE_RATE);
+  const mix = new Float64Array(samples);
+  const amp = 2000;
+
+  const note1 = warmBellTone(587, amp, 0.14, 9);        // D5
+  mixInto(mix, note1, 0);
+  const note2 = warmBellTone(440, amp * 0.7, 0.14, 9.5); // A4
+  mixInto(mix, note2, Math.floor(0.1 * SAMPLE_RATE));
+
+  return mixToWav(mix);
+}
+
 const generators: Record<EarconName, () => Buffer> = {
   'listening': generateListening,
   'acknowledged': generateAcknowledged,
@@ -227,6 +245,7 @@ const generators: Record<EarconName, () => Buffer> = {
   'cancelled': generateCancelled,
   'ready': generateReady,
   'busy': generateBusy,
+  'gate-closed': generateGateClosed,
 };
 
 /**
@@ -259,5 +278,5 @@ export function getEarcon(name: EarconName): Buffer {
  */
 export const EARCON_NAMES: EarconName[] = [
   'listening', 'acknowledged', 'error', 'timeout-warning',
-  'cancelled', 'ready', 'busy',
+  'cancelled', 'ready', 'busy', 'gate-closed',
 ];
