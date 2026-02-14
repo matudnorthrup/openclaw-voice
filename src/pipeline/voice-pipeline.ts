@@ -313,6 +313,10 @@ export class VoicePipeline {
           console.log(`Gated: discarded interrupt "${transcript}"`);
           // Don't stop playback — Watson keeps talking
           keepCurrentState = true;
+        } else if (this.pendingWaitCallback) {
+          console.log(`Gated: discarded "${transcript}" (wait processing continues)`);
+          // Don't stop waiting loop — pending wait callback is active
+          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         } else {
           console.log(`Gated: discarded "${transcript}"`);
           this.stopWaitingLoop();
@@ -363,8 +367,8 @@ export class VoicePipeline {
         }
       }
 
-      // In queue/ask mode (or during pending wait processing), also match bare navigation commands
-      if (mode !== 'wait' || this.pendingWaitCallback) {
+      // In queue/ask mode, also match bare navigation commands without "Hey Watson" prefix
+      if (mode !== 'wait') {
         const bareCommand = this.matchBareQueueCommand(transcript);
         if (bareCommand) {
           console.log(`Bare queue command detected: ${bareCommand.type}`);
@@ -1005,16 +1009,8 @@ Use channel names (the part before the colon). Do not explain.`,
 
       this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
 
-      // Sync user message to OpenClaw
-      if (this.gatewaySync?.isConnected()) {
-        try {
-          await this.gatewaySync.inject(sessionKey, transcript, 'voice-user');
-        } catch (err: any) {
-          console.warn(`OpenClaw user sync failed: ${err.message}`);
-        }
-      }
-
       // Return immediately — waiting loop keeps running, pipeline goes to IDLE via finally block
+      // OpenClaw sync happens in the dispatch completion handler to avoid gateway conflicts
       return;
     }
 
@@ -1103,16 +1099,8 @@ Use channel names (the part before the colon). Do not explain.`,
     this.speculativeQueueItemId = item.id;
     this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
 
-    // Sync user message to OpenClaw
-    if (this.gatewaySync?.isConnected()) {
-      try {
-        await this.gatewaySync.inject(sessionKey, transcript, 'voice-user');
-      } catch (err: any) {
-        console.warn(`OpenClaw user sync failed: ${err.message}`);
-      }
-    }
-
     // Enter choice state and prompt user — LLM works in parallel
+    // OpenClaw sync happens in the dispatch completion handler to avoid gateway conflicts
     this.stateMachine.transition({
       type: 'ENTER_QUEUE_CHOICE',
       userId,
