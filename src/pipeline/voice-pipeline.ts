@@ -305,11 +305,19 @@ export class VoicePipeline {
 
       // Gate check: in gated mode, discard utterances that don't start with the wake word
       // Grace period: skip gate for 5s after Watson finishes speaking
-      const inGracePeriod = graceFromGateAtCapture ||
-        graceFromPromptAtCapture ||
-        Date.now() < this.gateGraceUntil ||
-        Date.now() < this.promptGraceUntil ||
-        this.pendingWaitCallback !== null;
+      // While a wait callback is pending, require wake word in gated mode.
+      // Grace windows are intended for explicit "your turn" handoffs, not
+      // background processing where accidental noises can cause interruptions.
+      const allowGraceBypass = this.pendingWaitCallback === null;
+      const inGracePeriod = (
+        allowGraceBypass &&
+        (
+          graceFromGateAtCapture ||
+          graceFromPromptAtCapture ||
+          Date.now() < this.gateGraceUntil ||
+          Date.now() < this.promptGraceUntil
+        )
+      );
       if (gatedMode && !inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
@@ -1634,7 +1642,8 @@ Use channel names (the part before the colon). Do not explain.`,
         parts.push(`${remaining} more. Say next or done.`);
       } else {
         this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-        parts.push(await this.switchHomeWithMessage("That's everything."));
+        // Stay on the channel we just read from; auto-switching home here feels surprising.
+        parts.push("That's everything.");
       }
 
       const fullText = this.toSpokenText(parts.join(' '), 'Nothing new in the inbox.');
@@ -1837,6 +1846,13 @@ Use channel names (the part before the colon). Do not explain.`,
       return;
     }
 
+    // If a ready item belongs to the currently active channel and we're idle,
+    // read it directly instead of announcing "Response ready from <same channel>".
+    if (this.shouldAutoReadReadyForActiveChannel(message)) {
+      void this.readReadyForActiveChannel();
+      return;
+    }
+
     console.log(`Idle notify: "${message}"`);
     this.logToInbox(`**${config.botName}:** ${message}`);
 
@@ -1852,6 +1868,53 @@ Use channel names (the part before the colon). Do not explain.`,
       .catch((err) => {
         console.warn(`Idle notify TTS failed: ${err.message}`);
       });
+  }
+
+  private shouldAutoReadReadyForActiveChannel(message: string): boolean {
+    if (!this.router || !this.queueState) return false;
+    const m = message.match(/^Response ready from (.+)\.$/i);
+    if (!m) return false;
+
+    const announced = this.normalizeChannelLabel(m[1] || '');
+    const active = this.router.getActiveChannel();
+    const activeDisplay = this.normalizeChannelLabel((active as any).displayName || active.name);
+
+    if (announced !== activeDisplay) return false;
+
+    return this.queueState.getReadyByChannel(active.name) != null;
+  }
+
+  private async readReadyForActiveChannel(): Promise<void> {
+    if (!this.router || !this.queueState) return;
+    const active = this.router.getActiveChannel();
+    const item = this.queueState.getReadyByChannel(active.name);
+    if (!item) return;
+
+    console.log(`Idle auto-read: consuming ready item from active channel ${item.displayName}`);
+    this.queueState.markHeard(item.id);
+    this.responsePoller?.check();
+
+    this.lastSpokenText = item.responseText;
+    this.logToInbox(`**${config.botName}:** ${item.responseText}`);
+
+    try {
+      const ttsStream = await textToSpeechStream(item.responseText);
+      if (this.isBusy() || this.player.isPlaying()) {
+        console.log('Idle auto-read aborted (became busy before playback)');
+        return;
+      }
+      this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
+      await this.player.playStream(ttsStream);
+      this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
+      this.setGateGrace(5_000);
+      await this.playReadyEarcon();
+    } catch (err: any) {
+      console.warn(`Idle auto-read failed: ${err.message}`);
+    }
+  }
+
+  private normalizeChannelLabel(value: string): string {
+    return value.trim().toLowerCase().replace(/^#/, '').replace(/\s+/g, ' ');
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {

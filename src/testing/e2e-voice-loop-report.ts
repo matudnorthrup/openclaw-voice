@@ -191,10 +191,16 @@ async function main(): Promise<void> {
     const readySeen = await waitFor(() => queueState.getReadyItems().length > 0, 35_000);
     const readyBeforeInboxNext = queueState.getReadyItems().length;
     const heardBeforeInboxNext = queueState.getHeardCount();
+    const channelAtReady = router.getActiveChannel().name;
     checks.push({
       id: 'ask-send-to-inbox-ready',
       ok: readySeen,
       detail: readySeen ? `ready=${queueState.getReadyItems().length}` : `pending=${queueState.getPendingItems().length}`,
+    });
+    checks.push({
+      id: 'ready-notify-does-not-switch-channel',
+      ok: channelAtReady === router.getActiveChannel().name,
+      detail: `channel=${router.getActiveChannel().name}`,
     });
 
     await injectSpeech(pipeline, 'Hey Watson, inbox');

@@ -1,6 +1,6 @@
 import { matchQueueChoice, matchSwitchChoice } from '../services/voice-commands.js';
 
-type Mode = 'wait' | 'ask';
+type Mode = 'wait' | 'ask' | 'queue';
 type UiState = 'IDLE' | 'AWAITING_QUEUE_CHOICE' | 'AWAITING_SWITCH_CHOICE' | 'INBOX_FLOW';
 
 type QueueItem = {
@@ -28,6 +28,7 @@ class OverlapFlowSimulator {
   private seq = 1;
   private readonly queue = new Map<string, QueueItem>();
   private readonly lastMessageByChannel: Record<string, string>;
+  private gated = false;
 
   constructor(channels: Record<string, string>) {
     this.lastMessageByChannel = channels;
@@ -35,6 +36,10 @@ class OverlapFlowSimulator {
 
   setMode(mode: Mode): void {
     this.mode = mode;
+  }
+
+  setGated(enabled: boolean): void {
+    this.gated = enabled;
   }
 
   say(transcript: string): string[] {
@@ -175,6 +180,11 @@ class OverlapFlowSimulator {
       return events;
     }
 
+    if (this.gated && this.pendingWaitId && !/^hey\s+watson\b/i.test(transcript.trim())) {
+      events.push('gated-pending-wait:rejected-no-wake');
+      return events;
+    }
+
     events.push(...this.prompt(transcript));
     return events;
   }
@@ -194,6 +204,15 @@ class OverlapFlowSimulator {
       this.pendingWaitId = null;
       item.status = 'ready';
       events.push(`deliver:${itemId}:spoken`);
+      events.push('ready');
+      return events;
+    }
+
+    // In queue mode, if idle and still in the same channel, auto-read instead
+    // of announcing readiness.
+    if (this.mode === 'queue' && this.state === 'IDLE' && item.channel === this.activeChannel) {
+      events.push(`auto-read:${itemId}:${item.channel}`);
+      this.queue.delete(itemId);
       events.push('ready');
       return events;
     }
@@ -250,6 +269,11 @@ class OverlapFlowSimulator {
     if (this.mode === 'wait') {
       this.pendingWaitId = itemId;
       events.push(`wait-callback:${itemId}`);
+      return events;
+    }
+
+    if (this.mode === 'queue') {
+      events.push(`queue-dispatch:${itemId}`);
       return events;
     }
 
@@ -694,6 +718,48 @@ const scenarios: Array<() => ScenarioResult> = [
       breaks: [
         sim.getActiveChannel() !== 'inbox' ? 'active channel not updated through nav chain' : '',
         !log.includes('switch-choice:read') ? 'read failed after chained navigation' : '',
+      ].filter(Boolean),
+    };
+  },
+  () => {
+    const sim = new OverlapFlowSimulator({ planning: 'Planning last message' });
+    sim.setMode('queue');
+    const log: string[] = [];
+    log.push(...sim.say('planning prompt'));
+    log.push(...sim.complete('q1'));
+    return {
+      id: '26-queue-ready-active-channel-auto-read',
+      passes: [
+        log.includes('auto-read:q1:general') || log.includes('auto-read:q1:planning')
+          ? 'ready in active channel auto-reads'
+          : '',
+      ].filter(Boolean),
+      breaks: [
+        log.includes('notify:q1:spoken') ? 'announced ready instead of auto-reading active channel item' : '',
+        !(log.includes('auto-read:q1:general') || log.includes('auto-read:q1:planning'))
+          ? 'missing auto-read for active-channel ready item'
+          : '',
+      ].filter(Boolean),
+    };
+  },
+  () => {
+    const sim = new OverlapFlowSimulator({ planning: 'Planning last message' });
+    sim.setMode('wait');
+    sim.setGated(true);
+    const log: string[] = [];
+    log.push(...sim.say('planning prompt'));
+    log.push(...sim.say('you')); // accidental noise/misfire while wait pending
+    return {
+      id: '27-gated-pending-wait-rejects-no-wake-noise',
+      passes: [
+        log.includes('gated-pending-wait:rejected-no-wake')
+          ? 'pending-wait accidental utterance rejected without wake word'
+          : '',
+      ].filter(Boolean),
+      breaks: [
+        !log.includes('gated-pending-wait:rejected-no-wake')
+          ? 'pending-wait accidental utterance was not rejected in gated mode'
+          : '',
       ].filter(Boolean),
     };
   },

@@ -212,6 +212,10 @@ class InboxFlowSimulator {
     return count;
   }
 
+  getActiveChannel(): string {
+    return this.activeChannel;
+  }
+
   private switchTo(channel: string): string[] {
     const events: string[] = [];
     this.activeChannel = channel;
@@ -343,6 +347,22 @@ const scenarios: Array<() => ScenarioResult> = [
     s.say('inbox'); s.say('next');
     const log = s.say('inbox');
     return mk('i15-inbox-empty-after-consume', [log.includes('inbox:empty') ? 'inbox empty after consume' : ''], [log.includes('inbox:empty') ? '' : 'inbox not empty after consume']);
+  },
+  () => {
+    const s = new InboxFlowSimulator({ general: 'msg', nutrition: 'msg' });
+    s.setMode('ask');
+    s.say('switch to nutrition');
+    s.say('new prompt');
+    s.say('prompt');
+    s.say('send to inbox');
+    s.complete('q1');
+    s.say('inbox');
+    s.say('next');
+    return mk(
+      'i16-inbox-next-stays-on-read-channel',
+      [s.getActiveChannel() === 'nutrition' ? 'stays on read channel after final next' : ''],
+      [s.getActiveChannel() === 'nutrition' ? '' : `unexpected channel after next: ${s.getActiveChannel()}`],
+    );
   },
 ];
 
