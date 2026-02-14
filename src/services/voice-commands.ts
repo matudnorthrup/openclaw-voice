@@ -46,9 +46,14 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
 
   // "switch to X", "go to X", "change to X", "move to X"
+  // Exclude "inbox" — handled below as inbox-check
   const switchMatch = rest.match(/^(?:switch|go|change|move)\s+to\s+(.+)$/);
   if (switchMatch) {
-    return { type: 'switch', channel: switchMatch[1].trim() };
+    const target = switchMatch[1].trim();
+    if (/^(?:inbox|the\s+inbox|my\s+inbox)$/.test(target)) {
+      return { type: 'inbox-check' };
+    }
+    return { type: 'switch', channel: target };
   }
 
   // "change channels", "switch channels", "list channels", "show channels"
