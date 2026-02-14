@@ -306,7 +306,8 @@ export class VoicePipeline {
       const inGracePeriod = graceFromGateAtCapture ||
         graceFromPromptAtCapture ||
         Date.now() < this.gateGraceUntil ||
-        Date.now() < this.promptGraceUntil;
+        Date.now() < this.promptGraceUntil ||
+        this.pendingWaitCallback !== null;
       if (gatedMode && !inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
@@ -362,8 +363,8 @@ export class VoicePipeline {
         }
       }
 
-      // In queue/ask mode, also match bare navigation commands without "Hey Watson" prefix
-      if (mode !== 'wait') {
+      // In queue/ask mode (or during pending wait processing), also match bare navigation commands
+      if (mode !== 'wait' || this.pendingWaitCallback) {
         const bareCommand = this.matchBareQueueCommand(transcript);
         if (bareCommand) {
           console.log(`Bare queue command detected: ${bareCommand.type}`);
