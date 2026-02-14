@@ -98,6 +98,73 @@ The bot's speech detection can be adjusted on the fly without restarting:
 
 Changes take effect on the next utterance. Set startup defaults via `SILENCE_DURATION_MS`, `SPEECH_THRESHOLD`, and `MIN_SPEECH_DURATION_MS` in your `.env`.
 
+## Automated Flow Harness
+
+Use the interaction flow harness to test voice UX contracts without Discord/audio IO.
+
+```bash
+npm run test:flows
+```
+
+What it validates:
+- AWAITING-state transitions for queue/switch/channel-choice flows
+- Recognized vs unrecognized menu intents
+- Reprompt/error behavior and return-to-ready behavior
+- Timeout warning + timeout cancellation timing
+
+This is deterministic and fast. Keep manual Discord tests for true runtime behaviors (network, gateway latency, live STT/TTS quirks).
+
+For parser/STT-variant robustness checks (short utterances, common mishears), run:
+
+```bash
+npm run test:intents
+```
+
+For a quick pass/fail scenario report (useful during iterative debugging), run:
+
+```bash
+npm run flows:report
+```
+
+For overlap/concurrency stress scenarios (wait/ask mode overlap, channel switching during processing), run:
+
+```bash
+npm run flows:stress
+```
+
+For inbox-focused sequencing stress scenarios, run:
+
+```bash
+npm run flows:stress:inbox
+```
+
+For live integration checks against real Discord + Gateway (and optional STT/TTS probe), run:
+
+```bash
+npm run e2e:live
+```
+
+Optional env knobs:
+- `E2E_CHANNEL_A` (default: `default`)
+- `E2E_CHANNEL_B` (default: `nutrition`)
+- `E2E_AUDIO=false` to skip STT/TTS probe
+
+Scope note:
+- This checks live Discord auth/channel routing + live gateway roundtrips + inbox/queue integration.
+- It also includes an optional live STT/TTS probe.
+- It does **not** yet drive live Discord voice capture/playback end-to-end in one script.
+
+For a live voice-loop runner (real `VoicePipeline` + STT + gateway + TTS with synthesized speech injections), run:
+
+```bash
+npm run e2e:voice-loop
+```
+
+Optional env knobs:
+- `E2E_SWITCH_CHANNEL_ID` (default: `1472052914267619473`)
+- `E2E_UTILITY_CHANNEL_ID` (default: `1471563603625775124`)
+- `E2E_FORUM_POST_ID` (default: `1471584556107956307`)
+
 ## Auto-Join / Auto-Leave
 
 - The bot automatically joins the voice channel when a user enters it
@@ -117,6 +184,8 @@ src/
     audio-player.ts           # Plays TTS audio back to voice channel
   pipeline/
     voice-pipeline.ts         # Orchestrates STT → LLM → TTS pipeline
+  testing/
+    interaction-flow-harness.ts # Deterministic interaction-contract simulator
   services/
     whisper.ts                # OpenAI Whisper speech-to-text
     claude.ts                 # LLM calls via OpenClaw gateway

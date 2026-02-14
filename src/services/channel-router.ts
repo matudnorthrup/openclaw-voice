@@ -175,10 +175,11 @@ export class ChannelRouter {
       return { success: true, historyCount, displayName: channels[name].displayName };
     }
 
-    // Try as a raw channel ID or <#id> mention
+    // Try as a raw channel ID, spoken numeric ID (with commas/spaces), or <#id> mention
     const channelId = name.replace(/^<#(\d+)>$/, '$1');
-    if (/^\d+$/.test(channelId)) {
-      return this.switchToAdhoc(channelId);
+    const normalizedChannelId = channelId.replace(/[,\s]/g, '');
+    if (/^\d+$/.test(normalizedChannelId)) {
+      return this.switchToAdhoc(normalizedChannelId);
     }
 
     return { success: false, error: `Unknown channel: \`${name}\`. Use \`!channels\` to see available channels, or pass a channel ID.`, historyCount: 0 };

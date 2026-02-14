@@ -1018,7 +1018,8 @@ Use channel names (the part before the colon). Do not explain.`,
     this.log(`**You:** ${transcript}`, channelName);
     this.session.appendUserMessage(userId, transcript, channelName);
 
-    const { response } = await getResponse(userId, transcript);
+    const sessionScopedUser = this.router?.getActiveSessionKey() ?? userId;
+    const { response } = await getResponse(sessionScopedUser, transcript);
     const responseText = response;
 
     this.log(`**${config.botName}:** ${responseText}`, channelName);
@@ -1270,6 +1271,24 @@ Use channel names (the part before the colon). Do not explain.`,
       console.log('Switch choice: cancel');
       this.stopWaitingLoop();
     } else {
+      // Allow navigation commands from switch-choice, with or without wake word.
+      const navCommand = parseVoiceCommand(transcript, config.botName)
+        ?? this.matchBareQueueCommand(transcript);
+      if (
+        navCommand &&
+        (
+          navCommand.type === 'switch' ||
+          navCommand.type === 'list' ||
+          navCommand.type === 'default' ||
+          navCommand.type === 'inbox-check'
+        )
+      ) {
+        console.log(`Switch choice: navigation (${navCommand.type})`);
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+        await this.handleVoiceCommand(navCommand);
+        return;
+      }
+
       // Unrecognized — reprompt with error earcon
       await this.repromptAwaiting();
       await this.playReadyEarcon();
@@ -1294,8 +1313,9 @@ Use channel names (the part before the colon). Do not explain.`,
       try {
         await routerRef.refreshHistory();
         const history = routerRef.getHistory();
-        const scopedUserId = `${userId}:${activeChannel.name}`;
-        const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
+        // Use sessionKey as LLM user identity so gateway chat session and
+        // websocket sync injects target the same session namespace.
+        const { response, history: updatedHistory } = await getResponse(sessionKey, transcript, {
           systemPrompt,
           history,
         });
@@ -1308,6 +1328,8 @@ Use channel names (the part before the colon). Do not explain.`,
 
         queueRef.markReady(queueItemId, summary, response);
         console.log(`Queue item ${queueItemId} ready (channel: ${channelName})`);
+
+        const shouldSyncGatewaySession = !channelName.startsWith('id:');
 
         // Check for pending wait callback — deliver response directly
         if (this.pendingWaitCallback && this.activeWaitQueueItemId === queueItemId) {
@@ -1322,7 +1344,7 @@ Use channel names (the part before the colon). Do not explain.`,
           session.appendAssistantMessage(response, channelName);
 
           // Sync to OpenClaw
-          if (gatewaySync?.isConnected()) {
+          if (gatewaySync?.isConnected() && shouldSyncGatewaySession) {
             await gatewaySync.inject(sessionKey, transcript, 'voice-user');
             await gatewaySync.inject(sessionKey, response, 'voice-assistant');
 
@@ -1330,6 +1352,8 @@ Use channel names (the part before the colon). Do not explain.`,
               const count = await this.getCurrentMessageCount(sessionKey);
               this.inboxTracker.markSeen(sessionKey, count);
             }
+          } else if (!shouldSyncGatewaySession) {
+            console.log(`Skipping gateway session sync for ad-hoc channel ${channelName}`);
           }
 
           cb(response);
@@ -1341,7 +1365,7 @@ Use channel names (the part before the colon). Do not explain.`,
         session.appendAssistantMessage(response, channelName);
 
         // Sync to OpenClaw
-        if (gatewaySync?.isConnected()) {
+        if (gatewaySync?.isConnected() && shouldSyncGatewaySession) {
           await gatewaySync.inject(sessionKey, transcript, 'voice-user');
           await gatewaySync.inject(sessionKey, response, 'voice-assistant');
 
@@ -1350,6 +1374,8 @@ Use channel names (the part before the colon). Do not explain.`,
             const count = await this.getCurrentMessageCount(sessionKey);
             this.inboxTracker.markSeen(sessionKey, count);
           }
+        } else if (!shouldSyncGatewaySession) {
+          console.log(`Skipping gateway session sync for ad-hoc channel ${channelName}`);
         }
 
         pollerRef?.check();
@@ -1789,6 +1815,11 @@ Use channel names (the part before the colon). Do not explain.`,
     if (!this.gatewaySync?.isConnected() || !this.router) return;
 
     try {
+      const active = this.router.getActiveChannel();
+      if (active.name.startsWith('id:')) {
+        console.log(`Skipping gateway session sync for ad-hoc channel ${active.name}`);
+        return;
+      }
       const sessionKey = this.router.getActiveSessionKey();
       await this.gatewaySync.inject(sessionKey, userText, 'voice-user');
       await this.gatewaySync.inject(sessionKey, assistantText, 'voice-assistant');
