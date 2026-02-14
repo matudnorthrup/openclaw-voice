@@ -117,12 +117,12 @@ export class QueueState {
     try {
       const raw = readFileSync(STATE_PATH, 'utf-8');
       const data: QueueStateData = JSON.parse(raw);
-      this.mode = data.mode || 'ask';
+      this.mode = data.mode || 'wait';
       this.items = data.items || [];
       this.channelSnapshots = data.channelSnapshots || {};
     } catch {
       // File doesn't exist or is corrupt — start fresh
-      this.mode = 'ask';
+      this.mode = 'wait';
       this.items = [];
       this.channelSnapshots = {};
     }

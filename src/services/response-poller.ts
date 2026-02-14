@@ -68,9 +68,15 @@ export class ResponsePoller {
           .find((m) => m.role === 'assistant');
 
         if (lastAssistant) {
-          const content = typeof lastAssistant.content === 'string'
-            ? lastAssistant.content
-            : String(lastAssistant.content);
+          const rawContent = lastAssistant.content;
+          const content = typeof rawContent === 'string'
+            ? rawContent
+            : Array.isArray(rawContent)
+              ? (rawContent as any[])
+                  .filter((b) => b.type === 'text')
+                  .map((b) => b.text)
+                  .join('\n')
+              : String(rawContent);
 
           // Generate a brief summary (first sentence or first 100 chars)
           const summary = content.length > 100
