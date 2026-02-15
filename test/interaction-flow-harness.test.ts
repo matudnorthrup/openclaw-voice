@@ -233,6 +233,25 @@ describe('InteractionFlowHarness', () => {
     h.destroy();
   });
 
+  it('treats repeated wake-only utterance as wake-check, not prompt', () => {
+    const h = new InteractionFlowHarness();
+    h.setGatedMode(true);
+    h.clearEvents();
+
+    h.sendTranscript('Hello Watson. Hello Watson.');
+
+    expect(h.getState()).toBe('IDLE');
+    expect(h.getEvents()).toEqual(
+      expect.arrayContaining([
+        { type: 'recognized', intent: 'wake-check' },
+        { type: 'earcon', name: 'acknowledged' },
+        { type: 'ready' },
+      ]),
+    );
+
+    h.destroy();
+  });
+
   it('maps "I\'m done" to default outside inbox flow', () => {
     const h = new InteractionFlowHarness();
     h.clearEvents();

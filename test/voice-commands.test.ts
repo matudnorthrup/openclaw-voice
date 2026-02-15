@@ -356,6 +356,16 @@ describe('parseVoiceCommand — wake check', () => {
     const result = parseVoiceCommand('Watson.', BOT);
     expect(result).toEqual({ type: 'wake-check' });
   });
+
+  it('parses repeated wake-only phrase with punctuation', () => {
+    const result = parseVoiceCommand('Hello Watson. Hello Watson.', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses repeated wake-only phrase with comma separator', () => {
+    const result = parseVoiceCommand('Hello Watson, Watson', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
 });
 
 describe('parseVoiceCommand — voice status', () => {

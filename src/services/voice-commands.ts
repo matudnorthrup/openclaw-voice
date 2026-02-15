@@ -40,6 +40,21 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   const match = trimmed.match(trigger);
   if (!match) return null;
 
+  // Handle repeated wake-only utterances like:
+  // "Hello Watson. Hello Watson."
+  // "Hello Watson, Watson"
+  const restRaw = trimmed.slice(match[0].length).trim();
+  if (restRaw.length > 0) {
+    const wakeOnlySegment = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}$`, 'i');
+    const segments = restRaw
+      .split(/[.!?]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (segments.length > 0 && segments.every((seg) => wakeOnlySegment.test(seg))) {
+      return { type: 'wake-check' };
+    }
+  }
+
   const rest = trimmed.slice(match[0].length).trim().toLowerCase().replace(/[.!?,]+$/, '');
   if (!rest) {
     return { type: 'wake-check' };
