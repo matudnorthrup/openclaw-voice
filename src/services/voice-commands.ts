@@ -19,6 +19,7 @@ export type VoiceCommand =
   | { type: 'gated-mode'; enabled: boolean }
   | { type: 'wake-check' }
   | { type: 'silent-wait' }
+  | { type: 'hear-full-message' }
   | { type: 'pause' }
   | { type: 'replay' }
   | { type: 'earcon-tour' };
@@ -55,7 +56,12 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     }
   }
 
-  const rest = trimmed.slice(match[0].length).trim().toLowerCase().replace(/[.!?,]+$/, '');
+  const rest = trimmed
+    .slice(match[0].length)
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .replace(/[.!?,]+$/, '');
   if (!rest) {
     return { type: 'wake-check' };
   }
@@ -165,6 +171,11 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "read last message", "read the last message", "last message"
   if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(rest)) {
     return { type: 'read-last-message' };
+  }
+
+  // "hear full message", "here full message" (STT homophone), "read full message", "full message"
+  if (/^(?:hear|here|read|play)\s+(?:the\s+)?full\s+message$|^full\s+message$/.test(rest)) {
+    return { type: 'hear-full-message' };
   }
 
   // "silent", "wait quietly", "quiet wait" — only meaningful while a wait is in-flight

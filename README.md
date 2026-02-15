@@ -75,6 +75,7 @@ Type these in any text channel the bot can read (use `~` prefix):
 | `~switch <id>` | Switch to any channel by Discord ID |
 | `~default` | Switch back to the default channel |
 | `~voice` | Show current voice detection settings |
+| `~health` | Check local STT/TTS dependency status |
 | `~delay <ms>` | Set silence wait time in ms (e.g., `~delay 3000` for thinking pauses) |
 | `~noise <level>` | Set noise filtering: `low`, `medium`, `high`, or a number (e.g., `~noise high`) |
 
@@ -97,6 +98,30 @@ The bot's speech detection can be adjusted on the fly without restarting:
 - **`~voice`** — Shows current settings.
 
 Changes take effect on the next utterance. Set startup defaults via `SILENCE_DURATION_MS`, `SPEECH_THRESHOLD`, and `MIN_SPEECH_DURATION_MS` in your `.env`.
+
+## Dependency Health
+
+When the bot is joined in voice, it now checks local dependencies (Whisper + active local TTS backend) on a timer:
+
+- If a dependency goes down, Watson logs a warning and emits the error earcon so users get immediate feedback even if TTS is unavailable.
+- If it comes back up, a recovery message is logged to the console.
+- You can query current status any time with `~health`.
+
+Optional auto-restart can be enabled via env vars:
+
+- `DEPENDENCY_HEALTHCHECK_MS` (default `15000`)
+- `DEPENDENCY_AUTO_RESTART=true`
+- `WHISPER_RESTART_COMMAND`
+- `KOKORO_RESTART_COMMAND`
+- `CHATTERBOX_RESTART_COMMAND`
+
+Optional TTS failover (for example `kokoro` -> `chatterbox`):
+
+- `TTS_BACKEND=kokoro`
+- `TTS_FALLBACK_BACKEND=chatterbox`
+- `TTS_PRIMARY_RETRY_MS=30000`
+
+When primary TTS fails, Watson attempts fallback automatically and logs failure signatures with memory snapshots for crash diagnosis.
 
 ## Automated Flow Harness
 

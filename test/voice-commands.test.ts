@@ -108,6 +108,17 @@ describe('parseVoiceCommand — dispatch command', () => {
     });
   });
 
+  it('parses multiline dispatch transcript from STT chunking', () => {
+    const result = parseVoiceCommand(
+      'Hello, Watson.\nDispatch to health.\nPlease start my morning health data review.',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'health. please start my morning health data review',
+    });
+  });
+
   it('does not parse dispatch without wake trigger', () => {
     const result = parseVoiceCommand('dispatch to planning finish my notes', BOT);
     expect(result).toBeNull();
@@ -316,6 +327,28 @@ describe('parseVoiceCommand — read last message', () => {
   it('parses "last message"', () => {
     const result = parseVoiceCommand('Hello Watson, last message', BOT);
     expect(result).toEqual({ type: 'read-last-message' });
+  });
+});
+
+describe('parseVoiceCommand — hear full message', () => {
+  it('parses "hear full message"', () => {
+    const result = parseVoiceCommand('Hello Watson, hear full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "read full message"', () => {
+    const result = parseVoiceCommand('Hey Watson, read full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "here full message" STT homophone', () => {
+    const result = parseVoiceCommand('Hey Watson, here full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "full message"', () => {
+    const result = parseVoiceCommand('Watson, full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
   });
 });
 

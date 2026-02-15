@@ -35,6 +35,8 @@ export class VoicePipeline {
   private inboxTracker: InboxTracker | null = null;
   private inboxLogChannel: TextChannel | null = null;
   private lastSpokenText: string = '';
+  private lastSpokenFullText: string = '';
+  private lastSpokenWasSummary = false;
   private silentWait = false;
   private gateGraceUntil = 0;
   private promptGraceUntil = 0;
@@ -52,9 +54,38 @@ export class VoicePipeline {
   private quietPendingWait = false;
   private deferredWaitResponseText: string | null = null;
   private deferredWaitRetryTimer: NodeJS.Timeout | null = null;
+  private failedWakeCueCooldownUntil = 0;
+  private dependencyAlertCooldownUntil: Record<'stt' | 'tts', number> = {
+    stt: 0,
+    tts: 0,
+  };
 
   private stamp(): string {
     return new Date().toISOString();
+  }
+
+  private shouldCueFailedWake(transcript: string): boolean {
+    const input = transcript.trim().toLowerCase();
+    if (!input) return false;
+    // Explicit near-wake attempts (common STT confusion: "weak test/check")
+    // should always get feedback in gated mode.
+    if (/\b(?:wake|weak)\s+(?:check|test)\b/i.test(input)) return true;
+    // Near-miss wake guard: mentions bot name + likely command words,
+    // but does not pass strict wake-at-start matching.
+    if (!/\bwatson\b/i.test(input)) return false;
+    if (matchesWakeWord(transcript, config.botName)) return false;
+    const words = input.split(/\s+/).filter(Boolean);
+    if (words.length <= 3) return true;
+    return /\b(?:hello|hey|inbox|switch|go|list|status|read|dispatch|next|done)\b/i.test(input);
+  }
+
+  private cueFailedWakeIfNeeded(transcript: string): void {
+    if (!this.shouldCueFailedWake(transcript)) return;
+    const now = Date.now();
+    if (now < this.failedWakeCueCooldownUntil) return;
+    this.failedWakeCueCooldownUntil = now + 1500;
+    console.log('Failed-wake guard: emitting error earcon');
+    void this.playFastCue('error');
   }
 
   constructor(
@@ -234,11 +265,15 @@ export class VoicePipeline {
     // so we know this is a valid interaction before STT even runs
     const stateType = this.stateMachine.getStateType();
     if (this.stateMachine.isAwaitingState() || stateType === 'INBOX_FLOW') {
-      void this.playFastCue('listening');
+      // Play immediately here (no fast-cue coalescing) so it can't fire late and
+      // preempt a near-immediate spoken command response.
+      void this.player.playEarcon('listening');
       playedListeningEarly = true;
     } else if (gatedMode && (graceFromGateAtCapture || graceFromPromptAtCapture)) {
       // In grace, speech should feel accepted immediately even for non-awaiting turns.
-      void this.playFastCue('listening');
+      // Play immediately here (no fast-cue coalescing) so it can't fire late and
+      // preempt a near-immediate spoken command response.
+      void this.player.playEarcon('listening');
       playedListeningEarly = true;
     }
 
@@ -342,10 +377,12 @@ export class VoicePipeline {
           keepCurrentState = true;
         } else if (this.pendingWaitCallback) {
           console.log(`Gated: discarded "${transcript}" (wait processing continues)`);
+          this.cueFailedWakeIfNeeded(transcript);
           // Don't stop waiting loop — pending wait callback is active
           this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         } else {
           console.log(`Gated: discarded "${transcript}"`);
+          this.cueFailedWakeIfNeeded(transcript);
           this.stopWaitingLoop();
           this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         }
@@ -431,6 +468,12 @@ export class VoicePipeline {
       console.log(`Pipeline complete: ${totalMs}ms total`);
     } catch (error) {
       console.error('Pipeline error:', error);
+      const dependencyIssue = this.classifyDependencyIssue(error);
+      if (dependencyIssue) {
+        this.notifyDependencyIssue(dependencyIssue.type, dependencyIssue.message);
+      } else {
+        void this.playFastCue('error');
+      }
       this.stopWaitingLoop();
       this.player.stopPlayback('pipeline-error');
     } finally {
@@ -535,6 +578,9 @@ export class VoicePipeline {
       case 'silent-wait':
         await this.handleSilentWait();
         break;
+      case 'hear-full-message':
+        await this.handleHearFullMessage();
+        break;
       case 'pause':
         this.handlePause();
         break;
@@ -576,7 +622,7 @@ export class VoicePipeline {
       const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
       // Check for cancel
-      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/.test(input)) {
+      if (this.isCancelIntent(input)) {
         const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
@@ -607,7 +653,7 @@ export class VoicePipeline {
     if (step === 'title') {
       const input = transcript.trim().replace(/[.!?]+$/, '');
 
-      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(input)) {
+      if (this.isCancelIntent(input)) {
         const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
@@ -631,7 +677,7 @@ export class VoicePipeline {
     if (step === 'body') {
       const body = transcript.trim();
 
-      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(body.toLowerCase().replace(/[.!?,]+$/, ''))) {
+      if (this.isCancelIntent(body)) {
         const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
@@ -656,6 +702,15 @@ export class VoicePipeline {
     }
 
     return null;
+  }
+
+  private isCancelIntent(text: string): boolean {
+    const normalized = text
+      .toLowerCase()
+      .replace(/[.!?,]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return /\b(?:cancel|nevermind|never mind|forget it|stop)\b/.test(normalized);
   }
 
   private async handleDirectSwitch(channelName: string): Promise<void> {
@@ -732,6 +787,29 @@ export class VoicePipeline {
             this.queueState!.markHeard(item.id);
           }
           this.responsePoller?.check();
+        } else if (this.inboxTracker?.isActive() && this.router) {
+          // Coming from inbox — check if this channel has new messages to read
+          const sessionKey = this.router.getActiveSessionKey();
+          const channels = this.router.getAllChannelSessionKeys();
+          const activities = await this.inboxTracker.checkInbox(channels);
+          const activity = activities.find((a) => a.sessionKey === sessionKey);
+
+          if (activity && activity.newMessages.length > 0) {
+            const formatted = this.inboxTracker.formatForTTS(activity.newMessages);
+            responseText = `Switched to ${result.displayName || target}. ${formatted}`;
+
+            // Advance inbox flow past this channel so "next" skips to the following one
+            let flowState = this.stateMachine.getInboxFlowState();
+            if (flowState) {
+              const flowItems = flowState.items as ChannelActivity[];
+              while (flowState && flowState.index < flowItems.length && flowItems[flowState.index]?.sessionKey === sessionKey) {
+                this.stateMachine.transition({ type: 'INBOX_ADVANCE' });
+                flowState = this.stateMachine.getInboxFlowState();
+              }
+            }
+          } else {
+            responseText = `Switched to ${result.displayName || target}.`;
+          }
         } else {
           responseText = `Switched to ${result.displayName || target}.`;
         }
@@ -1166,17 +1244,14 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private deliverWaitResponse(responseText: string): void {
-    this.lastSpokenText = responseText;
     void (async () => {
       try {
-        const ttsStream = await textToSpeechStream(responseText);
         this.stopWaitingLoop();
         this.player.stopPlayback('wait-response-delivery');
         if (!this.isBusy() || this.player.isWaiting()) {
           this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
-          await this.player.playStream(ttsStream);
+          await this.speakResponse(responseText, { allowSummary: true, forceFull: false });
           this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-          this.setGateGrace(5_000);
           await this.playReadyEarcon();
         } else {
           // Pipeline got busy (often due to an overlapping command like "silent").
@@ -1307,14 +1382,10 @@ Use channel names (the part before the colon). Do not explain.`,
 
     void this.syncToOpenClaw(transcript, responseText);
 
-    this.lastSpokenText = responseText;
-    const ttsStream = await textToSpeechStream(responseText);
     this.stopWaitingLoop();
-    this.player.stopPlayback('wait-mode-response');
     this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
-    await this.player.playStream(ttsStream);
+    await this.speakResponse(responseText, { allowSummary: true, forceFull: false });
     this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-    this.setGateGrace(5_000);
     await this.playReadyEarcon();
   }
 
@@ -1456,14 +1527,10 @@ Use channel names (the part before the colon). Do not explain.`,
           this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
           this.queueState.markHeard(specId);
           this.responsePoller?.check();
-          this.lastSpokenText = readyItem.responseText;
-          const ttsStream = await textToSpeechStream(readyItem.responseText);
           this.stopWaitingLoop();
-          this.player.stopPlayback('ask-mode-ready-item-response');
           this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
-          await this.player.playStream(ttsStream);
+          await this.speakResponse(readyItem.responseText, { allowSummary: true, forceFull: false });
           this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-          this.setGateGrace(5_000);
           await this.playReadyEarcon();
         } else {
           // Not ready yet — register callback and start waiting loop
@@ -1819,6 +1886,18 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private async handleHearFullMessage(): Promise<void> {
+    const full = this.lastSpokenFullText || this.lastSpokenText;
+    if (!full) {
+      await this.speakResponse("I don't have a full message to read yet.");
+      await this.playReadyEarcon();
+      return;
+    }
+    console.log(`Hear full message: "${full.slice(0, 60)}..."`);
+    await this.speakResponse(full, { isReplay: true, forceFull: true });
+    await this.playReadyEarcon();
+  }
+
   private async handleEarconTour(): Promise<void> {
     const tour: Array<{ name: EarconName; label: string }> = [
       { name: 'listening', label: 'listening' },
@@ -1869,6 +1948,7 @@ Use channel names (the part before the colon). Do not explain.`,
       this.stateMachine.transition({
         type: 'ENTER_INBOX_FLOW',
         items: activities,
+        returnChannel: this.router.getActiveChannel().name,
       });
 
       const channelNames = activities.map((a) => a.displayName);
@@ -1908,7 +1988,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private async handleInboxNext(): Promise<void> {
     if (!this.queueState) {
-      await this.speakResponse('Queue mode is not available.');
+      await this.speakResponse('Queue mode is not available.', { inbox: true });
       return;
     }
 
@@ -1932,6 +2012,7 @@ Use channel names (the part before the colon). Do not explain.`,
         this.stateMachine.transition({
           type: 'ENTER_INBOX_FLOW',
           items: activities,
+          returnChannel: this.router.getActiveChannel().name,
         });
         this.stateMachine.transition({ type: 'INBOX_ADVANCE' });
         activity = activities[0];
@@ -1950,18 +2031,15 @@ Use channel names (the part before the colon). Do not explain.`,
       if (remaining > 0) {
         parts.push(`${remaining} more. Say next or done.`);
       } else {
+        const returnChannel = updatedFlow?.returnChannel;
         this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-        // Stay on the channel we just read from; auto-switching home here feels surprising.
+        // Restore the channel the user was on before the inbox flow started
+        await this.restoreChannel(returnChannel);
         parts.push("That's everything.");
       }
 
       const fullText = this.toSpokenText(parts.join(' '), 'Nothing new in the inbox.');
-      this.lastSpokenText = fullText;
-      const ttsStream = await textToSpeechStream(fullText);
-      this.stopWaitingLoop();
-      this.player.stopPlayback('inbox-flow-read');
-      await this.player.playStream(ttsStream);
-      this.setGateGrace(5_000);
+      await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false });
       await this.playReadyEarcon();
       return;
     }
@@ -1996,12 +2074,7 @@ Use channel names (the part before the colon). Do not explain.`,
     const suffix = remaining > 0 ? ` ${remaining} more in queue.` : '';
 
     const fullText = this.toSpokenText(prefix + item.responseText + suffix, 'A response is ready.');
-    this.lastSpokenText = fullText;
-    const ttsStream = await textToSpeechStream(fullText);
-    this.stopWaitingLoop();
-    this.player.stopPlayback('queue-next-read');
-    await this.player.playStream(ttsStream);
-    this.setGateGrace(5_000);
+    await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false });
     await this.playReadyEarcon();
   }
 
@@ -2037,10 +2110,23 @@ Use channel names (the part before the colon). Do not explain.`,
       }
     }
 
+    const returnChannel = flowState.returnChannel;
     this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+    await this.restoreChannel(returnChannel);
     const channelWord = remaining.length === 1 ? 'channel' : 'channels';
     await this.speakResponse(`Cleared ${remaining.length} ${channelWord} from the inbox.`, { inbox: true });
     await this.playReadyEarcon();
+  }
+
+  private async restoreChannel(channelName: string | null | undefined): Promise<void> {
+    if (!channelName || !this.router) return;
+    const active = this.router.getActiveChannel();
+    if (active.name === channelName) return; // already there
+    const result = await this.router.switchTo(channelName);
+    if (result.success) {
+      await this.onChannelSwitch();
+      console.log(`Inbox flow: restored to ${result.displayName || channelName}`);
+    }
   }
 
   private async switchHomeWithMessage(prefix: string): Promise<string> {
@@ -2128,6 +2214,11 @@ Use channel names (the part before the colon). Do not explain.`,
       return { type: 'read-last-message' };
     }
 
+    // "hear full message", "read full message", "full message"
+    if (/^(?:hear|read|play)\s+(?:the\s+)?full\s+message$|^full\s+message$/.test(normalized)) {
+      return { type: 'hear-full-message' };
+    }
+
     // "dispatch to <channel> <payload>"
     const dispatchMatch = navInput.match(
       /^(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
@@ -2189,20 +2280,76 @@ Use channel names (the part before the colon). Do not explain.`,
     return text;
   }
 
-  private async speakResponse(text: string, options?: { inbox?: boolean; isReplay?: boolean }): Promise<void> {
+  private async speakResponse(
+    text: string,
+    options?: { inbox?: boolean; isReplay?: boolean; allowSummary?: boolean; forceFull?: boolean },
+  ): Promise<void> {
+    const fullText = this.toSpokenText(text, '');
+    const shouldSummarize = !!options?.allowSummary && !options?.forceFull;
+    const spokenText = shouldSummarize
+      ? await this.buildSummarySpeechText(fullText)
+      : fullText;
+
+    // Keep spoken summaries/prompts out of channel transcripts to avoid
+    // duplicating content and to keep "read last message" aligned to real
+    // channel messages.
     if (options?.inbox) {
-      this.logToInbox(`**${config.botName}:** ${text}`);
-    } else {
-      this.log(`**${config.botName}:** ${text}`);
+      this.logToInbox(`**${config.botName}:** ${spokenText}`);
     }
     if (!options?.isReplay) {
-      this.lastSpokenText = text;
+      this.lastSpokenText = spokenText;
+      this.lastSpokenFullText = fullText;
+      this.lastSpokenWasSummary = spokenText !== fullText;
     }
-    const ttsStream = await textToSpeechStream(text);
+    const ttsStream = await textToSpeechStream(spokenText);
     this.stopWaitingLoop();
     this.player.stopPlayback('speak-response-preempt');
     await this.player.playStream(ttsStream);
     this.setGateGrace(5_000);
+  }
+
+  private shouldSummarizeForVoice(text: string): boolean {
+    if (!text) return false;
+    const normalized = text.trim();
+    if (normalized.length < 450) return false;
+
+    const lineCount = normalized.split('\n').filter((l) => l.trim().length > 0).length;
+    const toolChatterHits = (normalized.match(
+      /\b(?:let me|i(?:'m| am)\s+(?:going to|checking|looking|opening|searching|trying)|opening up the browser|found (?:the|an) item|adding it now|working on it)\b/gi,
+    ) ?? []).length;
+
+    return normalized.length >= 1100 || lineCount >= 10 || toolChatterHits >= 2;
+  }
+
+  private async summarizeForVoice(fullText: string): Promise<string | null> {
+    const clipped = fullText.slice(0, 7000);
+    const system = [
+      'You summarize assistant output for spoken voice UX.',
+      'Return plain text only, 2 to 4 short sentences.',
+      'Include outcome first, key facts second, and any required next action.',
+      'Exclude tool narration, thinking steps, and process chatter.',
+      'Do not use markdown or bullets.',
+    ].join(' ');
+
+    try {
+      const out = await quickCompletion(system, `Original response:\n${clipped}`, 140);
+      const text = this.toSpokenText(out, '').replace(/\s+/g, ' ').trim();
+      if (!text) return null;
+      return text;
+    } catch (err: any) {
+      console.warn(`Voice summary failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  private async buildSummarySpeechText(fullText: string): Promise<string> {
+    if (!this.shouldSummarizeForVoice(fullText)) return fullText;
+    const summary = await this.summarizeForVoice(fullText);
+    if (!summary) {
+      const fallback = fullText.length > 360 ? `${fullText.slice(0, 360)}...` : fullText;
+      return `Summary. ${fallback} Say "hear full message" for full details.`;
+    }
+    return `Summary. ${summary} Say "hear full message" for full details.`;
   }
 
   private logToInbox(message: string): void {
@@ -2240,14 +2387,27 @@ Use channel names (the part before the colon). Do not explain.`,
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
         if (!this.isBusy() && !this.player.isPlaying()) {
-          this.player.playStream(stream).then(() => {
-            this.setGateGrace(5_000);
-          });
+          this.player.playStream(stream)
+            .then(() => {
+              this.setGateGrace(5_000);
+            })
+            .catch((err: any) => {
+              console.warn(`Idle notify playback failed: ${err?.message ?? err}`);
+            });
         }
       })
       .catch((err) => {
         console.warn(`Idle notify TTS failed: ${err.message}`);
       });
+  }
+
+  notifyDependencyIssue(type: 'stt' | 'tts', message: string): void {
+    const now = Date.now();
+    if (now < this.dependencyAlertCooldownUntil[type]) return;
+    this.dependencyAlertCooldownUntil[type] = now + 10_000;
+    console.warn(`Dependency issue [${type}]: ${message}`);
+    this.logToInbox(`**${config.botName}:** ${message}`);
+    void this.playFastCue('error');
   }
 
   private shouldAutoReadReadyForActiveChannel(message: string): boolean {
@@ -2274,19 +2434,14 @@ Use channel names (the part before the colon). Do not explain.`,
     this.queueState.markHeard(item.id);
     this.responsePoller?.check();
 
-    this.lastSpokenText = item.responseText;
-    this.logToInbox(`**${config.botName}:** ${item.responseText}`);
-
     try {
-      const ttsStream = await textToSpeechStream(item.responseText);
       if (this.isBusy() || this.player.isPlaying()) {
         console.log('Idle auto-read aborted (became busy before playback)');
         return;
       }
       this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
-      await this.player.playStream(ttsStream);
+      await this.speakResponse(item.responseText, { allowSummary: true, forceFull: false });
       this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-      this.setGateGrace(5_000);
       await this.playReadyEarcon();
     } catch (err: any) {
       console.warn(`Idle auto-read failed: ${err.message}`);
@@ -2295,6 +2450,22 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private normalizeChannelLabel(value: string): string {
     return value.trim().toLowerCase().replace(/^#/, '').replace(/\s+/g, ' ');
+  }
+
+  private classifyDependencyIssue(error: any): { type: 'stt' | 'tts'; message: string } | null {
+    const full = `${error?.message ?? ''} ${error?.cause?.message ?? ''}`.toLowerCase();
+    if (!full.trim()) return null;
+
+    if (full.includes('whisper local error') || full.includes('/inference') || full.includes('stt')) {
+      return { type: 'stt', message: 'Speech recognition is unavailable right now.' };
+    }
+    if (full.includes('kokoro') || full.includes('tts') || full.includes('text-to-speech') || full.includes(':8880')) {
+      return { type: 'tts', message: 'Voice output is unavailable right now.' };
+    }
+    if (full.includes('econnrefused') && config.whisperUrl) {
+      return { type: 'stt', message: 'Speech recognition is unavailable right now.' };
+    }
+    return null;
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {

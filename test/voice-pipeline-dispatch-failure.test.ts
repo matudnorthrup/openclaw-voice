@@ -94,5 +94,40 @@ describe('VoicePipeline dispatch failure handling', () => {
 
     pipeline.stop();
   });
-});
 
+  it('detects near-miss wake phrasing without loosening strict wake matching', () => {
+    const pipeline = new VoicePipeline({} as any);
+
+    expect((pipeline as any).shouldCueFailedWake('or Watson inbox list')).toBe(true);
+    expect((pipeline as any).shouldCueFailedWake('or Watson')).toBe(true);
+    expect((pipeline as any).shouldCueFailedWake('weak test')).toBe(true);
+    expect((pipeline as any).shouldCueFailedWake('wake check')).toBe(true);
+    expect((pipeline as any).shouldCueFailedWake('Hello Watson inbox list')).toBe(false);
+    expect((pipeline as any).shouldCueFailedWake('I talked to Watson yesterday')).toBe(false);
+
+    pipeline.stop();
+  });
+
+  it('rate-limits failed-wake earcon cue', async () => {
+    const pipeline = new VoicePipeline({} as any);
+    const cueSpy = vi.spyOn(pipeline as any, 'playFastCue').mockResolvedValue(undefined);
+
+    (pipeline as any).cueFailedWakeIfNeeded('or Watson inbox list');
+    (pipeline as any).cueFailedWakeIfNeeded('or Watson inbox list');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(cueSpy).toHaveBeenCalledTimes(1);
+    expect(cueSpy).toHaveBeenCalledWith('error');
+
+    pipeline.stop();
+  });
+
+  it('detects cancel intent with repeated/newline variants', () => {
+    const pipeline = new VoicePipeline({} as any);
+    expect((pipeline as any).isCancelIntent('cancel')).toBe(true);
+    expect((pipeline as any).isCancelIntent('Cancel.\nCancel.')).toBe(true);
+    expect((pipeline as any).isCancelIntent('please stop this')).toBe(true);
+    expect((pipeline as any).isCancelIntent('carry on')).toBe(false);
+    pipeline.stop();
+  });
+});

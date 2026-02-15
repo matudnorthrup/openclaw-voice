@@ -9,6 +9,7 @@ import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThres
 import { QueueState, type VoiceMode } from './services/queue-state.js';
 import { ResponsePoller } from './services/response-poller.js';
 import { InboxTracker } from './services/inbox-tracker.js';
+import { DependencyMonitor, type DependencyStatus } from './services/dependency-monitor.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
@@ -27,6 +28,7 @@ let gatewaySync: GatewaySync | null = null;
 let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let queueState: QueueState | null = null;
 let responsePoller: ResponsePoller | null = null;
+let dependencyMonitor: DependencyMonitor | null = null;
 
 // --- Text command handlers ---
 
@@ -132,6 +134,20 @@ client.on('messageCreate', async (message) => {
       }
     }
     await message.reply(lines.join('\n'));
+  } else if (message.content === '~health') {
+    const status = dependencyMonitor
+      ? await dependencyMonitor.checkOnce()
+      : { whisperUp: false, ttsUp: false };
+    const ttsLabel = config.ttsBackend === 'kokoro'
+      ? 'Kokoro'
+      : config.ttsBackend === 'chatterbox'
+        ? 'Chatterbox'
+        : 'TTS backend';
+    await message.reply(
+      `Dependency health:\n` +
+      `  STT (Whisper): **${status.whisperUp ? 'up' : 'down'}**\n` +
+      `  TTS (${ttsLabel}): **${status.ttsUp ? 'up' : 'down'}**`,
+    );
   }
 });
 
@@ -286,6 +302,34 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
 
     pipeline.start();
 
+    if (dependencyMonitor) {
+      dependencyMonitor.stop();
+      dependencyMonitor = null;
+    }
+    dependencyMonitor = new DependencyMonitor((status: DependencyStatus, previous: DependencyStatus | null) => {
+      const whisperChanged = !previous || previous.whisperUp !== status.whisperUp;
+      const ttsChanged = !previous || previous.ttsUp !== status.ttsUp;
+
+      if (whisperChanged) {
+        if (status.whisperUp) {
+          console.log('Dependency health: Whisper is reachable');
+        } else {
+          console.warn('Dependency health: Whisper is unreachable');
+          pipeline?.notifyDependencyIssue('stt', 'Speech recognition is unavailable right now.');
+        }
+      }
+
+      if (ttsChanged) {
+        if (status.ttsUp) {
+          console.log('Dependency health: TTS backend is reachable');
+        } else {
+          console.warn('Dependency health: TTS backend is unreachable');
+          pipeline?.notifyDependencyIssue('tts', 'Voice output is unavailable right now.');
+        }
+      }
+    });
+    dependencyMonitor.start();
+
     if (message) {
       await message.reply('Joined voice channel. Listening...');
     }
@@ -298,6 +342,10 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
 }
 
 function handleLeave(): void {
+  if (dependencyMonitor) {
+    dependencyMonitor.stop();
+    dependencyMonitor = null;
+  }
   if (responsePoller) {
     responsePoller.stop();
     responsePoller = null;

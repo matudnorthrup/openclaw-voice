@@ -17,6 +17,8 @@ export const config = {
   gatewayToken: required('GATEWAY_TOKEN'),
   gatewayAgentId: process.env['GATEWAY_AGENT_ID'] || 'main',
   ttsBackend: process.env['TTS_BACKEND'] || 'elevenlabs',
+  ttsFallbackBackend: process.env['TTS_FALLBACK_BACKEND'] || '',
+  ttsPrimaryRetryMs: parseInt(process.env['TTS_PRIMARY_RETRY_MS'] || '30000', 10),
   elevenLabsApiKey: process.env['ELEVENLABS_API_KEY'] || '',
   elevenLabsVoiceId: process.env['ELEVENLABS_VOICE_ID'] || 'JBFqnCBsd6RMkjVDRZzb',
   kokoroUrl: process.env['KOKORO_URL'] || 'http://127.0.0.1:8880',
@@ -33,6 +35,11 @@ export const config = {
   utilityChannelId: process.env['UTILITY_CHANNEL_ID'] || '1471563603625775124',
   sessionsDir: process.env['SESSIONS_DIR'] || `${process.env['HOME']}/.clawdbot/agents/main/sessions`,
   gatewayWsEnabled: process.env['GATEWAY_WS_SYNC'] !== 'false',
+  dependencyHealthcheckMs: parseInt(process.env['DEPENDENCY_HEALTHCHECK_MS'] || '15000', 10),
+  dependencyAutoRestart: process.env['DEPENDENCY_AUTO_RESTART'] === 'true',
+  whisperRestartCommand: process.env['WHISPER_RESTART_COMMAND'] || '',
+  kokoroRestartCommand: process.env['KOKORO_RESTART_COMMAND'] || '',
+  chatterboxRestartCommand: process.env['CHATTERBOX_RESTART_COMMAND'] || '',
 };
 
 if (!config.whisperUrl && !config.openaiApiKey) {

@@ -247,11 +247,31 @@ export class ChannelRouter {
 
   findForumChannel(query: string): { name: string; id: string } | null {
     const forums = this.listForumChannels();
-    const lower = query.toLowerCase();
-    return forums.find((f) => f.name.toLowerCase() === lower)
+    const lower = query.toLowerCase().trim();
+    const normalizedQuery = this.normalizeForumMatch(lower);
+
+    const direct = forums.find((f) => f.name.toLowerCase() === lower)
       ?? forums.find((f) => f.name.toLowerCase().includes(lower))
-      ?? forums.find((f) => lower.includes(f.name.toLowerCase()))
-      ?? null;
+      ?? forums.find((f) => lower.includes(f.name.toLowerCase()));
+    if (direct) return direct;
+
+    // Normalize separators and filler terms so "open claw forum" can match
+    // names like "openclaw-forum" or "openclaw".
+    return forums.find((f) => {
+      const candidate = this.normalizeForumMatch(f.name);
+      return candidate === normalizedQuery
+        || candidate.includes(normalizedQuery)
+        || normalizedQuery.includes(candidate);
+    }) ?? null;
+  }
+
+  private normalizeForumMatch(input: string): string {
+    return input
+      .toLowerCase()
+      .replace(/\b(?:forum|forums|channel|topic|thread|post|the|my)\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, '');
   }
 
   async createForumPost(forumId: string, title: string, body: string): Promise<{ success: boolean; error?: string; threadId?: string; forumName?: string }> {
