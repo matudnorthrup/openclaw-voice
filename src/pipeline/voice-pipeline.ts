@@ -49,6 +49,13 @@ export class VoicePipeline {
   private activeWaitQueueItemId: string | null = null;
   private speculativeQueueItemId: string | null = null;
   private graceExpiryTimer: NodeJS.Timeout | null = null;
+  private quietPendingWait = false;
+  private deferredWaitResponseText: string | null = null;
+  private deferredWaitRetryTimer: NodeJS.Timeout | null = null;
+
+  private stamp(): string {
+    return new Date().toISOString();
+  }
 
   constructor(
     connection: VoiceConnection,
@@ -110,7 +117,8 @@ export class VoicePipeline {
     this.receiver.stop();
     this.clearFastCueQueue();
     this.clearGraceTimer();
-    this.player.stopPlayback();
+    this.clearDeferredWaitRetry();
+    this.player.stopPlayback('pipeline-stop');
     this.pendingWaitCallback = null;
     this.activeWaitQueueItemId = null;
     this.speculativeQueueItemId = null;
@@ -125,7 +133,7 @@ export class VoicePipeline {
   interrupt(): void {
     if (this.player.isPlaying()) {
       console.log('Interrupting playback');
-      this.player.stopPlayback();
+      this.player.stopPlayback('external-interrupt');
     }
   }
 
@@ -159,7 +167,7 @@ export class VoicePipeline {
           await this.speakResponse(effect.text);
           break;
         case 'stop-playback':
-          this.player.stopPlayback();
+          this.player.stopPlayback('state-machine-effect');
           break;
         case 'start-waiting-loop':
           this.startWaitingLoop();
@@ -195,11 +203,12 @@ export class VoicePipeline {
     // Open mode: interrupt immediately. Gated mode: defer until after transcription.
     if (wasPlayingResponse && !gatedMode) {
       console.log('User spoke during playback — interrupting');
-      this.player.stopPlayback();
+      this.player.stopPlayback('speech-during-playback-open-mode');
     }
 
     const gatedInterrupt = wasPlayingResponse && gatedMode;
     const gatedSpeakingProbe = gatedInterrupt && isSpeakingAtStart;
+    const gateClosedCueInterrupt = gatedInterrupt && this.player.isPlayingEarcon('gate-closed');
     let keepCurrentState = false;
     let playedListeningEarly = false;
 
@@ -309,6 +318,7 @@ export class VoicePipeline {
       // Grace windows are intended for explicit "your turn" handoffs, not
       // background processing where accidental noises can cause interruptions.
       const allowGraceBypass = this.pendingWaitCallback === null;
+      const hasWakeWord = matchesWakeWord(transcript, config.botName);
       const inGracePeriod = (
         allowGraceBypass &&
         (
@@ -318,7 +328,14 @@ export class VoicePipeline {
           Date.now() < this.promptGraceUntil
         )
       );
-      if (gatedMode && !inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
+
+      // By design in gated mode, interrupting active playback must include wake word.
+      if (gatedInterrupt && !hasWakeWord && !gateClosedCueInterrupt) {
+        console.log(`Gated interrupt rejected (wake word required): "${transcript}"`);
+        keepCurrentState = true;
+        return;
+      }
+      if (gatedMode && !inGracePeriod && !hasWakeWord) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
           // Don't stop playback — Watson keeps talking
@@ -348,12 +365,17 @@ export class VoicePipeline {
       // Skip in ask mode — no LLM processing, Watson just speaks "Inbox, or wait?"
       const mode = this.queueState?.getMode() ?? 'wait';
       if (gatedMode) {
-        if (inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
+        if (inGracePeriod && !hasWakeWord) {
           console.log('Gate grace period: processing without wake word');
         }
         if (gatedInterrupt) {
-          console.log('Gated interrupt: wake word confirmed, interrupting playback');
-          this.player.stopPlayback();
+          if (gateClosedCueInterrupt && !hasWakeWord) {
+            console.log('Gated interrupt: allowing speech over gate-closed cue');
+            this.player.stopPlayback('speech-over-gate-closed-cue');
+          } else {
+            console.log('Gated interrupt: wake word confirmed, interrupting playback');
+            this.player.stopPlayback('speech-during-playback-gated-wake');
+          }
           this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         }
         if (mode !== 'ask') {
@@ -363,6 +385,7 @@ export class VoicePipeline {
 
       const command = parseVoiceCommand(transcript, config.botName);
       if (command) {
+        const resolvedCommand = this.resolveDoneCommandForContext(command, transcript);
         if (command.type === 'new-post') {
           console.log('New-post command: starting guided flow');
           await this.startNewPostFlow();
@@ -370,20 +393,22 @@ export class VoicePipeline {
           console.log(`Voice command complete: ${totalMs}ms total`);
           return;
         } else {
-          console.log(`Voice command detected: ${command.type}`);
-          await this.handleVoiceCommand(command);
+          console.log(`Voice command detected: ${resolvedCommand.type}`);
+          await this.handleVoiceCommand(resolvedCommand, userId);
           const totalMs = Date.now() - pipelineStart;
           console.log(`Voice command complete: ${totalMs}ms total`);
           return;
         }
       }
 
-      // In queue/ask mode, also match bare navigation commands without "Hey Watson" prefix
-      if (mode !== 'wait') {
+      // In queue/ask mode, or during grace windows, match bare navigation commands
+      // without requiring the wake word.
+      if (mode !== 'wait' || inGracePeriod) {
         const bareCommand = this.matchBareQueueCommand(transcript);
         if (bareCommand) {
-          console.log(`Bare queue command detected: ${bareCommand.type}`);
-          await this.handleVoiceCommand(bareCommand);
+          const resolvedBareCommand = this.resolveDoneCommandForContext(bareCommand, transcript);
+          console.log(`Bare queue command detected: ${resolvedBareCommand.type}`);
+          await this.handleVoiceCommand(resolvedBareCommand, userId);
           const totalMs = Date.now() - pipelineStart;
           console.log(`Voice command complete: ${totalMs}ms total`);
           return;
@@ -407,7 +432,7 @@ export class VoicePipeline {
     } catch (error) {
       console.error('Pipeline error:', error);
       this.stopWaitingLoop();
-      this.player.stopPlayback();
+      this.player.stopPlayback('pipeline-error');
     } finally {
       // Don't overwrite AWAITING/flow states — they were set intentionally by handlers
       const st = this.stateMachine.getStateType();
@@ -451,14 +476,19 @@ export class VoicePipeline {
     })();
   }
 
-  private async handleVoiceCommand(command: VoiceCommand): Promise<void> {
-    this.cancelPendingWait(`voice command: ${command.type}`);
-    if (command.type === 'switch' || command.type === 'list' || command.type === 'default') {
+  private async handleVoiceCommand(command: VoiceCommand, userId = 'voice-user'): Promise<void> {
+    if (command.type !== 'silent-wait') {
+      this.cancelPendingWait(`voice command: ${command.type}`);
+    }
+    if (command.type === 'switch' || command.type === 'list' || command.type === 'default' || command.type === 'dispatch') {
       this.clearInboxFlowIfActive(`voice command: ${command.type}`);
     }
     switch (command.type) {
       case 'switch':
         await this.handleDirectSwitch(command.channel);
+        break;
+      case 'dispatch':
+        await this.handleDispatch(command.body, userId);
         break;
       case 'list':
         await this.handleListChannels();
@@ -487,11 +517,23 @@ export class VoicePipeline {
       case 'inbox-next':
         await this.handleInboxNext();
         break;
+      case 'inbox-clear':
+        await this.handleInboxClear();
+        break;
+      case 'read-last-message':
+        await this.handleReadLastMessage();
+        break;
       case 'voice-status':
         await this.handleVoiceStatus();
         break;
       case 'gated-mode':
         await this.handleGatedMode(command.enabled);
+        break;
+      case 'wake-check':
+        await this.handleWakeCheck();
+        break;
+      case 'silent-wait':
+        await this.handleSilentWait();
         break;
       case 'pause':
         this.handlePause();
@@ -643,20 +685,8 @@ export class VoicePipeline {
               if (threadResult.success) {
                 await this.onChannelSwitch();
                 const displayName = threadResult.displayName || llmResult.best.displayName;
-                const lastMsg = this.router.getLastMessage();
-                if (lastMsg) {
-                  const fullContent = lastMsg.role === 'user'
-                    ? `You last said: ${lastMsg.content}`
-                    : lastMsg.content;
-                  this.stateMachine.transition({
-                    type: 'ENTER_SWITCH_CHOICE',
-                    lastMessage: fullContent,
-                  });
-                  await this.speakResponse(`Switched to ${displayName}. Last message, or new prompt?`, { inbox: true });
-                  await this.playReadyEarcon();
-                } else {
-                  await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
-                }
+                await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
+                await this.playReadyEarcon();
                 return;
               }
             }
@@ -703,36 +733,7 @@ export class VoicePipeline {
           }
           this.responsePoller?.check();
         } else {
-          // No queued responses — check if there's a last message to offer
-          const lastMsg = this.router.getLastMessage();
-          if (lastMsg) {
-            const displayName = result.displayName || target;
-            responseText = `Switched to ${displayName}. Last message, or new prompt?`;
-
-            // Store full last message for reading if user says "read"
-            const fullContent = lastMsg.role === 'user'
-              ? `You last said: ${lastMsg.content}`
-              : lastMsg.content;
-
-            this.stateMachine.transition({
-              type: 'ENTER_SWITCH_CHOICE',
-              lastMessage: fullContent,
-            });
-
-            // Update inbox snapshot now (don't wait for choice)
-            if (this.inboxTracker?.isActive()) {
-              const sessionKey = this.router.getActiveSessionKey();
-              const currentCount = await this.getCurrentMessageCount(sessionKey);
-              console.log(`InboxTracker: markSeen ${target} (${sessionKey}) count=${currentCount}`);
-              this.inboxTracker.markSeen(sessionKey, currentCount);
-            }
-
-            await this.speakResponse(responseText, { inbox: true });
-            await this.playReadyEarcon();
-            return;
-          } else {
-            responseText = `Switched to ${result.displayName || target}.`;
-          }
+          responseText = `Switched to ${result.displayName || target}.`;
         }
 
         // Update inbox snapshot for this channel so it's marked as "seen"
@@ -960,14 +961,208 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private async handleReadLastMessage(): Promise<void> {
+    if (!this.router) {
+      await this.speakResponse('Channel routing is not available right now.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const active = this.router.getActiveChannel();
+    const displayName = (active as any).displayName || active.name;
+    const lastMsg = await this.router.getLastMessageFresh();
+    if (!lastMsg) {
+      await this.speakResponse(`I don't see a recent message in ${displayName}.`, { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const raw = lastMsg.role === 'user'
+      ? `You last said: ${lastMsg.content}`
+      : this.toSpokenText(lastMsg.content, 'Message available.');
+    const spoken = raw.length > 900 ? `${raw.slice(0, 900)}...` : raw;
+    await this.speakResponse(spoken, { inbox: true });
+    await this.playReadyEarcon();
+  }
+
+  private async handleDispatch(body: string, userId: string): Promise<void> {
+    if (!this.router || !this.queueState) {
+      await this.speakResponse('Dispatch is not available right now.');
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const parsed = this.parseDispatchBody(body);
+    if (!parsed) {
+      const fail = 'Dispatch failed. Say: dispatch to channel name, then your message.';
+      this.logToInbox(`**${config.botName}:** ${fail}`);
+      await this.speakResponse(fail, { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const target = this.resolveDispatchTarget(parsed.channelQuery);
+    if (!target) {
+      const fail = `Dispatch failed. I couldn't find channel ${parsed.channelQuery}.`;
+      this.logToInbox(`**${config.botName}:** ${fail}`);
+      await this.speakResponse(fail, { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const sessionKey = this.router.getSessionKeyFor(target.name);
+    const systemPrompt = this.router.getSystemPromptFor(target.name);
+
+    this.log(`**You:** ${parsed.payload}`, target.name);
+    this.session.appendUserMessage(userId, parsed.payload, target.name);
+
+    const item = this.queueState.enqueue({
+      channel: target.name,
+      displayName: target.displayName,
+      sessionKey,
+      userMessage: parsed.payload,
+    });
+
+    this.dispatchToLLMFireAndForget(userId, parsed.payload, item.id, {
+      channelName: target.name,
+      displayName: target.displayName,
+      sessionKey,
+      systemPrompt,
+    });
+
+    await this.player.playEarcon('acknowledged');
+    await this.speakResponse(`Dispatched to ${target.displayName}.`, { inbox: true });
+    await this.playReadyEarcon();
+  }
+
+  private parseDispatchBody(body: string): { channelQuery: string; payload: string } | null {
+    const trimmed = body.trim().replace(/^[,.\s]+|[,.\s]+$/g, '');
+    if (!trimmed) return null;
+
+    const direct = trimmed.match(/^(.+?)\s*[:\-]\s*(.+)$/);
+    if (direct) {
+      const channelQuery = direct[1].trim().replace(/\s+channel$/i, '').trim();
+      const payload = direct[2].trim();
+      if (channelQuery && payload) return { channelQuery, payload };
+    }
+
+    const said = trimmed.match(/^(.+?)\s+(?:that|say|saying)\s+(.+)$/i);
+    if (said) {
+      const channelQuery = said[1].trim().replace(/\s+channel$/i, '').trim();
+      const payload = said[2].trim();
+      if (channelQuery && payload) return { channelQuery, payload };
+    }
+
+    const tokens = this.tokenizeWithPositions(trimmed);
+    if (tokens.length < 2) return null;
+
+    let best: { name: string; displayName: string; consumed: number } | null = null;
+    for (const channel of this.router!.listChannels()) {
+      const variantSets = [channel.name, channel.displayName]
+        .flatMap((label) => this.channelMatchForms(label))
+        .map((form) => form.split(' ').filter(Boolean));
+
+      for (const variant of variantSets) {
+        const consumed = this.matchDispatchPrefix(tokens, variant);
+        if (consumed === 0) continue;
+        if (!best || consumed > best.consumed) {
+          best = { name: channel.name, displayName: channel.displayName, consumed };
+        }
+      }
+    }
+
+    if (!best) return null;
+    if (best.consumed >= tokens.length) return null;
+
+    const payloadStart = tokens[best.consumed].start;
+    const payload = trimmed.slice(payloadStart).trim();
+    if (!payload) return null;
+    return { channelQuery: best.name, payload };
+  }
+
+  private resolveDispatchTarget(channelQuery: string): { name: string; displayName: string } | null {
+    if (!this.router) return null;
+    const all = this.router.listChannels();
+    return all.find((c) => this.channelNamesMatch(channelQuery, c.name, c.displayName)) ?? null;
+  }
+
+  private tokenizeWithPositions(text: string): Array<{ token: string; start: number }> {
+    const out: Array<{ token: string; start: number }> = [];
+    const re = /[a-z0-9]+/gi;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      out.push({ token: match[0].toLowerCase(), start: match.index });
+    }
+    return out;
+  }
+
+  private matchDispatchPrefix(
+    tokens: Array<{ token: string; start: number }>,
+    candidate: string[],
+  ): number {
+    if (candidate.length === 0) return 0;
+    let idx = 0;
+
+    while (
+      idx < tokens.length &&
+      (
+        tokens[idx].token === 'to' ||
+        tokens[idx].token === 'the' ||
+        tokens[idx].token === 'my'
+      )
+    ) {
+      idx++;
+    }
+
+    for (let j = 0; j < candidate.length; j++) {
+      if (idx + j >= tokens.length) return 0;
+      if (tokens[idx + j].token !== candidate[j]) return 0;
+    }
+
+    let consumed = idx + candidate.length;
+    if (consumed < tokens.length && tokens[consumed].token === 'channel') {
+      consumed += 1;
+    }
+    return consumed;
+  }
+
+  private resolveDoneCommandForContext(command: VoiceCommand, transcript: string): VoiceCommand {
+    if (command.type !== 'inbox-next') return command;
+    if (this.stateMachine.getInboxFlowState()) return command;
+
+    const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+    const wakePrefix = config.botName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const donePattern = new RegExp(
+      `^(?:(?:hey|hello),?\\s+)?${wakePrefix}[,.]?\\s*(?:done|(?:i'?m|i\\s+am)\\s+done)$|^(?:done|(?:i'?m|i\\s+am)\\s+done)$`,
+      'i',
+    );
+    if (donePattern.test(input)) {
+      return { type: 'default' };
+    }
+    return command;
+  }
+
   private cancelPendingWait(reason: string): void {
     if (this.pendingWaitCallback) {
       console.log(`Cancelling pending wait (${reason})`);
       this.pendingWaitCallback = null;
       this.activeWaitQueueItemId = null;
+      this.quietPendingWait = false;
       this.stopWaitingLoop();
       // Queue item stays as pending/ready — shows up in inbox
     }
+  }
+
+  private async handleSilentWait(): Promise<void> {
+    if (!this.pendingWaitCallback) {
+      await this.speakResponse('Nothing is processing right now.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    this.quietPendingWait = true;
+    this.stopWaitingLoop();
+    console.log('Silent wait enabled for active processing item');
   }
 
   private deliverWaitResponse(responseText: string): void {
@@ -976,7 +1171,7 @@ Use channel names (the part before the colon). Do not explain.`,
       try {
         const ttsStream = await textToSpeechStream(responseText);
         this.stopWaitingLoop();
-        this.player.stopPlayback();
+        this.player.stopPlayback('wait-response-delivery');
         if (!this.isBusy() || this.player.isWaiting()) {
           this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
           await this.player.playStream(ttsStream);
@@ -984,13 +1179,41 @@ Use channel names (the part before the colon). Do not explain.`,
           this.setGateGrace(5_000);
           await this.playReadyEarcon();
         } else {
-          // Pipeline got busy — defer
-          this.notifyIfIdle(responseText);
+          // Pipeline got busy (often due to an overlapping command like "silent").
+          // Retry delivery once we return to idle instead of dropping it.
+          console.log('Wait response delivery deferred (pipeline busy)');
+          this.deferWaitResponse(responseText);
         }
       } catch (err: any) {
         console.error(`Wait response delivery failed: ${err.message}`);
       }
     })();
+  }
+
+  private deferWaitResponse(responseText: string): void {
+    this.deferredWaitResponseText = responseText;
+    if (this.deferredWaitRetryTimer) return;
+    this.deferredWaitRetryTimer = setInterval(() => {
+      if (!this.deferredWaitResponseText) {
+        this.clearDeferredWaitRetry();
+        return;
+      }
+      if (this.isBusy() || this.player.isPlaying()) {
+        return;
+      }
+      const text = this.deferredWaitResponseText;
+      this.deferredWaitResponseText = null;
+      this.clearDeferredWaitRetry();
+      this.deliverWaitResponse(text);
+    }, 700);
+  }
+
+  private clearDeferredWaitRetry(): void {
+    if (this.deferredWaitRetryTimer) {
+      clearInterval(this.deferredWaitRetryTimer);
+      this.deferredWaitRetryTimer = null;
+    }
+    this.deferredWaitResponseText = null;
   }
 
   private setGateGrace(ms: number): void {
@@ -1029,7 +1252,7 @@ Use channel names (the part before the colon). Do not explain.`,
     if (!getVoiceSettings().gated) return;
     if (this.pendingWaitCallback) return;
     if (this.isBusy() || this.player.isPlaying()) return;
-    console.log('Grace period expired — gate closed');
+    console.log(`${this.stamp()} Grace period expired — gate closed`);
     void this.playFastCue('gate-closed');
   }
 
@@ -1054,11 +1277,17 @@ Use channel names (the part before the colon). Do not explain.`,
 
       // Register wait callback — will be invoked when LLM finishes
       this.activeWaitQueueItemId = item.id;
+      this.quietPendingWait = false;
       this.pendingWaitCallback = (responseText: string) => {
         this.deliverWaitResponse(responseText);
       };
 
-      this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+      this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+        channelName: activeChannel.name,
+        displayName,
+        sessionKey,
+        systemPrompt: this.router.getSystemPrompt(),
+      });
 
       // Return immediately — waiting loop keeps running, pipeline goes to IDLE via finally block
       // OpenClaw sync happens in the dispatch completion handler to avoid gateway conflicts
@@ -1081,7 +1310,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.lastSpokenText = responseText;
     const ttsStream = await textToSpeechStream(responseText);
     this.stopWaitingLoop();
-    this.player.stopPlayback();
+    this.player.stopPlayback('wait-mode-response');
     this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
     await this.player.playStream(ttsStream);
     this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
@@ -1112,7 +1341,12 @@ Use channel names (the part before the colon). Do not explain.`,
       userMessage: transcript,
     });
 
-    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+      channelName,
+      displayName,
+      sessionKey,
+      systemPrompt: this.router.getSystemPrompt(),
+    });
 
     // Brief confirmation with acknowledged earcon, then speak
     await this.player.playEarcon('acknowledged');
@@ -1149,7 +1383,12 @@ Use channel names (the part before the colon). Do not explain.`,
     });
 
     this.speculativeQueueItemId = item.id;
-    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+      channelName,
+      displayName,
+      sessionKey,
+      systemPrompt: this.router.getSystemPrompt(),
+    });
 
     // Enter choice state and prompt user — LLM works in parallel
     // OpenClaw sync happens in the dispatch completion handler to avoid gateway conflicts
@@ -1220,7 +1459,7 @@ Use channel names (the part before the colon). Do not explain.`,
           this.lastSpokenText = readyItem.responseText;
           const ttsStream = await textToSpeechStream(readyItem.responseText);
           this.stopWaitingLoop();
-          this.player.stopPlayback();
+          this.player.stopPlayback('ask-mode-ready-item-response');
           this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
           await this.player.playStream(ttsStream);
           this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
@@ -1248,7 +1487,7 @@ Use channel names (the part before the colon). Do not explain.`,
       // Try navigation commands — with or without wake word
       const navCommand = parseVoiceCommand(transcript, config.botName)
         ?? this.matchBareQueueCommand(transcript);
-      if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default')) {
+      if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default' || navCommand.type === 'dispatch')) {
         this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
         console.log(`Queue choice: navigation (${navCommand.type}), already dispatched speculatively`);
         this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
@@ -1258,7 +1497,7 @@ Use channel names (the part before the colon). Do not explain.`,
           // No speculative dispatch — dispatch now before navigating
           await this.handleSilentQueue(userId, originalTranscript);
         }
-        await this.handleVoiceCommand(navCommand);
+        await this.handleVoiceCommand(navCommand, userId);
       } else {
         // Unrecognized — reprompt with error earcon (LLM continues in background)
         await this.repromptAwaiting();
@@ -1288,7 +1527,12 @@ Use channel names (the part before the colon). Do not explain.`,
       userMessage: transcript,
     });
 
-    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+      channelName,
+      displayName,
+      sessionKey,
+      systemPrompt: this.router.getSystemPrompt(),
+    });
 
     // One confirmation tone, then silence
     console.log('Silent queue: dispatched, playing single tone');
@@ -1331,7 +1575,8 @@ Use channel names (the part before the colon). Do not explain.`,
           navCommand.type === 'switch' ||
           navCommand.type === 'list' ||
           navCommand.type === 'default' ||
-          navCommand.type === 'inbox-check'
+          navCommand.type === 'inbox-check' ||
+          navCommand.type === 'dispatch'
         )
       ) {
         console.log(`Switch choice: navigation (${navCommand.type})`);
@@ -1346,12 +1591,23 @@ Use channel names (the part before the colon). Do not explain.`,
     }
   }
 
-  private dispatchToLLMFireAndForget(userId: string, transcript: string, queueItemId: string, sessionKey: string): void {
+  private dispatchToLLMFireAndForget(
+    userId: string,
+    transcript: string,
+    queueItemId: string,
+    target: {
+      channelName: string;
+      displayName: string;
+      sessionKey: string;
+      systemPrompt: string;
+    },
+  ): void {
     if (!this.router || !this.queueState) return;
 
-    const activeChannel = this.router.getActiveChannel();
-    const systemPrompt = this.router.getSystemPrompt();
-    const channelName = activeChannel.name;
+    const channelName = target.channelName;
+    const displayName = target.displayName;
+    const sessionKey = target.sessionKey;
+    const systemPrompt = target.systemPrompt;
 
     // Capture state we need before the async work
     const routerRef = this.router;
@@ -1362,15 +1618,17 @@ Use channel names (the part before the colon). Do not explain.`,
 
     void (async () => {
       try {
-        await routerRef.refreshHistory();
-        const history = routerRef.getHistory();
+        // Use the originating channel snapshot for history so switches that
+        // happen while this item is processing do not cross-contaminate context.
+        await routerRef.refreshHistory(channelName);
+        const history = routerRef.getHistory(channelName);
         // Use sessionKey as LLM user identity so gateway chat session and
         // websocket sync injects target the same session namespace.
         const { response, history: updatedHistory } = await getResponse(sessionKey, transcript, {
           systemPrompt,
           history,
         });
-        routerRef.setHistory(updatedHistory);
+        routerRef.setHistory(updatedHistory, channelName);
 
         // Generate summary (first sentence or first 100 chars)
         const summary = response.length > 100
@@ -1387,6 +1645,7 @@ Use channel names (the part before the colon). Do not explain.`,
           const cb = this.pendingWaitCallback;
           this.pendingWaitCallback = null;
           this.activeWaitQueueItemId = null;
+          this.quietPendingWait = false;
           queueRef.markHeard(queueItemId);
           pollerRef?.check();
 
@@ -1396,8 +1655,28 @@ Use channel names (the part before the colon). Do not explain.`,
 
           // Sync to OpenClaw
           if (gatewaySync?.isConnected() && shouldSyncGatewaySession) {
-            await gatewaySync.inject(sessionKey, transcript, 'voice-user');
-            await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+            try {
+              console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+              const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+              if (ok) {
+                console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+              } else {
+                console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+              }
+            } catch (err: any) {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=${err.message}`);
+            }
+            try {
+              console.log(`Gateway inject start queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+              const ok = await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+              if (ok) {
+                console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+              } else {
+                console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+              }
+            } catch (err: any) {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
+            }
 
             if (this.inboxTracker?.isActive()) {
               const count = await this.getCurrentMessageCount(sessionKey);
@@ -1417,8 +1696,28 @@ Use channel names (the part before the colon). Do not explain.`,
 
         // Sync to OpenClaw
         if (gatewaySync?.isConnected() && shouldSyncGatewaySession) {
-          await gatewaySync.inject(sessionKey, transcript, 'voice-user');
-          await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+          try {
+            console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+            const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+            if (ok) {
+              console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+            } else {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+            }
+          } catch (err: any) {
+            console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=${err.message}`);
+          }
+          try {
+            console.log(`Gateway inject start queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+            const ok = await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+            if (ok) {
+              console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+            } else {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+            }
+          } catch (err: any) {
+            console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
+          }
 
           // Update inbox snapshot so our own messages don't appear as "new"
           if (this.inboxTracker?.isActive()) {
@@ -1439,7 +1738,6 @@ Use channel names (the part before the colon). Do not explain.`,
           this.notifyIfIdle(response);
         } else {
           // Notify user if idle
-          const displayName = (activeChannel as any).displayName || channelName;
           this.notifyIfIdle(`Response ready from ${displayName}.`);
         }
       } catch (err: any) {
@@ -1459,21 +1757,18 @@ Use channel names (the part before the colon). Do not explain.`,
     this.cancelPendingWait(`mode switch to ${mode}`);
     this.queueState.setMode(mode);
 
-    // Activate/deactivate inbox based on mode
-    if (mode === 'queue' || mode === 'ask') {
-      if (this.inboxTracker && this.router) {
-        const channels = this.router.getAllChannelSessionKeys();
+    // Keep inbox tracking active across modes so text-originated updates are
+    // still discoverable via inbox-check in wait mode.
+    if (this.inboxTracker && this.router) {
+      const channels = this.router.getAllChannelSessionKeys();
+      if (!this.inboxTracker.isActive()) {
         await this.inboxTracker.activate(channels);
       }
-    } else {
-      // wait mode — deactivate inbox
-      if (this.inboxTracker) {
-        this.inboxTracker.deactivate();
-      }
-      // Clear inbox flow if active
-      if (this.stateMachine.getInboxFlowState()) {
-        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-      }
+    }
+
+    // Clear inbox flow if active when mode changes.
+    if (this.stateMachine.getInboxFlowState()) {
+      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
     }
 
     const labels: Record<VoiceMode, string> = {
@@ -1494,9 +1789,19 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private async handleWakeCheck(): Promise<void> {
+    // Simple "I'm here" handshake:
+    // listening (already played upstream) -> acknowledged -> ready, then
+    // allow one immediate no-wake follow-up utterance.
+    this.stopWaitingLoop();
+    await this.player.playEarcon('acknowledged');
+    this.setPromptGrace(15_000);
+    this.playReadyEarconSync();
+  }
+
   private handlePause(): void {
     console.log('Pause command: stopping playback');
-    this.player.stopPlayback();
+    this.player.stopPlayback('pause-command');
   }
 
   private async handleReplay(): Promise<void> {
@@ -1650,7 +1955,7 @@ Use channel names (the part before the colon). Do not explain.`,
       this.lastSpokenText = fullText;
       const ttsStream = await textToSpeechStream(fullText);
       this.stopWaitingLoop();
-      this.player.stopPlayback();
+      this.player.stopPlayback('inbox-flow-read');
       await this.player.playStream(ttsStream);
       this.setGateGrace(5_000);
       await this.playReadyEarcon();
@@ -1690,9 +1995,47 @@ Use channel names (the part before the colon). Do not explain.`,
     this.lastSpokenText = fullText;
     const ttsStream = await textToSpeechStream(fullText);
     this.stopWaitingLoop();
-    this.player.stopPlayback();
+    this.player.stopPlayback('queue-next-read');
     await this.player.playStream(ttsStream);
     this.setGateGrace(5_000);
+    await this.playReadyEarcon();
+  }
+
+  private async handleInboxClear(): Promise<void> {
+    if (!this.queueState) {
+      await this.speakResponse('Queue mode is not available.');
+      return;
+    }
+
+    const flowState = this.stateMachine.getInboxFlowState();
+    if (!flowState || flowState.index >= flowState.items.length) {
+      await this.speakResponse('Nothing to clear in the inbox.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const remaining = flowState.items.slice(flowState.index) as ChannelActivity[];
+    const sessionKeys = new Set(remaining.map((a) => a.sessionKey));
+
+    // Mark queued ready items from remaining channels as heard.
+    for (const item of this.queueState.getReadyItems()) {
+      if (sessionKeys.has(item.sessionKey)) {
+        this.queueState.markHeard(item.id);
+      }
+    }
+    this.responsePoller?.check();
+
+    // Mark text activity as seen for remaining channels.
+    if (this.inboxTracker) {
+      for (const activity of remaining) {
+        const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
+        this.inboxTracker.markSeen(activity.sessionKey, currentCount);
+      }
+    }
+
+    this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+    const channelWord = remaining.length === 1 ? 'channel' : 'channels';
+    await this.speakResponse(`Cleared ${remaining.length} ${channelWord} from the inbox.`, { inbox: true });
     await this.playReadyEarcon();
   }
 
@@ -1760,32 +2103,65 @@ Use channel names (the part before the colon). Do not explain.`,
   private matchBareQueueCommand(transcript: string): VoiceCommand | null {
     const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
     const normalized = input.replace(/[,.!?;:]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const politeStripped = normalized
+      .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/, '')
+      .replace(/^please\s+/, '')
+      .trim();
+    const navInput = politeStripped || normalized;
 
     // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on", "skip"
     if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(normalized)) {
       return { type: 'inbox-next' };
     }
 
+    // "clear inbox", "clear the inbox", "mark inbox read", "clear all"
+    if (/^(?:clear\s+(?:the\s+)?inbox|mark\s+(?:the\s+)?inbox\s+(?:as\s+)?read|mark\s+all\s+read|clear\s+all)$/.test(normalized)) {
+      return { type: 'inbox-clear' };
+    }
+
+    // "read last message", "read the last message", "last message"
+    if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(normalized)) {
+      return { type: 'read-last-message' };
+    }
+
+    // "dispatch to <channel> <payload>"
+    const dispatchMatch = navInput.match(
+      /^(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
+    );
+    if (dispatchMatch) {
+      const body = dispatchMatch[1].trim();
+      if (body) return { type: 'dispatch', body };
+    }
+
     // "switch channels", "change channels", "list channels", "show channels"
-    if (/^(?:change|switch|list|show)\s+channels?$/.test(normalized)) {
+    if (/^(?:change|switch|list|show)\s+channels?$/.test(navInput)) {
       return { type: 'list' };
     }
 
-    // "go to X", "switch to X"
-    const switchMatch = normalized.match(/^(?:go|switch|change|move)\s+to\s+(.+)$/);
+    // "go to X", "switch to X", "switch channel to X", "move channels X"
+    const switchMatch = navInput.match(/^(?:go|switch|change|move)(?:\s+channels?)?(?:\s+to)?\s+(.+)$/);
     if (switchMatch) {
-      return { type: 'switch', channel: switchMatch[1].trim() };
+      const target = switchMatch[1].trim().replace(/\s+channel$/, '').trim();
+      if (/^(?:inbox|the\s+inbox|my\s+inbox)$/.test(target)) {
+        return { type: 'inbox-check' };
+      }
+      if (/^(?:default|home|back)$/.test(target)) {
+        return { type: 'default' };
+      }
+      if (!/^(?:inbox|queue|wait|ask)\s+mode$/.test(target)) {
+        return { type: 'switch', channel: target };
+      }
     }
 
     // "go back", "go home", "default", "back to inbox"
-    if (/^(?:go\s+back|go\s+home|default|back\s+to\s+inbox|go\s+to\s+inbox)$/.test(normalized)) {
+    if (/^(?:go\s+back|go\s+home|default|back\s+to\s+inbox|go\s+to\s+inbox)$/.test(navInput)) {
       return { type: 'default' };
     }
 
     // "inbox list", "inbox", "what do I have", "check inbox", "what's new", etc.
     if (
-      /^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(normalized) ||
-      /\binbox\s+list\b/.test(normalized)
+      /^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(navInput) ||
+      /\binbox\s+list\b/.test(navInput)
     ) {
       return { type: 'inbox-check' };
     }
@@ -1820,7 +2196,7 @@ Use channel names (the part before the colon). Do not explain.`,
     }
     const ttsStream = await textToSpeechStream(text);
     this.stopWaitingLoop();
-    this.player.stopPlayback();
+    this.player.stopPlayback('speak-response-preempt');
     await this.player.playStream(ttsStream);
     this.setGateGrace(5_000);
   }
@@ -1948,13 +2324,13 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private async playReadyEarcon(): Promise<void> {
-    console.log('Ready cue emitted (async) — opening grace window');
+    console.log(`${this.stamp()} Ready cue emitted (async) — opening grace window`);
     this.setGateGrace(VoicePipeline.READY_GRACE_MS);
     await this.playFastCue('ready');
   }
 
   private playReadyEarconSync(): void {
-    console.log('Ready cue emitted (sync) — opening grace window');
+    console.log(`${this.stamp()} Ready cue emitted (sync) — opening grace window`);
     this.setGateGrace(VoicePipeline.READY_GRACE_MS);
     void this.playFastCue('ready');
   }

@@ -60,6 +60,7 @@ class InMemoryQueueState {
   getPendingItems() { return this.items.filter((i) => i.status === 'pending'); }
   getNextReady() { return this.items.find((i) => i.status === 'ready') ?? null; }
   getReadyByChannel(channel: string) { return this.items.find((i) => i.status === 'ready' && i.channel === channel) ?? null; }
+  getLastItem() { return this.items[this.items.length - 1] ?? null; }
   getSnapshots() { return { ...this.snapshots }; }
   setSnapshots(s: Record<string, number>) { this.snapshots = { ...s }; }
   clearSnapshots() { this.snapshots = {}; }
@@ -118,6 +119,7 @@ async function main(): Promise<void> {
   const switchChannelId = process.env['E2E_SWITCH_CHANNEL_ID'] || '1472052914267619473'; // openclaw-testing
   const utilityChannelId = process.env['E2E_UTILITY_CHANNEL_ID'] || '1471563603625775124'; // voice-utility
   const forumPostId = process.env['E2E_FORUM_POST_ID'] || '1471584556107956307';
+  const dispatchChannelName = process.env['E2E_DISPATCH_CHANNEL'] || 'nutrition';
 
   let pipeline: VoicePipeline | null = null;
 
@@ -216,6 +218,35 @@ async function main(): Promise<void> {
       detail: heardAfterNext
         ? `ready ${readyBeforeInboxNext}->${queueState.getReadyItems().length}, heard ${heardBeforeInboxNext}->${queueState.getHeardCount()}`
         : `no consume signal (ready ${readyBeforeInboxNext}->${queueState.getReadyItems().length}, heard ${heardBeforeInboxNext}->${queueState.getHeardCount()})`,
+    });
+
+    // Scenario 5: dispatch to another channel without switching active context
+    queueState.setMode('wait');
+    await router.switchToDefault();
+    const activeBeforeDispatch = router.getActiveChannel().name;
+    await injectSpeech(
+      pipeline,
+      `Hey Watson, dispatch to ${dispatchChannelName} please start my morning routine.`,
+    );
+    const queuedToDispatchTarget = await waitFor(() => {
+      const last = queueState.getLastItem();
+      return Boolean(last && last.channel === dispatchChannelName && last.status === 'pending');
+    }, 8_000);
+    const stillOnSourceChannel = router.getActiveChannel().name === activeBeforeDispatch;
+    checks.push({
+      id: 'dispatch-queues-without-switch',
+      ok: queuedToDispatchTarget && stillOnSourceChannel,
+      detail: `queued=${queuedToDispatchTarget} source=${activeBeforeDispatch} active=${router.getActiveChannel().name}`,
+    });
+
+    const dispatchReady = await waitFor(
+      () => queueState.getReadyItems().some((i) => i.channel === dispatchChannelName),
+      45_000,
+    );
+    checks.push({
+      id: 'dispatch-ready-target-channel',
+      ok: dispatchReady,
+      detail: dispatchReady ? `ready item for ${dispatchChannelName} observed` : `no ready item for ${dispatchChannelName}`,
     });
   } catch (err: any) {
     checks.push({ id: 'fatal', ok: false, detail: err?.message || String(err) });

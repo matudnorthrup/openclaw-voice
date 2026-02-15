@@ -233,6 +233,42 @@ describe('InteractionFlowHarness', () => {
     h.destroy();
   });
 
+  it('maps "I\'m done" to default outside inbox flow', () => {
+    const h = new InteractionFlowHarness();
+    h.clearEvents();
+
+    h.sendTranscript("Hey Watson, I'm done");
+
+    expect(h.getState()).toBe('IDLE');
+    expect(h.getEvents()).toEqual(
+      expect.arrayContaining([
+        { type: 'recognized', intent: 'default' },
+        { type: 'earcon', name: 'acknowledged' },
+        { type: 'ready' },
+      ]),
+    );
+
+    h.destroy();
+  });
+
+  it('recognizes dispatch command as command intent', () => {
+    const h = new InteractionFlowHarness();
+    h.clearEvents();
+
+    h.sendTranscript('Hey Watson, dispatch to planning channel start the nightly plan');
+
+    expect(h.getState()).toBe('IDLE');
+    expect(h.getEvents()).toEqual(
+      expect.arrayContaining([
+        { type: 'recognized', intent: 'dispatch' },
+        { type: 'earcon', name: 'acknowledged' },
+        { type: 'ready' },
+      ]),
+    );
+
+    h.destroy();
+  });
+
   it('keeps awaiting menus wake-word free even in gated mode', () => {
     const h = new InteractionFlowHarness();
     h.setGatedMode(true);

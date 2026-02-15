@@ -763,6 +763,26 @@ const scenarios: Array<() => ScenarioResult> = [
       ].filter(Boolean),
     };
   },
+  () => {
+    const sim = new OverlapFlowSimulator({ planning: 'Planning last message', nutrition: 'Nutrition last message' });
+    sim.setMode('wait');
+    const log: string[] = [];
+    sim.activeChannel = 'planning';
+    log.push(...sim.say('planning prompt'));
+    log.push(...sim.say('switch to nutrition'));
+    log.push(...sim.complete('q1'));
+    return {
+      id: '28-wait-origin-channel-stable-across-switch',
+      passes: [
+        log.includes('prompt:q1:planning') ? 'prompt queued in planning' : '',
+        log.includes('complete:q1:ready:planning') ? 'completion retained planning origin' : '',
+      ].filter(Boolean),
+      breaks: [
+        !log.includes('prompt:q1:planning') ? 'prompt not queued in planning origin' : '',
+        !log.includes('complete:q1:ready:planning') ? 'completion channel drifted after switch' : '',
+      ].filter(Boolean),
+    };
+  },
 ];
 
 function main(): void {

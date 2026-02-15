@@ -17,6 +17,13 @@ export class DiscordAudioPlayer {
   private connection: VoiceConnection | null = null;
   private waitingLoop = false;
   private waitingTone: Buffer | null = null;
+  private ttsPlaybackSeq = 0;
+  private activeTtsPlaybackId: number | null = null;
+  private activeEarconName: EarconName | null = null;
+
+  private stamp(): string {
+    return new Date().toISOString();
+  }
 
   constructor() {
     this.player = createAudioPlayer({
@@ -36,6 +43,10 @@ export class DiscordAudioPlayer {
   }
 
   async playStream(stream: Readable): Promise<void> {
+    const playbackId = ++this.ttsPlaybackSeq;
+    this.activeTtsPlaybackId = playbackId;
+    console.log(`${this.stamp()} TTS playback started [${playbackId}]`);
+
     const resource = createAudioResource(stream, {
       inputType: StreamType.Arbitrary,
     });
@@ -45,10 +56,22 @@ export class DiscordAudioPlayer {
     return new Promise<void>((resolve, reject) => {
       const onIdle = () => {
         cleanup();
+        if (this.activeTtsPlaybackId === playbackId) {
+          console.log(`${this.stamp()} TTS playback completed [${playbackId}]`);
+          this.activeTtsPlaybackId = null;
+        } else {
+          console.log(`${this.stamp()} TTS playback completed (stale) [${playbackId}]`);
+        }
         resolve();
       };
       const onError = (error: Error) => {
         cleanup();
+        if (this.activeTtsPlaybackId === playbackId) {
+          console.log(`${this.stamp()} TTS playback stopped [${playbackId}] reason=player-error:${error.message}`);
+          this.activeTtsPlaybackId = null;
+        } else {
+          console.log(`${this.stamp()} TTS playback errored (stale) [${playbackId}] reason=player-error:${error.message}`);
+        }
         reject(error);
       };
       const cleanup = () => {
@@ -64,13 +87,17 @@ export class DiscordAudioPlayer {
   startWaitingLoop(): void {
     if (!this.waitingTone) {
       this.waitingTone = generateWaitingTone();
-      console.log(`Waiting tone generated: ${this.waitingTone.length} bytes`);
+      console.log(`${this.stamp()} Waiting tone generated: ${this.waitingTone.length} bytes`);
     }
+    console.log(`${this.stamp()} Waiting loop start`);
     this.waitingLoop = true;
     this.playNextWaitingTone();
   }
 
   stopWaitingLoop(): void {
+    if (this.waitingLoop) {
+      console.log(`${this.stamp()} Waiting loop stop`);
+    }
     this.waitingLoop = false;
   }
 
@@ -110,6 +137,8 @@ export class DiscordAudioPlayer {
   }
 
   async playEarcon(name: EarconName): Promise<void> {
+    this.activeEarconName = name;
+    console.log(`${this.stamp()} Earcon start: ${name}`);
     const buf = getEarcon(name);
     const stream = new Readable({ read() {} });
     stream.push(buf);
@@ -120,6 +149,8 @@ export class DiscordAudioPlayer {
     return new Promise<void>((resolve) => {
       const onIdle = () => {
         this.player.removeListener(AudioPlayerStatus.Idle, onIdle);
+        this.activeEarconName = null;
+        console.log(`${this.stamp()} Earcon complete: ${name}`);
         if (this.waitingLoop) {
           this.playNextWaitingTone();
         }
@@ -130,6 +161,8 @@ export class DiscordAudioPlayer {
   }
 
   playEarconSync(name: EarconName): void {
+    this.activeEarconName = name;
+    console.log(`${this.stamp()} Earcon start(sync): ${name}`);
     const buf = getEarcon(name);
     const stream = new Readable({ read() {} });
     stream.push(buf);
@@ -139,6 +172,8 @@ export class DiscordAudioPlayer {
 
     const onIdle = () => {
       this.player.removeListener(AudioPlayerStatus.Idle, onIdle);
+      this.activeEarconName = null;
+      console.log(`${this.stamp()} Earcon complete(sync): ${name}`);
       if (this.waitingLoop) {
         this.playNextWaitingTone();
       }
@@ -146,8 +181,14 @@ export class DiscordAudioPlayer {
     this.player.on(AudioPlayerStatus.Idle, onIdle);
   }
 
-  stopPlayback(): void {
+  stopPlayback(reason = 'unspecified'): void {
+    if (this.activeTtsPlaybackId !== null) {
+      console.log(`${this.stamp()} TTS playback stopped [${this.activeTtsPlaybackId}] reason=${reason}`);
+      this.activeTtsPlaybackId = null;
+    }
+    this.activeEarconName = null;
     this.waitingLoop = false;
+    console.log(`${this.stamp()} Playback stop reason=${reason}`);
     this.player.stop(true);
   }
 
@@ -158,6 +199,11 @@ export class DiscordAudioPlayer {
 
   isWaiting(): boolean {
     return this.waitingLoop;
+  }
+
+  isPlayingEarcon(name: EarconName): boolean {
+    if (!this.isPlaying()) return false;
+    return this.activeEarconName === name;
   }
 
   getPlayer(): AudioPlayer {

@@ -255,11 +255,11 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       const inboxTracker = new InboxTracker(queueState, gatewaySync);
       pipeline.setInboxTracker(inboxTracker);
 
-      // Auto-activate inbox if already in queue/ask mode (restart recovery)
-      // Snapshot at CURRENT message counts so everything starts as "seen"
-      const currentMode = queueState.getMode();
-      if (currentMode === 'queue' || currentMode === 'ask') {
-        const channels = router.getAllChannelSessionKeys();
+      // Ensure inbox snapshots exist across all modes so text-originated updates
+      // remain discoverable via inbox-check even in wait mode.
+      const channels = router.getAllChannelSessionKeys();
+      const existingSnapshots = queueState.getSnapshots();
+      if (Object.keys(existingSnapshots).length === 0) {
         void (async () => {
           try {
             const startedAt = Date.now();
@@ -267,7 +267,7 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
               await new Promise((resolve) => setTimeout(resolve, 200));
             }
             if (!gatewaySync.isConnected()) {
-              console.warn('InboxTracker: restart snapshot skipped (gateway not connected yet)');
+              console.warn('InboxTracker: startup snapshot skipped (gateway not connected yet)');
               return;
             }
             const snapshots: Record<string, number> = {};
@@ -276,9 +276,9 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
               snapshots[ch.sessionKey] = result?.messages?.length ?? 0;
             }
             queueState.setSnapshots(snapshots);
-            console.log(`InboxTracker: restart snapshot — ${Object.entries(snapshots).map(([k, v]) => `${k.split(':').pop()}=${v}`).join(', ')}`);
+            console.log(`InboxTracker: startup snapshot — ${Object.entries(snapshots).map(([k, v]) => `${k.split(':').pop()}=${v}`).join(', ')}`);
           } catch (err: any) {
-            console.warn(`InboxTracker restart snapshot failed: ${err.message}`);
+            console.warn(`InboxTracker startup snapshot failed: ${err.message}`);
           }
         })();
       }

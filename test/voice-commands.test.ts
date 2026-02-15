@@ -63,6 +63,57 @@ describe('parseVoiceCommand — existing commands still work', () => {
   });
 });
 
+describe('parseVoiceCommand — dispatch command', () => {
+  it('parses dispatch with plain body', () => {
+    const result = parseVoiceCommand(
+      'Hey Watson, dispatch to health channel please start my morning routine',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'health channel please start my morning routine',
+    });
+  });
+
+  it('parses dispatch with "this message" phrase', () => {
+    const result = parseVoiceCommand(
+      'Hello Watson, dispatch this message to planning: draft my evening checklist',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'planning: draft my evening checklist',
+    });
+  });
+
+  it('parses dispatch with "this in my" variant', () => {
+    const result = parseVoiceCommand(
+      'Hello Watson, dispatch this in my walmart channel please add abuela flour tortillas',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'my walmart channel please add abuela flour tortillas',
+    });
+  });
+
+  it('parses dispatch with polite prefix', () => {
+    const result = parseVoiceCommand(
+      'Hello Watson, please dispatch this to my walmart channel add two 36 packs of eggs',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'my walmart channel add two 36 packs of eggs',
+    });
+  });
+
+  it('does not parse dispatch without wake trigger', () => {
+    const result = parseVoiceCommand('dispatch to planning finish my notes', BOT);
+    expect(result).toBeNull();
+  });
+});
+
 describe('parseVoiceCommand — mode commands', () => {
   it('parses "inbox mode"', () => {
     const result = parseVoiceCommand('Hey Watson, inbox mode', BOT);
@@ -239,6 +290,35 @@ describe('parseVoiceCommand — inbox next', () => {
   });
 });
 
+describe('parseVoiceCommand — inbox clear', () => {
+  it('parses "clear inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, clear inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-clear' });
+  });
+
+  it('parses "clear the inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, clear the inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-clear' });
+  });
+
+  it('parses "mark inbox read"', () => {
+    const result = parseVoiceCommand('Hey Watson, mark inbox read', BOT);
+    expect(result).toEqual({ type: 'inbox-clear' });
+  });
+});
+
+describe('parseVoiceCommand — read last message', () => {
+  it('parses "read the last message"', () => {
+    const result = parseVoiceCommand('Hey Watson, read the last message', BOT);
+    expect(result).toEqual({ type: 'read-last-message' });
+  });
+
+  it('parses "last message"', () => {
+    const result = parseVoiceCommand('Hello Watson, last message', BOT);
+    expect(result).toEqual({ type: 'read-last-message' });
+  });
+});
+
 describe('parseVoiceCommand — Hello Watson trigger', () => {
   it('parses "Hello Watson, inbox"', () => {
     const result = parseVoiceCommand('Hello Watson, inbox', BOT);
@@ -261,6 +341,23 @@ describe('parseVoiceCommand — Hello Watson trigger', () => {
   });
 });
 
+describe('parseVoiceCommand — wake check', () => {
+  it('parses "Hello Watson" with no trailing command', () => {
+    const result = parseVoiceCommand('Hello Watson', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses "Hey Watson," with no trailing command', () => {
+    const result = parseVoiceCommand('Hey Watson,', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses "Watson." with no trailing command', () => {
+    const result = parseVoiceCommand('Watson.', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+});
+
 describe('parseVoiceCommand — voice status', () => {
   it('parses "voice status"', () => {
     const result = parseVoiceCommand('Hey Watson, voice status', BOT);
@@ -275,6 +372,18 @@ describe('parseVoiceCommand — voice status', () => {
   it('parses "Hello Watson, voice status"', () => {
     const result = parseVoiceCommand('Hello Watson, voice status', BOT);
     expect(result).toEqual({ type: 'voice-status' });
+  });
+});
+
+describe('parseVoiceCommand — silent wait', () => {
+  it('parses "Hello Watson, silent"', () => {
+    const result = parseVoiceCommand('Hello Watson, silent', BOT);
+    expect(result).toEqual({ type: 'silent-wait' });
+  });
+
+  it('parses "Hey Watson, wait quietly"', () => {
+    const result = parseVoiceCommand('Hey Watson, wait quietly', BOT);
+    expect(result).toEqual({ type: 'silent-wait' });
   });
 });
 

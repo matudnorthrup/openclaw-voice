@@ -25,6 +25,7 @@ class InboxFlowSimulator {
   private seq = 1;
   private readonly queue = new Map<string, QueueItem>();
   private readonly lastMessageByChannel: Record<string, string>;
+  private readonly textUnreadChannels = new Set<string>();
 
   constructor(channels: Record<string, string>) {
     this.lastMessageByChannel = channels;
@@ -127,6 +128,18 @@ class InboxFlowSimulator {
         events.push('ready');
         return events;
       }
+      if (/^(?:clear\s+(?:the\s+)?inbox|mark\s+(?:the\s+)?inbox\s+(?:as\s+)?read|mark\s+all\s+read|clear\s+all)$/.test(normalized)) {
+        if (this.inboxFlow) {
+          for (let i = this.inboxFlow.index; i < this.inboxFlow.channels.length; i++) {
+            this.markHeard(this.inboxFlow.channels[i]!);
+          }
+        }
+        this.state = 'IDLE';
+        this.inboxFlow = null;
+        events.push('inbox:clear');
+        events.push('ready');
+        return events;
+      }
       const nav = normalized.match(/^(?:switch|go|change|move)\s+to\s+(.+)$/);
       if (nav) {
         this.state = 'IDLE';
@@ -196,6 +209,10 @@ class InboxFlowSimulator {
     return events;
   }
 
+  injectTextActivity(channel: string): void {
+    this.textUnreadChannels.add(channel);
+  }
+
   getState(): UiState {
     return this.state;
   }
@@ -203,6 +220,7 @@ class InboxFlowSimulator {
   getReadyChannels(): string[] {
     const out = new Set<string>();
     for (const q of this.queue.values()) if (q.status === 'ready') out.add(q.channel);
+    for (const ch of this.textUnreadChannels) out.add(ch);
     return Array.from(out);
   }
 
@@ -232,6 +250,7 @@ class InboxFlowSimulator {
   }
 
   private markHeard(channel: string): void {
+    this.textUnreadChannels.delete(channel);
     for (const [id, q] of this.queue.entries()) {
       if (q.channel === channel && q.status === 'ready') this.queue.delete(id);
     }
@@ -362,6 +381,40 @@ const scenarios: Array<() => ScenarioResult> = [
       'i16-inbox-next-stays-on-read-channel',
       [s.getActiveChannel() === 'nutrition' ? 'stays on read channel after final next' : ''],
       [s.getActiveChannel() === 'nutrition' ? '' : `unexpected channel after next: ${s.getActiveChannel()}`],
+    );
+  },
+  () => {
+    const s = new InboxFlowSimulator({ planning: 'msg' });
+    s.setMode('wait');
+    s.injectTextActivity('planning');
+    const log = s.say('inbox');
+    return mk(
+      'i17-wait-mode-text-unread-visible',
+      [log.includes('inbox:list:planning') ? 'text unread visible in wait mode inbox check' : ''],
+      [log.includes('inbox:list:planning') ? '' : 'wait mode inbox check hid text unread activity'],
+    );
+  },
+  () => {
+    const s = new InboxFlowSimulator({ general: 'msg', planning: 'msg' });
+    s.setMode('ask');
+    s.say('prompt');
+    s.say('send to inbox');
+    s.complete('q1');
+    s.injectTextActivity('planning');
+    s.say('inbox');
+    const log = s.say('clear inbox');
+    return mk(
+      'i18-clear-inbox-clears-remaining',
+      [
+        log.includes('inbox:clear') ? 'clear inbox recognized in inbox flow' : '',
+        s.getReadyCount() === 0 ? 'clear inbox marked remaining channels read/heard' : '',
+        s.getState() === 'IDLE' ? 'clear inbox exits inbox flow' : '',
+      ],
+      [
+        log.includes('inbox:clear') ? '' : 'clear inbox not recognized in inbox flow',
+        s.getReadyCount() === 0 ? '' : 'clear inbox did not clear ready items',
+        s.getState() === 'IDLE' ? '' : 'clear inbox did not exit inbox flow',
+      ],
     );
   },
 ];

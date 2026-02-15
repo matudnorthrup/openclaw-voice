@@ -2,6 +2,7 @@ import type { VoiceMode } from './queue-state.js';
 
 export type VoiceCommand =
   | { type: 'switch'; channel: string }
+  | { type: 'dispatch'; body: string }
   | { type: 'list' }
   | { type: 'default' }
   | { type: 'noise'; level: string }
@@ -12,8 +13,12 @@ export type VoiceCommand =
   | { type: 'mode'; mode: VoiceMode }
   | { type: 'inbox-check' }
   | { type: 'inbox-next' }
+  | { type: 'inbox-clear' }
+  | { type: 'read-last-message' }
   | { type: 'voice-status' }
   | { type: 'gated-mode'; enabled: boolean }
+  | { type: 'wake-check' }
+  | { type: 'silent-wait' }
   | { type: 'pause' }
   | { type: 'replay' }
   | { type: 'earcon-tour' };
@@ -31,11 +36,14 @@ export function matchesWakeWord(transcript: string, botName: string): boolean {
 
 export function parseVoiceCommand(transcript: string, botName: string): VoiceCommand | null {
   const trimmed = transcript.trim();
-  const trigger = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}[,.]?\\s+`, 'i');
+  const trigger = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}[,.]?\\s*`, 'i');
   const match = trimmed.match(trigger);
   if (!match) return null;
 
   const rest = trimmed.slice(match[0].length).trim().toLowerCase().replace(/[.!?,]+$/, '');
+  if (!rest) {
+    return { type: 'wake-check' };
+  }
 
   // Mode switch — must come before "switch to X" to avoid matching "switch to inbox mode" as a channel switch
   const modeMatch = rest.match(/^(?:switch\s+to\s+)?(inbox|queue|wait|ask)\s+mode$/);
@@ -43,6 +51,19 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     const spoken = modeMatch[1];
     const mode: VoiceMode = spoken === 'inbox' ? 'queue' : spoken as VoiceMode;
     return { type: 'mode', mode };
+  }
+
+  // "dispatch to <channel> <payload>", "dispatch this message to <channel> <payload>",
+  // and natural variants like "dispatch this in my <channel> ..."
+  // Keep this before switch parsing so dispatch phrases don't degrade into channel switch.
+  const dispatchMatch = rest.match(
+    /^(?:(?:please|can\s+you|could\s+you|would\s+you)\s+)*(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
+  );
+  if (dispatchMatch) {
+    const body = dispatchMatch[1].trim();
+    if (body.length > 0) {
+      return { type: 'dispatch', body };
+    }
   }
 
   // "switch to X", "go to X", "change to X", "move to X"
@@ -119,6 +140,21 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip"
   if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(rest)) {
     return { type: 'inbox-next' };
+  }
+
+  // "clear inbox", "clear the inbox", "mark inbox read", "clear all"
+  if (/^(?:clear\s+(?:the\s+)?inbox|mark\s+(?:the\s+)?inbox\s+(?:as\s+)?read|mark\s+all\s+read|clear\s+all)$/.test(rest)) {
+    return { type: 'inbox-clear' };
+  }
+
+  // "read last message", "read the last message", "last message"
+  if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(rest)) {
+    return { type: 'read-last-message' };
+  }
+
+  // "silent", "wait quietly", "quiet wait" — only meaningful while a wait is in-flight
+  if (/^(?:silent|silently|wait\s+quietly|quiet\s+wait)$/.test(rest)) {
+    return { type: 'silent-wait' };
   }
 
   // "pause", "stop", "stop talking", "be quiet", "shut up", "shush", "hush", "quiet", "silence", "enough"

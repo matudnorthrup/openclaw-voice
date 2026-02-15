@@ -10,6 +10,7 @@ import {
   matchSwitchChoice,
   matchesWakeWord,
   parseVoiceCommand,
+  type VoiceCommand,
   type ChannelOption,
 } from '../services/voice-commands.js';
 
@@ -125,7 +126,8 @@ export class InteractionFlowHarness {
 
     const cmd = parseVoiceCommand(transcript, this.botName);
     if (cmd) {
-      this.events.push({ type: 'recognized', intent: cmd.type });
+      const resolved = this.resolveDoneCommandForContext(cmd, transcript);
+      this.events.push({ type: 'recognized', intent: resolved.type });
       this.transition({ type: 'RETURN_TO_IDLE' });
       this.events.push({ type: 'earcon', name: 'acknowledged' });
       this.playReadyCue();
@@ -237,5 +239,21 @@ export class InteractionFlowHarness {
 
   private recordState(): void {
     this.events.push({ type: 'state', state: this.sm.getStateType() });
+  }
+
+  private resolveDoneCommandForContext(cmd: VoiceCommand, transcript: string): VoiceCommand {
+    if (cmd.type !== 'inbox-next') return cmd;
+    if (this.sm.getInboxFlowState()) return cmd;
+
+    const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+    const wakePrefix = this.botName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const donePattern = new RegExp(
+      `^(?:(?:hey|hello),?\\s+)?${wakePrefix}[,.]?\\s*(?:done|(?:i'?m|i\\s+am)\\s+done)$|^(?:done|(?:i'?m|i\\s+am)\\s+done)$`,
+      'i',
+    );
+    if (donePattern.test(input)) {
+      return { type: 'default' } as const;
+    }
+    return cmd;
   }
 }
