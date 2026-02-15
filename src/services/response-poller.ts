@@ -62,10 +62,19 @@ export class ResponsePoller {
         const result = await this.gatewaySync.getHistory(item.sessionKey, 5);
         if (!result || !result.messages) continue;
 
-        // Look for an assistant message that appeared after we sent our user message
+        // Look for an assistant message that appeared after this queued item.
         const lastAssistant = [...result.messages]
           .reverse()
-          .find((m) => m.role === 'assistant');
+          .find((m: any) => {
+            if (m.role !== 'assistant') return false;
+            const ts = this.getMessageTimestamp(m);
+            if (ts !== null && ts < item.timestamp) return false;
+            const text = this.toText(m.content).trim().toLowerCase();
+            if (!text) return false;
+            // Skip injected user mirrors ("[voice-user] ..."), which are not replies.
+            if (text.startsWith('[voice-user]')) return false;
+            return true;
+          });
 
         if (lastAssistant) {
           const rawContent = lastAssistant.content;
@@ -93,5 +102,22 @@ export class ResponsePoller {
     } finally {
       this.polling = false;
     }
+  }
+
+  private getMessageTimestamp(message: any): number | null {
+    const value = message?.timestamp;
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  }
+
+  private toText(rawContent: unknown): string {
+    if (typeof rawContent === 'string') return rawContent;
+    if (Array.isArray(rawContent)) {
+      return (rawContent as any[])
+        .filter((b) => b && b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text)
+        .join('\n');
+    }
+    if (rawContent == null) return '';
+    return String(rawContent);
   }
 }

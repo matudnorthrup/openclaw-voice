@@ -1742,6 +1742,10 @@ Use channel names (the part before the colon). Do not explain.`,
         }
       } catch (err: any) {
         console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
+        const failureText = 'I could not complete that request because the gateway connection failed. Please try again.';
+        queueRef.markReady(queueItemId, 'Dispatch failed: gateway connection error.', failureText);
+        pollerRef?.check();
+        this.notifyIfIdle(`Dispatch failed for ${displayName}.`);
       }
     })();
 
