@@ -131,12 +131,12 @@ function generateError(): Buffer {
   const mix = new Float64Array(samples);
   const amp = 3500;
 
-  // G3 (196 Hz) — low, warm
-  const note1 = warmBellTone(196, amp, 0.3, 6);
+  // G3 (196 Hz) — low, warm, boosted for equal loudness
+  const note1 = warmBellTone(196, 5500, 0.3, 6);
   mixInto(mix, note1, 0);
 
   // E3 (165 Hz) — descending, settles low
-  const note2 = warmBellTone(165, amp * 0.8, 0.28, 6.5);
+  const note2 = warmBellTone(165, 5500 * 0.8, 0.28, 6.5);
   mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
 
   return mixToWav(mix);
@@ -178,16 +178,16 @@ function generateCancelled(): Buffer {
   const mix = new Float64Array(samples);
   const amp = 3000;
 
-  // G4 (392 Hz) — start
-  const note1 = warmBellTone(392, amp, 0.3, 6);
+  // G4 (392 Hz) — start, boosted for low-end resolve
+  const note1 = warmBellTone(392, 4200, 0.3, 6);
   mixInto(mix, note1, 0);
 
   // E4 (330 Hz) — step down
-  const note2 = warmBellTone(330, amp * 0.8, 0.28, 6.5);
+  const note2 = warmBellTone(330, 4200 * 0.85, 0.28, 6.5);
   mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
 
   // C4 (262 Hz) — resolve to bottom
-  const note3 = warmBellTone(262, amp * 0.65, 0.25, 7);
+  const note3 = warmBellTone(262, 4200 * 0.75, 0.25, 7);
   mixInto(mix, note3, Math.floor(0.32 * SAMPLE_RATE));
 
   return mixToWav(mix);
@@ -227,8 +227,8 @@ function generateBusy(): Buffer {
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
 
-  // G3 (196 Hz) — low, warm, subtle
-  const note = warmBellTone(196, 3200, 0.25, 6);
+  // G3 (196 Hz) — low, warm, boosted for equal loudness
+  const note = warmBellTone(196, 5000, 0.25, 6);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);
@@ -244,8 +244,8 @@ function generateGateClosed(): Buffer {
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
 
-  // Single soft D4 (294 Hz) — quiet, quick decay
-  const note = warmBellTone(294, 1800, 0.2, 10);
+  // Single soft D4 (294 Hz) — boosted for equal loudness, quick decay
+  const note = warmBellTone(294, 3200, 0.2, 10);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);

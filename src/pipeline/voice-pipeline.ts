@@ -842,6 +842,10 @@ export class VoicePipeline {
       this.startWaitingLoop();
     }
     try {
+      // Channel resolution can take a moment (fuzzy + LLM fallback).
+      // Confirm acceptance immediately so long silences feel intentional.
+      await this.playFastCue('acknowledged');
+
       // Try to find the channel by fuzzy matching against known channels
       const allChannels = this.router.listChannels();
       let match = allChannels.find((c) => this.channelNamesMatch(channelName, c.name, c.displayName));
@@ -2495,7 +2499,11 @@ Use channel names (the part before the colon). Do not explain.`,
       this.scheduleDeferredIdleNotify(message, delayMs);
       return;
     }
-    if (this.isBusy() || this.player.isPlaying()) {
+    // INBOX_FLOW is an "awaiting user" context; treat it as idle enough for
+    // queue-ready notifications so responses don't get silently suppressed.
+    const stateType = this.stateMachine.getStateType();
+    const blockOnBusy = stateType !== 'IDLE' && stateType !== 'INBOX_FLOW';
+    if (blockOnBusy || this.player.isPlaying()) {
       console.log(`Idle notify skipped (busy): "${message}"`);
       this.scheduleDeferredIdleNotify(message, 900);
       return;
