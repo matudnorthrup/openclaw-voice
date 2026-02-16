@@ -129,7 +129,9 @@ export class InteractionFlowHarness {
       const resolved = this.resolveDoneCommandForContext(cmd, transcript);
       this.events.push({ type: 'recognized', intent: resolved.type });
       this.transition({ type: 'RETURN_TO_IDLE' });
-      this.events.push({ type: 'earcon', name: 'acknowledged' });
+      if (resolved.type !== 'wake-check') {
+        this.events.push({ type: 'earcon', name: 'acknowledged' });
+      }
       this.playReadyCue();
       return;
     }

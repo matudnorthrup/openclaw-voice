@@ -104,31 +104,22 @@ function generateListening(): Buffer {
 }
 
 /**
- * Warm ascending G4→C5 with echo — "Got it" (~600ms)
- * Two notes forming a perfect fourth (like the processing loop) with a soft echo tail.
+ * Warm ascending G4→C5 — "Got it" (~500ms)
+ * Celebratory ascending perfect fourth. No echo (distinguishes from processing loop).
  */
 function generateAcknowledged(): Buffer {
-  const duration = 0.6;
+  const duration = 0.5;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
   const amp = 3200;
 
-  // G4 (392 Hz) — same root as processing loop
-  const note1 = warmBellTone(392, amp, 0.4, 6);
+  // G4 (392 Hz)
+  const note1 = warmBellTone(392, amp, 0.35, 6);
   mixInto(mix, note1, 0);
 
-  // C5 (523 Hz) — perfect fourth up
-  const note2 = warmBellTone(523, amp * 0.8, 0.35, 6.5);
-  mixInto(mix, note2, Math.floor(0.15 * SAMPLE_RATE));
-
-  // Soft echo at 25% volume, 200ms later
-  const echoDelay = Math.floor(0.2 * SAMPLE_RATE);
-  for (let i = 0; i < note1.length && (echoDelay + i) < samples; i++) {
-    mix[echoDelay + i] += note1[i] * 0.2;
-  }
-  for (let i = 0; i < note2.length && (echoDelay + Math.floor(0.15 * SAMPLE_RATE) + i) < samples; i++) {
-    mix[echoDelay + Math.floor(0.15 * SAMPLE_RATE) + i] += note2[i] * 0.2;
-  }
+  // C5 (523 Hz) — ascending fourth, bright finish
+  const note2 = warmBellTone(523, amp * 0.85, 0.3, 6);
+  mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
@@ -174,28 +165,34 @@ function generateTimeoutWarning(): Buffer {
 }
 
 /**
- * Warm descending G4→D4 with gentle tail — "Flow ended / timed out" (~500ms)
+ * Three-note warm descent G4→E4→C4 — "Flow ended / winding down" (~600ms)
+ * Deliberate three-step descent distinguishes from gate-closed's single tap.
  */
 function generateCancelled(): Buffer {
-  const duration = 0.5;
+  const duration = 0.6;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
-  const amp = 3200;
+  const amp = 3000;
 
-  // G4 (392 Hz)
-  const note1 = warmBellTone(392, amp, 0.35, 6);
+  // G4 (392 Hz) — start
+  const note1 = warmBellTone(392, amp, 0.3, 6);
   mixInto(mix, note1, 0);
 
-  // D4 (294 Hz) — descending
-  const note2 = warmBellTone(294, amp * 0.75, 0.3, 6.5);
-  mixInto(mix, note2, Math.floor(0.18 * SAMPLE_RATE));
+  // E4 (330 Hz) — step down
+  const note2 = warmBellTone(330, amp * 0.8, 0.28, 6.5);
+  mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
+
+  // C4 (262 Hz) — resolve to bottom
+  const note3 = warmBellTone(262, amp * 0.65, 0.25, 7);
+  mixInto(mix, note3, Math.floor(0.32 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
 
 /**
- * Warm D5→A4 bell with echo — "Your turn to speak" (~550ms)
- * Descending perfect fourth (inverse of acknowledged) with echo tail.
+ * Charge refrain: G4→G4→C5 — "Your turn!" (~550ms)
+ * Three-note motif like the end of a trumpet charge. Two quick strikes
+ * on the same note, then a bright resolve up.
  */
 function generateReady(): Buffer {
   const duration = 0.55;
@@ -203,22 +200,17 @@ function generateReady(): Buffer {
   const mix = new Float64Array(samples);
   const amp = 3000;
 
-  // D5 (587 Hz) — bright start
-  const note1 = warmBellTone(587, amp, 0.35, 6);
+  // G4 (392 Hz) — first strike
+  const note1 = warmBellTone(392, amp, 0.2, 7);
   mixInto(mix, note1, 0);
 
-  // A4 (440 Hz) — settling down, "your turn"
-  const note2 = warmBellTone(440, amp * 0.75, 0.3, 6.5);
-  mixInto(mix, note2, Math.floor(0.14 * SAMPLE_RATE));
+  // G4 (392 Hz) — second strike, quick repeat
+  const note2 = warmBellTone(392, amp * 0.9, 0.2, 7);
+  mixInto(mix, note2, Math.floor(0.12 * SAMPLE_RATE));
 
-  // Soft echo
-  const echoDelay = Math.floor(0.22 * SAMPLE_RATE);
-  for (let i = 0; i < note1.length && (echoDelay + i) < samples; i++) {
-    mix[echoDelay + i] += note1[i] * 0.18;
-  }
-  for (let i = 0; i < note2.length && (echoDelay + Math.floor(0.14 * SAMPLE_RATE) + i) < samples; i++) {
-    mix[echoDelay + Math.floor(0.14 * SAMPLE_RATE) + i] += note2[i] * 0.18;
-  }
+  // C5 (523 Hz) — resolve up, let it ring
+  const note3 = warmBellTone(523, amp * 0.85, 0.35, 5.5);
+  mixInto(mix, note3, Math.floor(0.24 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
@@ -239,18 +231,17 @@ function generateBusy(): Buffer {
 }
 
 /**
- * Soft descending D5→A4 — "Grace period ended, wake word required" (~250ms)
+ * Single soft A4 tap — "Gate shut" (~250ms)
+ * Minimal, subtle. Just a quiet click-shut. Distinct from cancelled's three-note descent.
  */
 function generateGateClosed(): Buffer {
   const duration = 0.25;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
-  const amp = 2000;
 
-  const note1 = warmBellTone(587, amp, 0.14, 9);        // D5
-  mixInto(mix, note1, 0);
-  const note2 = warmBellTone(440, amp * 0.7, 0.14, 9.5); // A4
-  mixInto(mix, note2, Math.floor(0.1 * SAMPLE_RATE));
+  // Single soft A4 (440 Hz) — quiet, quick decay
+  const note = warmBellTone(440, 1800, 0.2, 9);
+  mixInto(mix, note, 0);
 
   return mixToWav(mix);
 }

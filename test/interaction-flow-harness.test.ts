@@ -244,7 +244,6 @@ describe('InteractionFlowHarness', () => {
     expect(h.getEvents()).toEqual(
       expect.arrayContaining([
         { type: 'recognized', intent: 'wake-check' },
-        { type: 'earcon', name: 'acknowledged' },
         { type: 'ready' },
       ]),
     );

@@ -84,10 +84,10 @@ describe('earcons', () => {
 describe('earcon durations within expected ranges', () => {
   const expectedMaxMs: Record<EarconName, number> = {
     'listening': 420,
-    'acknowledged': 620,
+    'acknowledged': 520,
     'error': 470,
     'timeout-warning': 470,
-    'cancelled': 520,
+    'cancelled': 620,
     'ready': 570,
     'busy': 320,
     'gate-closed': 270,

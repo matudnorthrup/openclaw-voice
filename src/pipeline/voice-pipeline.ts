@@ -1977,10 +1977,9 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private async handleWakeCheck(): Promise<void> {
     // Simple "I'm here" handshake:
-    // listening (already played upstream) -> acknowledged -> ready, then
-    // allow one immediate no-wake follow-up utterance.
+    // listening (already played upstream) -> ready, then allow one
+    // immediate no-wake follow-up utterance.
     this.stopWaitingLoop();
-    await this.player.playEarcon('acknowledged');
     this.setPromptGrace(15_000);
     this.playReadyEarconSync();
   }

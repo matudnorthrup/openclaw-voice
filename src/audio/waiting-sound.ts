@@ -41,40 +41,39 @@ function mixInto(dest: Float64Array, src: Float64Array, offsetSamples: number): 
 }
 
 /**
- * Generates a gentle waiting sound: two soft bell tones forming a pleasant
- * interval (G4 → C5, a perfect fourth), with a subtle echo, followed by silence.
+ * Generates a gentle waiting sound: a single warm G4 bell strike that trails
+ * off into distance via multi-tap echo (25% → 12% → 5%), followed by silence.
  *
- * Sound: ~1s of gentle bell tones with echo tail
- * Silence: ~2s gap
+ * Sound: ~1.5s of bell + echo trail
+ * Silence: ~1.5s gap
  * Total: ~3s per loop cycle
  */
 export function generateWaitingTone(): Buffer {
-  const soundDuration = 1.0;
-  const silenceDuration = 2.0;
+  const soundDuration = 1.5;
+  const silenceDuration = 1.5;
   const totalDuration = soundDuration + silenceDuration;
   const totalSamples = Math.floor(totalDuration * SAMPLE_RATE);
 
   const mix = new Float64Array(totalSamples);
 
   const amp = 5000;
-  const decay = 6;
+  const decay = 5;
 
-  // Note 1: G4 (392 Hz)
-  const note1 = bellTone(392, amp, 0.6, decay);
-  mixInto(mix, note1, 0);
+  // Single G4 (392 Hz) bell strike — warm, full ring
+  const strike = bellTone(392, amp, 0.8, decay);
+  mixInto(mix, strike, 0);
 
-  // Note 2: C5 (523 Hz) — starts 220ms later, slightly quieter
-  const note2 = bellTone(523, amp * 0.75, 0.5, decay * 1.2);
-  mixInto(mix, note2, Math.floor(0.22 * SAMPLE_RATE));
-
-  // Soft echo of both notes at 25% volume, 280ms later
-  const echoDelay = Math.floor(0.28 * SAMPLE_RATE);
-  const echoAmp = 0.25;
-  for (let i = 0; i < note1.length && (echoDelay + i) < totalSamples; i++) {
-    mix[echoDelay + i] += note1[i] * echoAmp;
-  }
-  for (let i = 0; i < note2.length && (echoDelay + Math.floor(0.22 * SAMPLE_RATE) + i) < totalSamples; i++) {
-    mix[echoDelay + Math.floor(0.22 * SAMPLE_RATE) + i] += note2[i] * echoAmp;
+  // Multi-tap echo trail — each repeat quieter and further away
+  const echoTaps = [
+    { delay: 0.30, volume: 0.25 },
+    { delay: 0.55, volume: 0.12 },
+    { delay: 0.80, volume: 0.05 },
+  ];
+  for (const tap of echoTaps) {
+    const delaySamples = Math.floor(tap.delay * SAMPLE_RATE);
+    for (let i = 0; i < strike.length && (delaySamples + i) < totalSamples; i++) {
+      mix[delaySamples + i] += strike[i] * tap.volume;
+    }
   }
 
   // Convert float mix to 16-bit PCM
