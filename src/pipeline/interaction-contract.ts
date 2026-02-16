@@ -66,7 +66,7 @@ export const INTERACTION_CONTRACTS: Record<InteractionContractId, InteractionCon
   },
   'new-post-body': {
     id: 'new-post-body',
-    defaultTimeoutMs: 60_000,
+    defaultTimeoutMs: 180_000,
     repromptText: 'Say the prompt, or cancel.',
     timeoutText: 'New post flow timed out.',
     acceptedIntents: ['body', 'cancel'],

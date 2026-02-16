@@ -49,7 +49,7 @@ describe('parseVoiceCommand — existing commands still work', () => {
 
   it('list command', () => {
     const result = parseVoiceCommand('Hey Watson, list channels', BOT);
-    expect(result).toEqual({ type: 'list' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('default command', () => {
@@ -128,6 +128,11 @@ describe('parseVoiceCommand — dispatch command', () => {
 describe('parseVoiceCommand — mode commands', () => {
   it('parses "inbox mode"', () => {
     const result = parseVoiceCommand('Hey Watson, inbox mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'queue' });
+  });
+
+  it('parses "in box mode" STT split variant', () => {
+    const result = parseVoiceCommand('Hello Watson, in box mode', BOT);
     expect(result).toEqual({ type: 'mode', mode: 'queue' });
   });
 
@@ -223,6 +228,11 @@ describe('parseVoiceCommand — inbox check', () => {
     expect(result).toEqual({ type: 'inbox-check' });
   });
 
+  it('parses "in-box list" STT hyphen variant', () => {
+    const result = parseVoiceCommand('Hey Watson, in-box list', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
   it('parses "back to inbox, inbox list"', () => {
     const result = parseVoiceCommand('Hey Watson, back to inbox, inbox list', BOT);
     expect(result).toEqual({ type: 'inbox-check' });
@@ -282,22 +292,22 @@ describe('parseVoiceCommand — inbox next', () => {
 
   it('parses "skip"', () => {
     const result = parseVoiceCommand('Hey Watson, skip', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 
   it('parses "skip this"', () => {
     const result = parseVoiceCommand('Hey Watson, skip this', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 
   it('parses "skip this one"', () => {
     const result = parseVoiceCommand('Hey Watson, skip this one', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 
   it('parses "skip it"', () => {
     const result = parseVoiceCommand('Hey Watson, skip it', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 });
 
@@ -346,6 +356,11 @@ describe('parseVoiceCommand — hear full message', () => {
     expect(result).toEqual({ type: 'hear-full-message' });
   });
 
+  it('parses "hear a full message"', () => {
+    const result = parseVoiceCommand('Hey Watson, hear a full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
   it('parses "full message"', () => {
     const result = parseVoiceCommand('Watson, full message', BOT);
     expect(result).toEqual({ type: 'hear-full-message' });
@@ -370,7 +385,7 @@ describe('parseVoiceCommand — Hello Watson trigger', () => {
 
   it('parses "Hello Watson, skip"', () => {
     const result = parseVoiceCommand('Hello Watson, skip', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 });
 

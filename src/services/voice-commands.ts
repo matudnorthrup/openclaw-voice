@@ -61,7 +61,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     .trim()
     .replace(/\s+/g, ' ')
     .toLowerCase()
-    .replace(/[.!?,]+$/, '');
+    .replace(/[.!?,]+$/, '')
+    .replace(/\bin-?box\b/g, 'inbox')
+    .replace(/\bin\s+box\b/g, 'inbox');
   if (!rest) {
     return { type: 'wake-check' };
   }
@@ -99,8 +101,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
 
   // "change channels", "switch channels", "list channels", "show channels"
+  // Voice UX: map these to inbox status rather than channel enumeration.
   if (/^(?:change|switch|list|show)\s+channels?$/.test(rest)) {
-    return { type: 'list' };
+    return { type: 'inbox-check' };
   }
 
   // "go back", "go to default", "go home", "default", "go to default channel"
@@ -158,8 +161,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'inbox-check' };
   }
 
-  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip"
-  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(rest)) {
+  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on"
+  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(rest)) {
     return { type: 'inbox-next' };
   }
 
@@ -173,8 +176,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'read-last-message' };
   }
 
-  // "hear full message", "here full message" (STT homophone), "read full message", "full message"
-  if (/^(?:hear|here|read|play)\s+(?:the\s+)?full\s+message$|^full\s+message$/.test(rest)) {
+  // "hear full message", "hear a full message", "here full message" (STT homophone), "read full message", "full message"
+  if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full\s+message$|^full\s+message$/.test(rest)) {
     return { type: 'hear-full-message' };
   }
 
@@ -183,8 +186,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'silent-wait' };
   }
 
-  // "pause", "stop", "stop talking", "be quiet", "shut up", "shush", "hush", "quiet", "silence", "enough"
-  if (/^(?:pause|stop(?:\s+talking)?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough)$/.test(rest)) {
+  // "pause", "stop", "skip", "be quiet", etc.
+  if (/^(?:pause|stop(?:\s+talking)?|skip(?:\s+(?:this(?:\s+(?:one|message|part))?|it|that))?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough)$/.test(rest)) {
     return { type: 'pause' };
   }
 

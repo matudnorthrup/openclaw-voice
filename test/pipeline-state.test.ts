@@ -365,7 +365,7 @@ describe('PipelineStateMachine', () => {
         type: 'ENTER_NEW_POST_FLOW',
         step: 'body',
       });
-      expect(sm.getNewPostFlowState()?.timeoutMs).toBe(60000);
+      expect(sm.getNewPostFlowState()?.timeoutMs).toBe(180000);
     });
   });
 

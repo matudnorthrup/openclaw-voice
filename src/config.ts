@@ -25,6 +25,7 @@ export const config = {
   kokoroVoice: process.env['KOKORO_VOICE'] || 'af_bella',
   chatterboxUrl: process.env['CHATTERBOX_URL'] || 'http://127.0.0.1:4123',
   chatterboxVoice: process.env['CHATTERBOX_VOICE'] || 'default',
+  earconMinGapMs: Math.max(0, parseInt(process.env['EARCON_MIN_GAP_MS'] || '500', 10)),
   discordGuildId: required('DISCORD_GUILD_ID'),
   discordVoiceChannelId: required('DISCORD_VOICE_CHANNEL_ID'),
   silenceDurationMs: parseInt(process.env['SILENCE_DURATION_MS'] || '1500', 10),

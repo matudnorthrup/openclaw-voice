@@ -130,4 +130,24 @@ describe('VoicePipeline dispatch failure handling', () => {
     expect((pipeline as any).isCancelIntent('carry on')).toBe(false);
     pipeline.stop();
   });
+
+  it('enables post-timeout prompt guard and clears it on explicit command', async () => {
+    const pipeline = new VoicePipeline({} as any);
+    vi.spyOn(pipeline as any, 'speakResponse').mockResolvedValue(undefined);
+    vi.spyOn(pipeline as any, 'playReadyEarcon').mockResolvedValue(undefined);
+
+    expect((pipeline as any).newPostTimeoutPromptGuardUntil).toBe(0);
+
+    await (pipeline as any).applyEffects([
+      { type: 'earcon', name: 'cancelled' },
+      { type: 'speak', text: 'New post flow timed out.' },
+    ]);
+
+    expect((pipeline as any).newPostTimeoutPromptGuardUntil).toBeGreaterThan(Date.now());
+
+    await (pipeline as any).handleVoiceCommand({ type: 'voice-status' }, 'voice-user');
+    expect((pipeline as any).newPostTimeoutPromptGuardUntil).toBe(0);
+
+    pipeline.stop();
+  });
 });

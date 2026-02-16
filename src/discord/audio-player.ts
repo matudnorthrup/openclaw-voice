@@ -11,6 +11,7 @@ import {
 import { Readable } from 'node:stream';
 import { generateWaitingTone } from '../audio/waiting-sound.js';
 import { getEarcon, type EarconName } from '../audio/earcons.js';
+import { config } from '../config.js';
 
 export class DiscordAudioPlayer {
   private player: AudioPlayer;
@@ -20,6 +21,7 @@ export class DiscordAudioPlayer {
   private ttsPlaybackSeq = 0;
   private activeTtsPlaybackId: number | null = null;
   private activeEarconName: EarconName | null = null;
+  private lastEarconCompletedAt = 0;
 
   private stamp(): string {
     return new Date().toISOString();
@@ -137,6 +139,7 @@ export class DiscordAudioPlayer {
   }
 
   async playEarcon(name: EarconName): Promise<void> {
+    await this.enforceEarconGap();
     this.activeEarconName = name;
     console.log(`${this.stamp()} Earcon start: ${name}`);
     const buf = getEarcon(name);
@@ -150,6 +153,7 @@ export class DiscordAudioPlayer {
       const onIdle = () => {
         this.player.removeListener(AudioPlayerStatus.Idle, onIdle);
         this.activeEarconName = null;
+        this.lastEarconCompletedAt = Date.now();
         console.log(`${this.stamp()} Earcon complete: ${name}`);
         if (this.waitingLoop) {
           this.playNextWaitingTone();
@@ -161,24 +165,7 @@ export class DiscordAudioPlayer {
   }
 
   playEarconSync(name: EarconName): void {
-    this.activeEarconName = name;
-    console.log(`${this.stamp()} Earcon start(sync): ${name}`);
-    const buf = getEarcon(name);
-    const stream = new Readable({ read() {} });
-    stream.push(buf);
-    stream.push(null);
-    const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
-    this.player.play(resource);
-
-    const onIdle = () => {
-      this.player.removeListener(AudioPlayerStatus.Idle, onIdle);
-      this.activeEarconName = null;
-      console.log(`${this.stamp()} Earcon complete(sync): ${name}`);
-      if (this.waitingLoop) {
-        this.playNextWaitingTone();
-      }
-    };
-    this.player.on(AudioPlayerStatus.Idle, onIdle);
+    void this.playEarcon(name);
   }
 
   stopPlayback(reason = 'unspecified'): void {
@@ -208,5 +195,15 @@ export class DiscordAudioPlayer {
 
   getPlayer(): AudioPlayer {
     return this.player;
+  }
+
+  private async enforceEarconGap(): Promise<void> {
+    const minGap = Math.max(0, config.earconMinGapMs || 0);
+    if (minGap <= 0 || this.lastEarconCompletedAt <= 0) return;
+    const elapsed = Date.now() - this.lastEarconCompletedAt;
+    const waitMs = minGap - elapsed;
+    if (waitMs > 0) {
+      await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    }
   }
 }
