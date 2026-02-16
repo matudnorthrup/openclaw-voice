@@ -102,6 +102,8 @@ function buildSignedDevice(identity: DeviceIdentity, token: string, nonce: strin
   };
 }
 
+const PING_INTERVAL_MS = 25_000;
+
 export class GatewaySync {
   private ws: WebSocket | null = null;
   private pending = new Map<string, PendingRequest>();
@@ -109,6 +111,7 @@ export class GatewaySync {
   private destroyed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private wsUrl: string;
   private deviceIdentity: DeviceIdentity | null;
 
@@ -139,6 +142,7 @@ export class GatewaySync {
 
   destroy(): void {
     this.destroyed = true;
+    this.stopPing();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -244,6 +248,7 @@ export class GatewaySync {
               if (msg.ok && msg.payload?.type === 'hello-ok') {
                 this.connected = true;
                 this.reconnectAttempt = 0;
+                this.startPing();
                 console.log('Connected to OpenClaw gateway');
                 if (!settled) { settled = true; resolve(); }
               } else {
@@ -273,6 +278,7 @@ export class GatewaySync {
           const wasConnected = this.connected;
           this.connected = false;
           this.ws = null;
+          this.stopPing();
 
           // Reject pending requests
           for (const [id, req] of this.pending) {
@@ -325,6 +331,22 @@ export class GatewaySync {
       this.pending.set(id, { resolve, reject, timer });
       this.send({ type: 'req', id, method, params });
     });
+  }
+
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.send({ type: 'ping' });
+      }
+    }, PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {
