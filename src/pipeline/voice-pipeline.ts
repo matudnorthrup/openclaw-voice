@@ -780,6 +780,9 @@ export class VoicePipeline {
       case 'read-last-message':
         await this.handleReadLastMessage();
         break;
+      case 'what-channel':
+        await this.handleWhatChannel();
+        break;
       case 'voice-status':
         await this.handleVoiceStatus();
         break;
@@ -1232,6 +1235,18 @@ Use channel names (the part before the colon). Do not explain.`,
     } else {
       await this.speakResponse('No channel active.', { inbox: true });
     }
+    await this.playReadyEarcon();
+  }
+
+  private async handleWhatChannel(): Promise<void> {
+    if (!this.router) {
+      await this.speakResponse('Channel routing is not available right now.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+    const active = this.router.getActiveChannel();
+    const displayName = (active as any).displayName || active.name;
+    await this.speakResponse(displayName, { inbox: true });
     await this.playReadyEarcon();
   }
 

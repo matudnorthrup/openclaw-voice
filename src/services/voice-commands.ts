@@ -23,7 +23,8 @@ export type VoiceCommand =
   | { type: 'hear-full-message' }
   | { type: 'pause' }
   | { type: 'replay' }
-  | { type: 'earcon-tour' };
+  | { type: 'earcon-tour' }
+  | { type: 'what-channel' };
 
 export interface ChannelOption {
   index: number;
@@ -141,6 +142,11 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "create/make/start a post/thread/topic" — kicks off guided multi-step flow
   if (/(?:make|create|start)\s+.*?(?:post|thread|topic|discussion)/.test(rest)) {
     return { type: 'new-post' };
+  }
+
+  // "what channel", "channel", "which channel", "current channel", "where am I"
+  if (/^(?:(?:what|which|current)\s+)?channel$|^where\s+am\s+i$/.test(rest)) {
+    return { type: 'what-channel' };
   }
 
   // "voice status", "status"
