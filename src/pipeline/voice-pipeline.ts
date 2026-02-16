@@ -2022,6 +2022,7 @@ Use channel names (the part before the colon). Do not explain.`,
       { name: 'cancelled', label: 'cancelled' },
       { name: 'ready', label: 'ready' },
       { name: 'busy', label: 'busy' },
+      { name: 'gate-closed', label: 'gate closed' },
     ];
 
     await this.speakResponse('Starting earcon tour.', { inbox: true });
