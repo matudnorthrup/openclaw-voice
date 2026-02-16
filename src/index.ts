@@ -5,7 +5,8 @@ import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
 import { GatewaySync } from './services/gateway-sync.js';
-import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { getTtsBackend, setTtsBackend, getAvailableTtsBackends } from './services/tts.js';
 import { QueueState, type VoiceMode } from './services/queue-state.js';
 import { ResponsePoller } from './services/response-poller.js';
 import { InboxTracker } from './services/inbox-tracker.js';
@@ -439,6 +440,10 @@ function handleLeave(): void {
 
 function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBuilder<any>[] } {
   const s = getVoiceSettings();
+  const currentMode = queueState?.getMode() ?? 'wait';
+  const modeLabel = currentMode === 'queue' ? 'inbox' : currentMode;
+  const ttsBackend = getTtsBackend();
+  const ttsLabel: Record<string, string> = { elevenlabs: 'ElevenLabs', kokoro: 'Kokoro', chatterbox: 'Chatterbox' };
 
   // Determine noise preset label
   const presetMap: Record<number, string> = { 300: 'Low', 500: 'Medium', 800: 'High' };
@@ -447,11 +452,25 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
   const embed = new EmbedBuilder()
     .setTitle('Voice Settings')
     .addFields(
-      { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech. Raise if the bot is picking up background noise.', inline: false },
-      { name: `Silence Delay — ${s.silenceDurationMs}ms`, value: 'How long to wait after you stop talking before processing. Increase if the bot cuts you off mid-sentence.', inline: false },
-      { name: `Min Speech Duration — ${s.minSpeechDurationMs}ms`, value: 'Shortest utterance the bot will accept. Raise to ignore brief noises like coughs or "um".', inline: false },
+      { name: `Voice Mode — ${modeLabel}`, value: '**Wait:** respond immediately. **Inbox:** queue responses for review. **Ask:** confirm before processing.', inline: false },
+      { name: `Gated — ${s.gated ? 'ON' : 'OFF'}  ·  TTS — ${ttsLabel[ttsBackend] ?? ttsBackend}`, value: 'Gated requires wake word for each utterance. TTS selects the speech engine.', inline: false },
+      { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech.', inline: false },
+      { name: `Silence Delay — ${s.silenceDurationMs}ms  ·  Min Speech — ${s.minSpeechDurationMs}ms`, value: 'Silence delay: pause before processing. Min speech: shortest accepted utterance.', inline: false },
     );
 
+  // Row 1: Voice Mode select
+  const modeRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('mode-select')
+      .setPlaceholder('Voice mode')
+      .addOptions(
+        { label: 'Wait', description: 'Respond to each utterance immediately', value: 'wait', default: currentMode === 'wait' },
+        { label: 'Inbox', description: 'Queue responses, review on demand', value: 'queue', default: currentMode === 'queue' },
+        { label: 'Ask', description: 'Confirm before processing each utterance', value: 'ask', default: currentMode === 'ask' },
+      ),
+  );
+
+  // Row 2: Noise threshold select
   const noiseRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('noise-select')
@@ -463,6 +482,7 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
       ),
   );
 
+  // Row 3: Silence delay buttons
   const delayRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('label-delay').setLabel('Silence Delay').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('delay-minus').setLabel('-500ms').setStyle(ButtonStyle.Secondary),
@@ -471,6 +491,7 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
     new ButtonBuilder().setCustomId('delay-plus').setLabel('+500ms').setStyle(ButtonStyle.Secondary),
   );
 
+  // Row 4: Min speech buttons
   const minSpeechRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('label-minspeech').setLabel('Min Speech').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('minspeech-minus').setLabel('-100ms').setStyle(ButtonStyle.Secondary),
@@ -479,7 +500,22 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
     new ButtonBuilder().setCustomId('minspeech-plus').setLabel('+100ms').setStyle(ButtonStyle.Secondary),
   );
 
-  return { embeds: [embed], components: [noiseRow, delayRow, minSpeechRow] };
+  // Row 5: Gated toggle + TTS backend buttons
+  const availableTts = getAvailableTtsBackends();
+  const toggleRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('gated-toggle')
+      .setLabel(s.gated ? '🔒 Gated: ON' : '🔓 Gated: OFF')
+      .setStyle(s.gated ? ButtonStyle.Success : ButtonStyle.Secondary),
+    ...availableTts.map((b) =>
+      new ButtonBuilder()
+        .setCustomId(`tts-${b}`)
+        .setLabel(ttsLabel[b] ?? b)
+        .setStyle(b === ttsBackend ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    ),
+  );
+
+  return { embeds: [embed], components: [modeRow, noiseRow, delayRow, minSpeechRow, toggleRow] };
 }
 
 // --- Slash command handler ---

@@ -182,6 +182,18 @@ export class GatewaySync {
     }
   }
 
+  async listSessions(): Promise<{ key: string; displayName?: string; channel?: string; status?: string }[] | null> {
+    try {
+      const result = await this.rpc('sessions.list', {});
+      if (result?.sessions) return result.sessions;
+      if (Array.isArray(result)) return result;
+      return null;
+    } catch (err: any) {
+      console.warn(`GatewaySync listSessions failed: ${err.message}`);
+      return null;
+    }
+  }
+
   async getHistory(sessionKey: string, limit?: number): Promise<{ messages: ChatMessage[] } | null> {
     try {
       const params: any = { sessionKey };

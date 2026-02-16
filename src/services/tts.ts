@@ -4,6 +4,24 @@ import { config } from '../config.js';
 type TtsBackend = 'kokoro' | 'chatterbox' | 'elevenlabs';
 const validTtsBackends: ReadonlyArray<TtsBackend> = ['kokoro', 'chatterbox', 'elevenlabs'];
 let primaryBackendUnavailableUntil = 0;
+let runtimeBackendOverride: TtsBackend | null = null;
+
+export function getTtsBackend(): TtsBackend {
+  return runtimeBackendOverride ?? (parseBackend(config.ttsBackend) || 'elevenlabs');
+}
+
+export function setTtsBackend(backend: TtsBackend): void {
+  runtimeBackendOverride = backend;
+  primaryBackendUnavailableUntil = 0; // reset failover state
+}
+
+export function getAvailableTtsBackends(): TtsBackend[] {
+  const available: TtsBackend[] = [];
+  if (config.elevenLabsApiKey) available.push('elevenlabs');
+  if (config.kokoroUrl) available.push('kokoro');
+  if (config.chatterboxUrl) available.push('chatterbox');
+  return available.length > 0 ? available : ['elevenlabs'];
+}
 const failureSignatures = new Map<string, { count: number; firstAt: number; lastAt: number }>();
 
 async function ttsElevenLabs(text: string): Promise<Readable> {
@@ -153,7 +171,7 @@ async function synthesize(backend: TtsBackend, text: string): Promise<{ stream: 
 }
 
 export async function textToSpeechStream(text: string): Promise<Readable> {
-  const primary = parseBackend(config.ttsBackend);
+  const primary = runtimeBackendOverride ?? parseBackend(config.ttsBackend);
   if (!primary) {
     throw new Error(`Unknown TTS backend: ${config.ttsBackend}. Use: ${Object.keys(backends).join(', ')}`);
   }
