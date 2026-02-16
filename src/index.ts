@@ -529,6 +529,28 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  if (interaction.isStringSelectMenu() && interaction.customId === 'mode-select') {
+    const mode = interaction.values[0] as VoiceMode;
+    if (!queueState) queueState = new QueueState();
+    queueState.setMode(mode);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'gated-toggle') {
+    const s = getVoiceSettings();
+    setGatedMode(!s.gated);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('tts-')) {
+    const backend = interaction.customId.slice('tts-'.length) as 'elevenlabs' | 'kokoro' | 'chatterbox';
+    setTtsBackend(backend);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith('delay-')) {
     const s = getVoiceSettings();
     let newDelay: number;
