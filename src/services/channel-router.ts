@@ -374,15 +374,6 @@ export class ChannelRouter {
       const result = await this.gatewaySync.getHistory(sessionKey, 40);
       if (result && result.messages.length > 0) {
         const messages = this.convertOpenClawMessages(result.messages);
-        if (def.channelId) {
-          const latestDiscord = await this.getLastMessageFromDiscord(name);
-          if (latestDiscord && !this.containsEquivalentMessage(messages, latestDiscord)) {
-            console.warn(
-              `OpenClaw session appears stale for #${name}; falling back to Discord history for seed`,
-            );
-            return this.seedHistoryFromDiscord(name);
-          }
-        }
         console.log(`Seeded ${messages.length} messages from OpenClaw session ${sessionKey}`);
         return messages;
       }
@@ -413,22 +404,6 @@ export class ChannelRouter {
       }
     }
     return messages;
-  }
-
-  private containsEquivalentMessage(messages: Message[], target: Message): boolean {
-    const needle = this.normalizeMessageForCompare(target);
-    if (!needle) return false;
-    const tail = messages.slice(-20);
-    return tail.some((msg) => this.normalizeMessageForCompare(msg) === needle);
-  }
-
-  private normalizeMessageForCompare(message: Message): string {
-    const role = message.role === 'assistant' ? 'assistant' : 'user';
-    const content = this.normalizeDiscordMessageContent(String(message.content ?? ''))
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
-    return content ? `${role}:${content}` : '';
   }
 
   /** Normalize content that may be a string or Anthropic-style content blocks. */
