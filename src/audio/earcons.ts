@@ -131,12 +131,12 @@ function generateError(): Buffer {
   const mix = new Float64Array(samples);
   const amp = 3500;
 
-  // B3 (247 Hz) — low but audible, boosted
-  const note1 = warmBellTone(247, 5500, 0.3, 6);
+  // E4 (330 Hz) — mid-low, clearly audible
+  const note1 = warmBellTone(330, 4500, 0.3, 6);
   mixInto(mix, note1, 0);
 
-  // G3 (196 Hz) — descending, settles low
-  const note2 = warmBellTone(196, 5500 * 0.8, 0.28, 6.5);
+  // C4 (262 Hz) — descending
+  const note2 = warmBellTone(262, 4500 * 0.8, 0.28, 6.5);
   mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
 
   return mixToWav(mix);
@@ -227,8 +227,8 @@ function generateBusy(): Buffer {
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
 
-  // G3 (196 Hz) — low, warm, boosted for equal loudness
-  const note = warmBellTone(196, 5000, 0.25, 6);
+  // C4 (262 Hz) — low-mid, audible hum
+  const note = warmBellTone(262, 4000, 0.25, 6);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);
@@ -244,8 +244,8 @@ function generateGateClosed(): Buffer {
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
 
-  // Single soft F#4 (370 Hz) — just audible enough, quick decay
-  const note = warmBellTone(370, 2800, 0.2, 10);
+  // Single soft A4 (440 Hz) — clearly audible, quick decay
+  const note = warmBellTone(440, 2600, 0.2, 10);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);
