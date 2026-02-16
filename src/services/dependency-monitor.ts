@@ -40,6 +40,10 @@ export class DependencyMonitor {
     }
   }
 
+  getLastStatus(): DependencyStatus | null {
+    return this.lastStatus;
+  }
+
   async checkOnce(): Promise<DependencyStatus> {
     const status = await this.checkDependencies();
     const changed =

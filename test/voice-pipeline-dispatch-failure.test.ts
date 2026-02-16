@@ -136,17 +136,17 @@ describe('VoicePipeline dispatch failure handling', () => {
     vi.spyOn(pipeline as any, 'speakResponse').mockResolvedValue(undefined);
     vi.spyOn(pipeline as any, 'playReadyEarcon').mockResolvedValue(undefined);
 
-    expect((pipeline as any).newPostTimeoutPromptGuardUntil).toBe(0);
+    expect((pipeline as any).ctx.newPostTimeoutPromptGuardUntil).toBe(0);
 
     await (pipeline as any).applyEffects([
       { type: 'earcon', name: 'cancelled' },
       { type: 'speak', text: 'New post flow timed out.' },
     ]);
 
-    expect((pipeline as any).newPostTimeoutPromptGuardUntil).toBeGreaterThan(Date.now());
+    expect((pipeline as any).ctx.newPostTimeoutPromptGuardUntil).toBeGreaterThan(Date.now());
 
     await (pipeline as any).handleVoiceCommand({ type: 'voice-status' }, 'voice-user');
-    expect((pipeline as any).newPostTimeoutPromptGuardUntil).toBe(0);
+    expect((pipeline as any).ctx.newPostTimeoutPromptGuardUntil).toBe(0);
 
     pipeline.stop();
   });

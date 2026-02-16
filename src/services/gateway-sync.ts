@@ -160,6 +160,12 @@ export class GatewaySync {
     return this.connected;
   }
 
+  getConnectionState(): 'connected' | 'reconnecting' | 'disconnected' {
+    if (this.connected) return 'connected';
+    if (this.reconnectTimer !== null) return 'reconnecting';
+    return 'disconnected';
+  }
+
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
     try {
       const params: any = { sessionKey, message };

@@ -10,6 +10,7 @@ import { QueueState, type VoiceMode } from './services/queue-state.js';
 import { ResponsePoller } from './services/response-poller.js';
 import { InboxTracker } from './services/inbox-tracker.js';
 import { DependencyMonitor, type DependencyStatus } from './services/dependency-monitor.js';
+import { HealthMonitor } from './services/health-monitor.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
@@ -29,6 +30,7 @@ let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let queueState: QueueState | null = null;
 let responsePoller: ResponsePoller | null = null;
 let dependencyMonitor: DependencyMonitor | null = null;
+let healthMonitor: HealthMonitor | null = null;
 
 // --- Text command handlers ---
 
@@ -147,11 +149,35 @@ client.on('messageCreate', async (message) => {
       : config.ttsBackend === 'chatterbox'
         ? 'Chatterbox'
         : 'TTS backend';
-    await message.reply(
-      `Dependency health:\n` +
-      `  STT (Whisper): **${status.whisperUp ? 'up' : 'down'}**\n` +
-      `  TTS (${ttsLabel}): **${status.ttsUp ? 'up' : 'down'}**`,
-    );
+
+    const lines: string[] = [];
+
+    // Pipeline snapshot
+    if (pipeline) {
+      const snap = pipeline.getHealthSnapshot();
+      const uptimeMin = Math.floor(snap.uptime / 60_000);
+      lines.push(`**Pipeline:** ${snap.pipelineState} (${Math.round(snap.pipelineStateAge / 1000)}s)`);
+      lines.push(`**Uptime:** ${uptimeMin}m`);
+      lines.push(`**Mode:** ${snap.mode === 'queue' ? 'inbox' : snap.mode}`);
+      if (snap.activeChannel) lines.push(`**Channel:** ${snap.activeChannel}`);
+      lines.push(`**Queue:** ${snap.queueReady} ready, ${snap.queuePending} pending`);
+      lines.push(`**Gateway:** ${snap.gatewayConnected ? 'connected' : 'disconnected'}`);
+    }
+
+    lines.push(`**STT (Whisper):** ${status.whisperUp ? 'up' : 'down'}`);
+    lines.push(`**TTS (${ttsLabel}):** ${status.ttsUp ? 'up' : 'down'}`);
+
+    // Counters
+    if (pipeline) {
+      const c = pipeline.getCounters();
+      lines.push('');
+      lines.push(`**Counters:**`);
+      lines.push(`  Utterances: ${c.utterancesProcessed} | Commands: ${c.commandsRecognized} | LLM: ${c.llmDispatches}`);
+      lines.push(`  Errors: ${c.errors} | STT fail: ${c.sttFailures} | TTS fail: ${c.ttsFailures}`);
+      lines.push(`  Invariant violations: ${c.invariantViolations} | Stall watchdog: ${c.stallWatchdogFires}`);
+    }
+
+    await message.reply(lines.join('\n'));
   }
 });
 
@@ -358,6 +384,25 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     });
     dependencyMonitor.start();
 
+    // Wire health monitor
+    if (healthMonitor) {
+      healthMonitor.stop();
+      healthMonitor = null;
+    }
+    healthMonitor = new HealthMonitor({
+      getSnapshot: () => {
+        const snap = pipeline!.getHealthSnapshot();
+        const depStatus = dependencyMonitor?.getLastStatus();
+        if (depStatus) {
+          snap.dependencies.whisper = depStatus.whisperUp ? 'up' : 'down';
+          snap.dependencies.tts = depStatus.ttsUp ? 'up' : 'down';
+        }
+        return snap;
+      },
+      logChannel: logChannel ?? null,
+    });
+    healthMonitor.start();
+
     if (message) {
       await message.reply('Joined voice channel. Listening...');
     }
@@ -370,6 +415,10 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
 }
 
 function handleLeave(): void {
+  if (healthMonitor) {
+    healthMonitor.stop();
+    healthMonitor = null;
+  }
   if (dependencyMonitor) {
     dependencyMonitor.stop();
     dependencyMonitor = null;

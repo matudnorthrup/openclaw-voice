@@ -137,6 +137,10 @@ export class PipelineStateMachine {
     return this.state.type;
   }
 
+  hasActiveTimers(): boolean {
+    return this.timeoutTimer !== null || this.warningTimer !== null;
+  }
+
   /**
    * Buffer an utterance that arrived during PROCESSING or SPEAKING.
    * The pipeline should re-process it when returning to IDLE.
@@ -178,6 +182,8 @@ export class PipelineStateMachine {
         // Only transition from TRANSCRIBING — don't overwrite AWAITING states
         if (this.state.type === 'TRANSCRIBING') {
           this.state = { type: 'PROCESSING' };
+        } else {
+          console.warn(`TRANSCRIPT_READY arrived in non-TRANSCRIBING state: ${this.state.type}`);
         }
         return effects;
 
@@ -300,6 +306,8 @@ export class PipelineStateMachine {
             ...this.state,
             index: this.state.index + 1,
           };
+        } else {
+          console.warn(`INBOX_ADVANCE arrived in non-INBOX_FLOW state: ${this.state.type}`);
         }
         return effects;
 
