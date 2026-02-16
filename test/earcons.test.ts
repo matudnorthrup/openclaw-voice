@@ -42,7 +42,7 @@ describe('earcons', () => {
         const bytesPerSample = 2; // 16-bit
         const numSamples = dataSize / bytesPerSample;
         const durationMs = (numSamples / SAMPLE_RATE) * 1000;
-        expect(durationMs).toBeLessThan(700);
+        expect(durationMs).toBeLessThan(800);
       });
 
       it('has consistent file size field', () => {
@@ -83,12 +83,12 @@ describe('earcons', () => {
 
 describe('earcon durations within expected ranges', () => {
   const expectedMaxMs: Record<EarconName, number> = {
-    'listening': 420,
+    'listening': 220,
     'acknowledged': 520,
     'error': 470,
-    'timeout-warning': 470,
+    'timeout-warning': 720,
     'cancelled': 620,
-    'ready': 570,
+    'ready': 720,
     'busy': 320,
     'gate-closed': 270,
   };

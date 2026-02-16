@@ -470,9 +470,12 @@ export class VoicePipeline {
         return;
       }
 
+      const preParsedCommand = parseVoiceCommand(transcript, config.botName);
+      const suppressListeningCue = preParsedCommand?.type === 'wake-check';
+
       // Valid interaction confirmed — play listening earcon and wait for it to finish
       this.clearGraceTimer();
-      if (!playedListeningEarly) {
+      if (!playedListeningEarly && !suppressListeningCue) {
         await this.playFastCue('listening');
       }
       if (graceFromPromptAtCapture || Date.now() < this.promptGraceUntil) {
@@ -500,7 +503,7 @@ export class VoicePipeline {
         }
       }
 
-      const command = parseVoiceCommand(transcript, config.botName);
+      const command = preParsedCommand;
       if (command) {
         const resolvedCommand = this.resolveDoneCommandForContext(command, transcript);
         if (command.type === 'new-post') {

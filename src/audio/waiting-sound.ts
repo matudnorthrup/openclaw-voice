@@ -41,16 +41,16 @@ function mixInto(dest: Float64Array, src: Float64Array, offsetSamples: number): 
 }
 
 /**
- * Generates a gentle waiting sound: a single warm G4 bell strike that trails
- * off into distance via multi-tap echo (25% → 12% → 5%), followed by silence.
+ * Generates a meditative waiting sound: two G4 bell strikes (same note)
+ * each with a multi-tap echo trail fading into distance, followed by silence.
  *
- * Sound: ~1.5s of bell + echo trail
- * Silence: ~1.5s gap
+ * Sound: ~1.8s of bell strikes + echo trails
+ * Silence: ~1.2s gap
  * Total: ~3s per loop cycle
  */
 export function generateWaitingTone(): Buffer {
-  const soundDuration = 1.5;
-  const silenceDuration = 1.5;
+  const soundDuration = 1.8;
+  const silenceDuration = 1.2;
   const totalDuration = soundDuration + silenceDuration;
   const totalSamples = Math.floor(totalDuration * SAMPLE_RATE);
 
@@ -59,20 +59,36 @@ export function generateWaitingTone(): Buffer {
   const amp = 5000;
   const decay = 5;
 
-  // Single G4 (392 Hz) bell strike — warm, full ring
-  const strike = bellTone(392, amp, 0.8, decay);
-  mixInto(mix, strike, 0);
+  // First G4 (392 Hz) bell strike
+  const strike1 = bellTone(392, amp, 0.7, decay);
+  mixInto(mix, strike1, 0);
 
-  // Multi-tap echo trail — each repeat quieter and further away
-  const echoTaps = [
-    { delay: 0.30, volume: 0.25 },
-    { delay: 0.55, volume: 0.12 },
-    { delay: 0.80, volume: 0.05 },
+  // First strike echo trail
+  const echoTaps1 = [
+    { delay: 0.28, volume: 0.22 },
+    { delay: 0.50, volume: 0.10 },
   ];
-  for (const tap of echoTaps) {
-    const delaySamples = Math.floor(tap.delay * SAMPLE_RATE);
-    for (let i = 0; i < strike.length && (delaySamples + i) < totalSamples; i++) {
-      mix[delaySamples + i] += strike[i] * tap.volume;
+  for (const tap of echoTaps1) {
+    const d = Math.floor(tap.delay * SAMPLE_RATE);
+    for (let i = 0; i < strike1.length && (d + i) < totalSamples; i++) {
+      mix[d + i] += strike1[i] * tap.volume;
+    }
+  }
+
+  // Second G4 strike — offset 0.7s, slightly quieter
+  const strike2Offset = Math.floor(0.7 * SAMPLE_RATE);
+  const strike2 = bellTone(392, amp * 0.8, 0.6, decay * 1.1);
+  mixInto(mix, strike2, strike2Offset);
+
+  // Second strike echo trail
+  const echoTaps2 = [
+    { delay: 0.28, volume: 0.18 },
+    { delay: 0.52, volume: 0.07 },
+  ];
+  for (const tap of echoTaps2) {
+    const d = strike2Offset + Math.floor(tap.delay * SAMPLE_RATE);
+    for (let i = 0; i < strike2.length && (d + i) < totalSamples; i++) {
+      mix[d + i] += strike2[i] * tap.volume;
     }
   }
 
