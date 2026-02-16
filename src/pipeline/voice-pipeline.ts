@@ -1304,9 +1304,19 @@ Use channel names (the part before the colon). Do not explain.`,
       return;
     }
 
+    const normalized = this.toSpokenText(lastMsg.content, '').trim();
+    const isVeryShort = normalized.length > 0 && normalized.length < 24;
     const raw = lastMsg.role === 'user'
-      ? `You last said: ${lastMsg.content}`
-      : this.toSpokenText(lastMsg.content, 'Message available.');
+      ? (
+        isVeryShort
+          ? `The last message is short. You said: ${normalized}`
+          : `You last said: ${lastMsg.content}`
+      )
+      : (
+        isVeryShort
+          ? `The last message is short. ${normalized}`
+          : this.toSpokenText(lastMsg.content, 'Message available.')
+      );
     const spoken = raw.length > 900 ? `${raw.slice(0, 900)}...` : raw;
     await this.speakResponse(spoken, { inbox: true });
     await this.playReadyEarcon();
