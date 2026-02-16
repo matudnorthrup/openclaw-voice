@@ -33,7 +33,7 @@ class StubQueueState {
 }
 
 class StubGatewaySync {
-  private readonly messages: any[];
+  private messages: any[];
 
   constructor(messages: any[]) {
     this.messages = messages;
@@ -45,6 +45,10 @@ class StubGatewaySync {
 
   async getHistory(): Promise<{ messages: any[] }> {
     return { messages: this.messages };
+  }
+
+  setMessages(messages: any[]): void {
+    this.messages = messages;
   }
 }
 
@@ -96,9 +100,35 @@ describe('ResponsePoller', () => {
     const poller = new ResponsePoller(queue as any, gateway as any);
 
     await (poller as any).poll();
+    await (poller as any).poll();
 
     expect(queue.item.status).toBe('ready');
     expect(queue.item.responseText).toContain('done');
   });
-});
 
+  it('waits while newer non-assistant activity exists after assistant chunk', async () => {
+    const queue = new StubQueueState(pendingItem(2_000));
+    const gateway = new StubGatewaySync([
+      { role: 'assistant', content: 'partial', timestamp: 2_100 },
+      { role: 'toolResult', content: 'still working', timestamp: 2_200 },
+    ]);
+    const poller = new ResponsePoller(queue as any, gateway as any);
+
+    await (poller as any).poll();
+    await (poller as any).poll();
+    expect(queue.item.status).toBe('pending');
+
+    gateway.setMessages([
+      { role: 'assistant', content: 'partial', timestamp: 2_100 },
+      { role: 'toolResult', content: 'still working', timestamp: 2_200 },
+      { role: 'assistant', content: 'final answer', timestamp: 2_300 },
+    ]);
+
+    await (poller as any).poll();
+    expect(queue.item.status).toBe('pending');
+    await (poller as any).poll();
+    expect(queue.item.status).toBe('ready');
+    expect(queue.item.responseText).toContain('partial');
+    expect(queue.item.responseText).toContain('final answer');
+  });
+});

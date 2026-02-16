@@ -61,6 +61,26 @@ describe('parseVoiceCommand — existing commands still work', () => {
     const result = parseVoiceCommand('Hey Watson, settings', BOT);
     expect(result).toEqual({ type: 'settings' });
   });
+
+  it('noise command with "noise level" phrasing', () => {
+    const result = parseVoiceCommand('Hey Watson, set noise level high', BOT);
+    expect(result).toEqual({ type: 'noise', level: 'high' });
+  });
+
+  it('noise command with numeric "noise level to" phrasing', () => {
+    const result = parseVoiceCommand('Hey Watson, set noise level to 800', BOT);
+    expect(result).toEqual({ type: 'noise', level: '800' });
+  });
+
+  it('delay command with milliseconds suffix', () => {
+    const result = parseVoiceCommand('Hey Watson, set delay 500 milliseconds', BOT);
+    expect(result).toEqual({ type: 'delay', value: 500 });
+  });
+
+  it('delay command with ms suffix', () => {
+    const result = parseVoiceCommand('Hey Watson, set delay to 750 ms', BOT);
+    expect(result).toEqual({ type: 'delay', value: 750 });
+  });
 });
 
 describe('parseVoiceCommand — dispatch command', () => {

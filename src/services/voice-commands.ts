@@ -16,6 +16,7 @@ export type VoiceCommand =
   | { type: 'inbox-clear' }
   | { type: 'read-last-message' }
   | { type: 'voice-status' }
+  | { type: 'voice-channel' }
   | { type: 'gated-mode'; enabled: boolean }
   | { type: 'wake-check' }
   | { type: 'silent-wait' }
@@ -111,14 +112,16 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'default' };
   }
 
-  // "set noise to high", "noise low", "noise 800"
-  const noiseMatch = rest.match(/^(?:set\s+)?noise\s+(?:to\s+)?(.+)$/);
+  // "set noise to high", "set noise level high", "noise low", "noise 800"
+  const noiseMatch = rest.match(/^(?:set\s+)?noise(?:\s+level)?\s+(?:to\s+)?(.+)$/);
   if (noiseMatch) {
     return { type: 'noise', level: noiseMatch[1].trim() };
   }
 
-  // "set delay to 3000", "delay 2000"
-  const delayMatch = rest.match(/^(?:set\s+)?delay\s+(?:to\s+)?(\d+)$/);
+  // "set delay to 3000", "delay 2000", "set delay 500 milliseconds"
+  const delayMatch = rest.match(
+    /^(?:set\s+)?delay\s+(?:to\s+)?(\d+)(?:\s*(?:ms|millisecond|milliseconds))?$/,
+  );
   if (delayMatch) {
     return { type: 'delay', value: parseInt(delayMatch[1], 10) };
   }
@@ -143,6 +146,11 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   // "voice status", "status"
   if (/^(?:voice\s+)?status$/.test(rest)) {
     return { type: 'voice-status' };
+  }
+
+  // "voice channel", "what channel", "which channel", "current channel", "where am I"
+  if (/^(?:(?:voice|what|which|current)\s+channel|where\s+am\s+i|what\s+channel\s+(?:am\s+i\s+(?:in|on)|is\s+this))$/.test(rest)) {
+    return { type: 'voice-channel' };
   }
 
   // "gated mode", "gate on" → enable gated; "open mode", "gate off", "ungated mode" → disable

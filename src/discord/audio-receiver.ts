@@ -47,6 +47,10 @@ export class AudioReceiver {
     console.log('Audio receiver stopped');
   }
 
+  hasActiveSpeech(): boolean {
+    return this.activeSubscriptions.size > 0;
+  }
+
   private subscribeToUser(userId: string): void {
     if (this.activeSubscriptions.has(userId)) return;
     this.activeSubscriptions.add(userId);

@@ -12,9 +12,9 @@ const NOISE_PRESETS: Record<string, number> = {
 };
 
 const settings: VoiceSettingsValues = {
-  silenceDurationMs: 1500,
+  silenceDurationMs: 500,
   speechThreshold: 500,
-  minSpeechDurationMs: 300,
+  minSpeechDurationMs: 600,
   gated: true,
 };
 

@@ -44,6 +44,8 @@ export class VoicePipeline {
   private lastSpokenText: string = '';
   private lastSpokenFullText: string = '';
   private lastSpokenWasSummary = false;
+  private lastPlaybackText: string = '';
+  private lastPlaybackCompletedAt = 0;
   private silentWait = false;
   private gateGraceUntil = 0;
   private promptGraceUntil = 0;
@@ -64,6 +66,7 @@ export class VoicePipeline {
   private failedWakeCueCooldownUntil = 0;
   private missedWakeAnalysisInFlight = false;
   private deferredIdleNotifyTimers = new Map<string, NodeJS.Timeout>();
+  private idleNotifyInFlight = false;
   private dependencyAlertCooldownUntil: Record<'stt' | 'tts', number> = {
     stt: 0,
     tts: 0,
@@ -135,6 +138,46 @@ export class VoicePipeline {
     void this.playFastCue('error');
   }
 
+  private getReadyItemsForSession(sessionKey: string, channelName?: string) {
+    return this.queueState?.getReadyItems().filter(
+      (item) => item.sessionKey === sessionKey || (!!channelName && item.channel === channelName),
+    ) ?? [];
+  }
+
+  private isNonLexicalTranscript(transcript: string): boolean {
+    const text = transcript.trim();
+    if (!text) return true;
+
+    // Whisper markers like "[BLANK_AUDIO]" / "[SOUND]" should never route into
+    // command parsing or prompt dispatch.
+    if (/^(?:\s*\[[a-z0-9_ -]+\]\s*)+$/i.test(text)) return true;
+
+    // If there's no alphabetic signal at all, treat as non-lexical noise.
+    return !/[a-z]/i.test(text);
+  }
+
+  private normalizeForEcho(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private isLikelyPlaybackEcho(transcript: string): boolean {
+    if (matchesWakeWord(transcript, config.botName)) return false;
+    if (!this.lastPlaybackText || !this.lastPlaybackCompletedAt) return false;
+    if (Date.now() - this.lastPlaybackCompletedAt > 15_000) return false;
+
+    const spoken = this.normalizeForEcho(this.lastPlaybackText);
+    const heard = this.normalizeForEcho(transcript);
+    if (!spoken || !heard) return false;
+    if (heard.length < 8) return false;
+    if (heard.split(' ').length < 2) return false;
+
+    return spoken.includes(heard);
+  }
+
   constructor(
     connection: VoiceConnection,
     logChannel?: TextChannel,
@@ -204,6 +247,7 @@ export class VoicePipeline {
       clearTimeout(timer);
     }
     this.deferredIdleNotifyTimers.clear();
+    this.idleNotifyInFlight = false;
     this.stateMachine.destroy();
     console.log('Voice pipeline stopped');
   }
@@ -329,7 +373,7 @@ export class VoicePipeline {
     // For AWAITING states, play listening earcon immediately — no wake word needed,
     // so we know this is a valid interaction before STT even runs
     const stateType = this.stateMachine.getStateType();
-    if (this.stateMachine.isAwaitingState() || stateType === 'INBOX_FLOW') {
+    if (this.stateMachine.isAwaitingState()) {
       // Play immediately here (no fast-cue coalescing) so it can't fire late and
       // preempt a near-immediate spoken command response.
       void this.player.playEarcon('listening');
@@ -368,6 +412,32 @@ export class VoicePipeline {
           return;
         }
         this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+        return;
+      }
+
+      if (this.isNonLexicalTranscript(transcript)) {
+        console.log(`Non-lexical transcript ignored: "${transcript}"`);
+        this.stopWaitingLoop();
+        if (this.stateMachine.isAwaitingState()) {
+          await this.playReadyEarcon();
+        } else if (gatedSpeakingProbe) {
+          keepCurrentState = true;
+        } else {
+          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+        }
+        return;
+      }
+
+      if (this.isLikelyPlaybackEcho(transcript)) {
+        console.log(`Playback echo suppressed: "${transcript}"`);
+        this.stopWaitingLoop();
+        if (this.stateMachine.isAwaitingState()) {
+          await this.playReadyEarcon();
+        } else if (gatedSpeakingProbe) {
+          keepCurrentState = true;
+        } else {
+          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+        }
         return;
       }
 
@@ -436,14 +506,22 @@ export class VoicePipeline {
       // By design in gated mode, interrupting active playback must include wake word.
       if (gatedInterrupt && !hasWakeWord && !gateClosedCueInterrupt && !interruptGraceEligible) {
         console.log(`Gated interrupt rejected (wake word required): "${transcript}"`);
-        keepCurrentState = true;
+        if (gatedSpeakingProbe) {
+          keepCurrentState = true;
+        } else {
+          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+        }
         return;
       }
       if (gatedMode && !inGracePeriod && !hasWakeWord) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
           // Don't stop playback — Watson keeps talking
-          keepCurrentState = true;
+          if (gatedSpeakingProbe) {
+            keepCurrentState = true;
+          } else {
+            this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+          }
           this.cueFailedWakeIfNeeded(transcript);
         } else if (this.pendingWaitCallback) {
           console.log(`Gated: discarded "${transcript}" (wait processing continues)`);
@@ -536,13 +614,28 @@ export class VoicePipeline {
       }
 
       // Fallback command classifier (LLM): catches STT variations that regex misses.
-      const inferredCommand = await this.inferVoiceCommandLLM(transcript, mode, inGracePeriod);
+      // During gated playback interrupts without wake word, avoid LLM command
+      // inference to reduce false positives from cough/noise transcripts.
+      const allowLlmInference = !(gatedInterrupt && !hasWakeWord);
+      const inferredCommand = allowLlmInference
+        ? await this.inferVoiceCommandLLM(transcript, mode, inGracePeriod)
+        : null;
       if (inferredCommand) {
         const resolvedInferred = this.resolveDoneCommandForContext(inferredCommand, transcript);
         console.log(`Voice command detected (LLM): ${resolvedInferred.type}`);
         await this.handleVoiceCommand(resolvedInferred, userId);
         const totalMs = Date.now() - pipelineStart;
         console.log(`Voice command complete: ${totalMs}ms total`);
+        return;
+      }
+
+      // Safety guard: in queue mode, avoid silently dispatching free-form prompts
+      // from open-mic chatter during grace windows. Commands still work via
+      // deterministic/LLM command paths above; prompts require explicit wake.
+      if (mode === 'queue' && inGracePeriod && !hasWakeWord) {
+        console.log(`Queue prompt suppressed (wake required): "${transcript}"`);
+        this.stopWaitingLoop();
+        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
         return;
       }
 
@@ -689,6 +782,9 @@ export class VoicePipeline {
         break;
       case 'voice-status':
         await this.handleVoiceStatus();
+        break;
+      case 'voice-channel':
+        await this.handleVoiceChannel();
         break;
       case 'gated-mode':
         await this.handleGatedMode(command.enabled);
@@ -902,11 +998,10 @@ export class VoicePipeline {
       let responseText: string;
       if (result.success) {
         await this.onChannelSwitch();
+        const activeSessionKey = this.router.getActiveSessionKey();
 
         // Check for queued responses — read them in full
-        const readyItems = this.queueState?.getReadyItems().filter(
-          (i) => i.channel === target,
-        ) ?? [];
+        const readyItems = this.getReadyItemsForSession(activeSessionKey, target);
 
         if (readyItems.length > 0) {
           responseText = `Switched to ${result.displayName || target}.`;
@@ -1126,6 +1221,17 @@ Use channel names (the part before the colon). Do not explain.`,
       `Noise threshold: ${s.speechThreshold}. ` +
       `Minimum speech duration: ${s.minSpeechDurationMs} milliseconds.`,
     );
+    await this.playReadyEarcon();
+  }
+
+  private async handleVoiceChannel(): Promise<void> {
+    if (this.router) {
+      const active = this.router.getActiveChannel();
+      const displayName = (active as any).displayName || active.name;
+      await this.speakResponse(displayName, { inbox: true });
+    } else {
+      await this.speakResponse('No channel active.', { inbox: true });
+    }
     await this.playReadyEarcon();
   }
 
@@ -1455,6 +1561,10 @@ Use channel names (the part before the colon). Do not explain.`,
     if (!getVoiceSettings().gated) return;
     if (this.pendingWaitCallback) return;
     if (this.isBusy() || this.player.isPlaying()) return;
+    if (this.receiver.hasActiveSpeech()) {
+      console.log(`${this.stamp()} Grace period expired during active speech — suppressing gate-closed cue`);
+      return;
+    }
     console.log(`${this.stamp()} Grace period expired — gate closed`);
     void this.playFastCue('gate-closed');
   }
@@ -1547,9 +1657,12 @@ Use channel names (the part before the colon). Do not explain.`,
       systemPrompt: this.router.getSystemPrompt(),
     });
 
-    // Brief confirmation with acknowledged earcon, then speak
+    // Brief confirmation, then immediate inbox status so the user has
+    // deterministic post-queue context before the ready handoff.
     await this.player.playEarcon('acknowledged');
     await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
+    await this.speakInboxQueueStatus();
+    await this.playReadyEarcon();
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
@@ -1622,14 +1735,11 @@ Use channel names (the part before the colon). Do not explain.`,
         const displayName = activeChannel ? ((activeChannel as any).displayName || activeChannel.name) : 'inbox';
         await this.player.playEarcon('acknowledged');
         await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
+        await this.speakInboxQueueStatus();
+        await this.playReadyEarcon();
       } else {
         // No speculative dispatch (fallback) — dispatch now
         await this.handleQueueMode(userId, originalTranscript);
-      }
-
-      // Auto-check inbox after dispatch in ask mode
-      if (this.inboxTracker?.isActive()) {
-        await this.handleInboxCheck();
       }
     } else if (choice === 'silent') {
       // Already dispatched — set silentWait for auto-read
@@ -1733,6 +1843,36 @@ Use channel names (the part before the colon). Do not explain.`,
     console.log('Silent queue: dispatched, playing single tone');
     this.stopWaitingLoop();
     void this.playFastCue('acknowledged');
+  }
+
+  private async speakInboxQueueStatus(): Promise<void> {
+    if (!this.queueState) return;
+
+    const ready = this.queueState.getReadyItems();
+    const pending = this.queueState.getPendingItems();
+
+    const readyByChannel = new Map<string, number>();
+    for (const item of ready) {
+      const label = item.displayName || item.channel;
+      readyByChannel.set(label, (readyByChannel.get(label) ?? 0) + 1);
+    }
+
+    const readyParts: string[] = [];
+    for (const [name, count] of readyByChannel.entries()) {
+      readyParts.push(count > 1 ? `${count} in ${name}` : name);
+    }
+
+    const parts: string[] = [];
+    if (ready.length > 0) {
+      parts.push(`Ready now: ${readyParts.join(', ')}`);
+    } else {
+      parts.push('Zero ready');
+    }
+    if (pending.length > 0) {
+      parts.push(`${pending.length} processing`);
+    }
+
+    await this.speakResponse(parts.join('. ') + '.', { inbox: true });
   }
 
   private async handleSwitchChoiceResponse(transcript: string): Promise<void> {
@@ -2280,9 +2420,7 @@ Use channel names (the part before the colon). Do not explain.`,
     }
 
     // Check for queued responses — read in full if present
-    const readyItems = this.queueState?.getReadyItems().filter(
-      (i) => i.sessionKey === activity.sessionKey,
-    ) ?? [];
+    const readyItems = this.getReadyItemsForSession(activity.sessionKey, activity.channelName);
 
     if (readyItems.length > 0) {
       parts.push(`Switched to ${activity.displayName}.`);
@@ -2433,6 +2571,8 @@ Use channel names (the part before the colon). Do not explain.`,
     this.stopWaitingLoop();
     this.player.stopPlayback('speak-response-preempt');
     await this.player.playStream(ttsStream);
+    this.lastPlaybackText = spokenText;
+    this.lastPlaybackCompletedAt = Date.now();
     this.setGateGrace(5_000);
   }
 
@@ -2508,6 +2648,11 @@ Use channel names (the part before the colon). Do not explain.`,
       this.scheduleDeferredIdleNotify(message, 900);
       return;
     }
+    if (this.idleNotifyInFlight) {
+      console.log(`Idle notify deferred (in-flight): "${message}"`);
+      this.scheduleDeferredIdleNotify(message, 900);
+      return;
+    }
 
     const existing = this.deferredIdleNotifyTimers.get(message);
     if (existing) {
@@ -2524,23 +2669,38 @@ Use channel names (the part before the colon). Do not explain.`,
 
     console.log(`Idle notify: "${message}"`);
     this.logToInbox(`**${config.botName}:** ${message}`);
+    this.idleNotifyInFlight = true;
 
     textToSpeechStream(message)
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
         if (!this.isBusy() && !this.player.isPlaying()) {
+          // Any fresh playback closes old grace windows. This prevents stale
+          // ready-grace from allowing no-wake interruptions mid-notification.
+          this.gateGraceUntil = 0;
+          this.promptGraceUntil = 0;
+          this.clearGraceTimer();
           this.player.playStream(stream)
             .then(async () => {
+              this.lastPlaybackText = message;
+              this.lastPlaybackCompletedAt = Date.now();
               // Make post-notification handoff explicit so "next" feels expected.
               await this.playReadyEarcon();
+              this.idleNotifyInFlight = false;
             })
             .catch((err: any) => {
               console.warn(`Idle notify playback failed: ${err?.message ?? err}`);
+              this.idleNotifyInFlight = false;
             });
+        } else {
+          this.idleNotifyInFlight = false;
+          this.scheduleDeferredIdleNotify(message, 900);
         }
       })
       .catch((err) => {
         console.warn(`Idle notify TTS failed: ${err.message}`);
+        this.idleNotifyInFlight = false;
+        this.scheduleDeferredIdleNotify(message, 1200);
       });
   }
 
@@ -2637,7 +2797,7 @@ Use channel names (the part before the colon). Do not explain.`,
       'Classify spoken assistant input as either a voice command or normal prompt.',
       'Return ONLY minified JSON with keys: intent, confidence, and optional fields channel, body, mode, enabled.',
       'intent must be one of:',
-      'prompt,switch,dispatch,list,default,new-post,mode,inbox-check,inbox-next,inbox-clear,read-last-message,voice-status,gated-mode,wake-check,silent-wait,hear-full-message,pause,replay,earcon-tour',
+      'prompt,switch,dispatch,list,default,noise,delay,delay-adjust,settings,new-post,mode,inbox-check,inbox-next,inbox-clear,read-last-message,voice-status,voice-channel,gated-mode,wake-check,silent-wait,hear-full-message,pause,replay,earcon-tour',
       'confidence must be 0 to 1.',
       'Use prompt if uncertain.',
       'No markdown, no prose.',
@@ -2678,6 +2838,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
     const channel = String((parsed as any).channel ?? (parsed as any).target ?? '').trim();
     const body = String((parsed as any).body ?? (parsed as any).message ?? (parsed as any).text ?? '').trim();
+    const level = String((parsed as any).level ?? '').trim();
     const modeValue = String((parsed as any).mode ?? '').trim().toLowerCase();
     const enabledValue = (parsed as any).enabled;
 
@@ -2691,6 +2852,26 @@ Use channel names (the part before the colon). Do not explain.`,
         return { type: 'inbox-check' };
       case 'default':
         return { type: 'default' };
+      case 'noise':
+        return (level || body) ? { type: 'noise', level: (level || body) } : null;
+      case 'delay': {
+        const digits = body.match(/\d+/)?.[0];
+        if (!digits) return null;
+        return { type: 'delay', value: parseInt(digits, 10) };
+      }
+      case 'delay-adjust':
+        // Classifier may emit delay-adjust with a numeric body for phrases like
+        // "set delay 500 milliseconds". Treat that as absolute delay.
+        if (/\d/.test(body)) {
+          const digits = body.match(/\d+/)?.[0];
+          if (!digits) return null;
+          return { type: 'delay', value: parseInt(digits, 10) };
+        }
+        if (/\blonger\b/.test(body)) return { type: 'delay-adjust', direction: 'longer' };
+        if (/\bshorter\b/.test(body)) return { type: 'delay-adjust', direction: 'shorter' };
+        return null;
+      case 'settings':
+        return { type: 'settings' };
       case 'new-post':
         return { type: 'new-post' };
       case 'mode': {
@@ -2710,6 +2891,8 @@ Use channel names (the part before the colon). Do not explain.`,
         return { type: 'read-last-message' };
       case 'voice-status':
         return { type: 'voice-status' };
+      case 'voice-channel':
+        return { type: 'voice-channel' };
       case 'gated-mode': {
         if (typeof enabledValue === 'boolean') return { type: 'gated-mode', enabled: enabledValue };
         if (modeValue === 'on' || modeValue === 'enabled' || modeValue === 'gated') {

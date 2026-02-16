@@ -33,6 +33,10 @@ let dependencyMonitor: DependencyMonitor | null = null;
 // --- Text command handlers ---
 
 client.on('messageCreate', async (message) => {
+  if (message.author.id === client.user?.id) return;
+
+  await syncDiscordMessageToGateway(message);
+
   if (message.author.bot) return;
 
   if (message.content === '~join') {
@@ -150,6 +154,30 @@ client.on('messageCreate', async (message) => {
     );
   }
 });
+
+async function syncDiscordMessageToGateway(message: any): Promise<void> {
+  if (!gatewaySync || !gatewaySync.isConnected()) return;
+  if (!message.guildId) return;
+  if (message.content.startsWith('~')) return;
+  if (message.content.startsWith('/')) return;
+  if (!message.content.trim()) return;
+  if (!message.channel || !('type' in message.channel)) return;
+
+  // Mirror text/thread messages into per-channel gateway sessions so
+  // voice readback and text channels stay in sync.
+  if (![ChannelType.GuildText, ChannelType.PublicThread, ChannelType.PrivateThread].includes(message.channel.type)) {
+    return;
+  }
+
+  const sessionKey = GatewaySync.sessionKeyForChannel(message.channelId);
+  const label = message.author.bot ? 'discord-assistant' : 'discord-user';
+  const ok = await gatewaySync.inject(sessionKey, message.content.trim(), label);
+  if (!ok) {
+    console.warn(`Gateway text sync failed channel=${message.channelId} label=${label}`);
+  } else {
+    console.log(`Gateway text sync ok channel=${message.channelId} label=${label}`);
+  }
+}
 
 // --- Voice state update: auto-join/leave ---
 

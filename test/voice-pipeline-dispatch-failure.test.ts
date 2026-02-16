@@ -150,4 +150,27 @@ describe('VoicePipeline dispatch failure handling', () => {
 
     pipeline.stop();
   });
+
+  it('ignores non-lexical bracketed transcripts', () => {
+    const pipeline = new VoicePipeline({} as any);
+    expect((pipeline as any).isNonLexicalTranscript('[SOUND]')).toBe(true);
+    expect((pipeline as any).isNonLexicalTranscript('[BLANK_AUDIO]')).toBe(true);
+    expect((pipeline as any).isNonLexicalTranscript('[MUSIC] [NOISE]')).toBe(true);
+    expect((pipeline as any).isNonLexicalTranscript('go to health')).toBe(false);
+    pipeline.stop();
+  });
+
+  it('matches ready items by session key for direct switch clearing', () => {
+    const pipeline = new VoicePipeline({} as any);
+    const queueState = {
+      getReadyItems: vi.fn(() => [
+        { id: 'r1', sessionKey: 'session:health', channel: 'openclaw-health' },
+      ]),
+    };
+    pipeline.setQueueState(queueState as any);
+
+    const items = (pipeline as any).getReadyItemsForSession('session:health', 'health');
+    expect(items).toHaveLength(1);
+    pipeline.stop();
+  });
 });

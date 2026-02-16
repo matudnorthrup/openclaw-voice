@@ -228,7 +228,7 @@ function generateBusy(): Buffer {
   const mix = new Float64Array(samples);
 
   // C4 (262 Hz) — low-mid, audible hum
-  const note = warmBellTone(262, 4000, 0.25, 6);
+  const note = warmBellTone(262, 7000, 0.25, 5);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);
@@ -245,7 +245,7 @@ function generateGateClosed(): Buffer {
   const mix = new Float64Array(samples);
 
   // Single soft A4 (440 Hz) — clearly audible, quick decay
-  const note = warmBellTone(440, 2600, 0.2, 10);
+  const note = warmBellTone(440, 5000, 0.2, 8);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);
