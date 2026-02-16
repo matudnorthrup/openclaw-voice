@@ -294,6 +294,12 @@ export class VoicePipeline {
       return;
     }
 
+    // SPEAKING with active playback is not a stall — long TTS responses are legitimate
+    if (stateType === 'SPEAKING' && (this.player.isPlaying() || this.player.isWaiting())) {
+      this.resetStallWatchdog();
+      return;
+    }
+
     this.stallWatchdogFires++;
     this.counters.stallWatchdogFires++;
     const ageMs = Date.now() - this.lastTransitionAt;
