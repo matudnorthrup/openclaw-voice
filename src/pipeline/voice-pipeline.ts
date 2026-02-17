@@ -1802,7 +1802,8 @@ Use channel names (the part before the colon). Do not explain.`,
     this.session.appendUserMessage(userId, transcript, channelName);
 
     const sessionScopedUser = this.router?.getActiveSessionKey() ?? userId;
-    const { response } = await getResponse(sessionScopedUser, transcript);
+    const resolvedUser = this.gatewaySync?.getResolvedSessionKey(sessionScopedUser) ?? sessionScopedUser;
+    const { response } = await getResponse(resolvedUser, transcript);
     const responseText = response;
 
     this.log(`**${config.botName}:** ${responseText}`, channelName);
@@ -2153,9 +2154,11 @@ Use channel names (the part before the colon). Do not explain.`,
         // happen while this item is processing do not cross-contaminate context.
         await routerRef.refreshHistory(channelName);
         const history = routerRef.getHistory(channelName);
-        // Use sessionKey as LLM user identity so gateway chat session and
-        // websocket sync injects target the same session namespace.
-        const { response, history: updatedHistory } = await getResponse(sessionKey, transcript, {
+        // Use the resolved session key as LLM user identity — the gateway may
+        // have migrated the session to a different key (e.g. after a session
+        // split), and getResponse bypasses GatewaySync's WebSocket layer.
+        const resolvedUser = gatewaySync?.getResolvedSessionKey(sessionKey) ?? sessionKey;
+        const { response, history: updatedHistory } = await getResponse(resolvedUser, transcript, {
           systemPrompt,
           history,
         });

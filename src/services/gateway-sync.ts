@@ -175,6 +175,14 @@ export class GatewaySync {
   // Track which session keys we've already attempted discovery for (avoid repeating)
   private sessionDiscoveryAttempted = new Set<string>();
 
+  /**
+   * Return the resolved session key for a given key (from discovery cache).
+   * Used by callers that bypass GatewaySync for HTTP calls (e.g. getResponse).
+   */
+  getResolvedSessionKey(sessionKey: string): string {
+    return this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+  }
+
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
     // Check if we have a cached alternate session key for this channel
     const resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
