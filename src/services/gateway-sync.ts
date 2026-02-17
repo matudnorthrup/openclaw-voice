@@ -172,6 +172,8 @@ export class GatewaySync {
 
   // Cache resolved session keys: channelId → actual gateway session key
   private sessionKeyCache = new Map<string, string>();
+  // Track which session keys we've already attempted discovery for (avoid repeating)
+  private sessionDiscoveryAttempted = new Set<string>();
 
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
     // Check if we have a cached alternate session key for this channel
@@ -251,7 +253,23 @@ export class GatewaySync {
   }
 
   async getHistory(sessionKey: string, limit?: number): Promise<{ messages: ChatMessage[] } | null> {
-    const resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+    let resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+
+    // Proactive session discovery on first access — handles cases where the gateway
+    // has split a channel into a new session with a different key.  Without this,
+    // getHistory would silently return stale data from the old session.
+    if (resolvedKey === sessionKey && !this.sessionDiscoveryAttempted.has(sessionKey)) {
+      this.sessionDiscoveryAttempted.add(sessionKey);
+      const channelId = this.extractChannelId(sessionKey);
+      if (channelId) {
+        const discovered = await this.discoverSessionForChannel(channelId);
+        if (discovered && discovered !== sessionKey) {
+          console.log(`Gateway history discovery: ${sessionKey} → ${discovered}`);
+          this.sessionKeyCache.set(sessionKey, discovered);
+          resolvedKey = discovered;
+        }
+      }
+    }
 
     try {
       const params: any = { sessionKey: resolvedKey };
