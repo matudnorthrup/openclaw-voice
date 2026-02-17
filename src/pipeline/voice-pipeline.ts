@@ -64,6 +64,8 @@ export class VoicePipeline {
   // Inbox background poll — detects text-originated messages in inbox mode
   private inboxPollTimer: NodeJS.Timeout | null = null;
   private static readonly INBOX_POLL_INTERVAL_MS = 20_000;
+  // Track last-notified stamp per channel to avoid repeat notifications
+  private inboxPollNotifiedStamps = new Map<string, number>();
 
   // Stall watchdog
   private stallWatchdogTimer: NodeJS.Timeout | null = null;
@@ -2285,6 +2287,7 @@ Use channel names (the part before the colon). Do not explain.`,
     if (this.inboxPollTimer) {
       clearInterval(this.inboxPollTimer);
       this.inboxPollTimer = null;
+      this.inboxPollNotifiedStamps.clear();
       console.log('Inbox background poll stopped');
     }
   }
@@ -2300,6 +2303,15 @@ Use channel names (the part before the colon). Do not explain.`,
         // Only notify for channels with new gateway messages (text-originated).
         // Voice-originated responses are handled by ResponsePoller's onReady callback.
         if (activity.newMessageCount > 0 && activity.queuedReadyCount === 0) {
+          // Deduplicate: only notify once per channel until a NEW message arrives
+          // (i.e. the latestStamp changes from what we last notified about).
+          const lastNotified = this.inboxPollNotifiedStamps.get(activity.sessionKey) ?? 0;
+          const latestStamp = activity.newMessages.length > 0
+            ? Math.max(...activity.newMessages.map((m: any) => m.timestamp ?? 0))
+            : 0;
+          if (latestStamp > 0 && latestStamp <= lastNotified) continue;
+
+          this.inboxPollNotifiedStamps.set(activity.sessionKey, latestStamp || Date.now());
           this.notifyIfIdle(`New message in ${activity.displayName}.`);
         }
       }
