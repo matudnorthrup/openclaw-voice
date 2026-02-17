@@ -2704,8 +2704,8 @@ Use channel names (the part before the colon). Do not explain.`,
       .trim();
     const navInput = politeStripped || normalized;
 
-    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on"
-    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(normalized)) {
+    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on", "skip", "skip it", "skip this"
+    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:it|this(?:\s+one)?))?)$/.test(normalized)) {
       return { type: 'inbox-next' };
     }
 
