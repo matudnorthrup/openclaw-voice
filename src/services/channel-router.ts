@@ -163,9 +163,52 @@ export class ChannelRouter {
   async refreshHistory(channelName?: string): Promise<void> {
     const name = channelName ?? this.activeChannelName;
     const seeded = await this.seedHistory(name);
-    if (seeded.length > 0) {
-      this.historyMap.set(name, seeded);
+    if (seeded.length === 0) return;
+
+    const existing = this.historyMap.get(name) || [];
+
+    // Defensive: if the gateway returned drastically fewer messages than we
+    // already have locally, the session was likely truncated by another process
+    // (e.g. the text-chat gateway).  In that case, merge: keep our local
+    // history and append any genuinely new messages from the gateway tail.
+    if (existing.length > 0 && seeded.length < existing.length * 0.5) {
+      const newTail = this.findNewTailMessages(existing, seeded);
+      if (newTail.length > 0) {
+        console.log(`refreshHistory(${name}): gateway returned ${seeded.length} msgs (local has ${existing.length}) — appending ${newTail.length} new tail messages`);
+        this.historyMap.set(name, [...existing, ...newTail]);
+      } else {
+        console.log(`refreshHistory(${name}): gateway returned ${seeded.length} msgs (local has ${existing.length}) — keeping local history (no new messages)`);
+      }
+      return;
     }
+
+    this.historyMap.set(name, seeded);
+  }
+
+  /**
+   * Given our existing local history and a (possibly truncated) gateway seed,
+   * return messages from the gateway seed that aren't already in our local copy.
+   * Matches by content to handle label differences.
+   */
+  private findNewTailMessages(existing: Message[], seeded: Message[]): Message[] {
+    if (seeded.length === 0) return [];
+
+    // Build a set of content fingerprints from the last N existing messages
+    const lookback = Math.min(existing.length, 40);
+    const existingFingerprints = new Set<string>();
+    for (let i = existing.length - lookback; i < existing.length; i++) {
+      existingFingerprints.add(`${existing[i].role}:${existing[i].content.slice(0, 120)}`);
+    }
+
+    // Walk the seeded messages and collect any that aren't in our local history
+    const newMessages: Message[] = [];
+    for (const msg of seeded) {
+      const fp = `${msg.role}:${msg.content.slice(0, 120)}`;
+      if (!existingFingerprints.has(fp)) {
+        newMessages.push(msg);
+      }
+    }
+    return newMessages;
   }
 
   getHistory(channelName?: string): Message[] {
