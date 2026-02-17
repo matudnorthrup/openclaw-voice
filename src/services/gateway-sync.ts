@@ -170,16 +170,72 @@ export class GatewaySync {
     return 'disconnected';
   }
 
+  // Cache resolved session keys: channelId → actual gateway session key
+  private sessionKeyCache = new Map<string, string>();
+
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
+    // Check if we have a cached alternate session key for this channel
+    const resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+
     try {
-      const params: any = { sessionKey, message };
+      const params: any = { sessionKey: resolvedKey, message };
       if (label) params.label = label;
       const result = await this.rpc('chat.inject', params);
       return result;
     } catch (err: any) {
+      // If session not found, try to discover the right session key
+      if (err.message?.includes('session not found') && resolvedKey === sessionKey) {
+        const channelId = this.extractChannelId(sessionKey);
+        if (channelId) {
+          const discovered = await this.discoverSessionForChannel(channelId);
+          if (discovered && discovered !== sessionKey) {
+            console.log(`Gateway session fallback: ${sessionKey} → ${discovered}`);
+            this.sessionKeyCache.set(sessionKey, discovered);
+            // Retry with discovered key
+            try {
+              const params: any = { sessionKey: discovered, message };
+              if (label) params.label = label;
+              const result = await this.rpc('chat.inject', params);
+              return result;
+            } catch (retryErr: any) {
+              console.warn(`GatewaySync inject failed (retry with ${discovered}): ${retryErr.message}`);
+              return null;
+            }
+          }
+        }
+      }
       console.warn(`GatewaySync inject failed: ${err.message}`);
       return null;
     }
+  }
+
+  /**
+   * Given a channel ID, search all gateway sessions for one that references
+   * this channel — handles cases where the gateway created a session with
+   * a different key format than our standard one.
+   */
+  async discoverSessionForChannel(channelId: string): Promise<string | null> {
+    try {
+      const sessions = await this.listSessions();
+      if (!sessions) return null;
+
+      // Look for sessions whose key or channel field contains the channel ID
+      for (const session of sessions) {
+        if (session.key.includes(channelId)) return session.key;
+        if (session.channel && session.channel.includes(channelId)) return session.key;
+      }
+
+      return null;
+    } catch (err: any) {
+      console.warn(`GatewaySync discoverSessionForChannel failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  private extractChannelId(sessionKey: string): string | null {
+    // Extract channel ID from "agent:main:discord:channel:1234567890"
+    const match = sessionKey.match(/channel:(\d+)$/);
+    return match ? match[1] : null;
   }
 
   async listSessions(): Promise<{ key: string; displayName?: string; channel?: string; status?: string }[] | null> {
@@ -195,12 +251,33 @@ export class GatewaySync {
   }
 
   async getHistory(sessionKey: string, limit?: number): Promise<{ messages: ChatMessage[] } | null> {
+    const resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+
     try {
-      const params: any = { sessionKey };
+      const params: any = { sessionKey: resolvedKey };
       if (limit !== undefined) params.limit = limit;
       const result = await this.rpc('chat.history', params);
       return result;
     } catch (err: any) {
+      // If session not found, try to discover the right session key
+      if (err.message?.includes('session not found') && resolvedKey === sessionKey) {
+        const channelId = this.extractChannelId(sessionKey);
+        if (channelId) {
+          const discovered = await this.discoverSessionForChannel(channelId);
+          if (discovered && discovered !== sessionKey) {
+            console.log(`Gateway history fallback: ${sessionKey} → ${discovered}`);
+            this.sessionKeyCache.set(sessionKey, discovered);
+            try {
+              const params: any = { sessionKey: discovered };
+              if (limit !== undefined) params.limit = limit;
+              return await this.rpc('chat.history', params);
+            } catch (retryErr: any) {
+              console.warn(`GatewaySync getHistory failed (retry with ${discovered}): ${retryErr.message}`);
+              return null;
+            }
+          }
+        }
+      }
       console.warn(`GatewaySync getHistory failed: ${err.message}`);
       return null;
     }
