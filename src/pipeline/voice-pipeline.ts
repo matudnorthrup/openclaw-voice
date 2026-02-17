@@ -2616,7 +2616,9 @@ Use channel names (the part before the colon). Do not explain.`,
     }
 
     // "go to X", "switch to X", "switch channel to X", "move channels X"
-    const switchMatch = navInput.match(/^(?:go|switch|change|move)(?:\s+channels?)?(?:\s+to)?\s+(.+)$/);
+    // Also handle STT noise: "we go to X", "let's go to X", bare "to X"
+    const switchMatch = navInput.match(/^(?:(?:we|let'?s)\s+)?(?:go|switch|change|move)(?:\s+channels?)?(?:\s+to)?\s+(.+)$/)
+      ?? navInput.match(/^to\s+(.+)$/);
     if (switchMatch) {
       const target = switchMatch[1].trim().replace(/\s+channel$/, '').trim();
       if (/^(?:inbox|the\s+inbox|my\s+inbox)$/.test(target)) {
