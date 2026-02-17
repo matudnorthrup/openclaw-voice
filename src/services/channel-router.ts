@@ -17,6 +17,7 @@ interface ChannelDef {
   channelId: string;
   topicPrompt: string | null;
   sessionKey?: string;
+  inboxExclude?: boolean;
 }
 
 const channels = JSON.parse(
@@ -375,6 +376,7 @@ export class ChannelRouter {
     let hasDefaultMain = false;
     for (const [name, def] of Object.entries(channels)) {
       if (!def.channelId && !def.sessionKey) continue;
+      if (def.inboxExclude) continue;
       const sessionKey = def.sessionKey
         || (def.channelId ? GatewaySync.sessionKeyForChannel(def.channelId) : GatewaySync.defaultSessionKey);
       if (sessionKey === GatewaySync.defaultSessionKey) {
