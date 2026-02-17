@@ -227,6 +227,10 @@ export class VoicePipeline {
   }
 
   async onChannelSwitch(): Promise<void> {
+    // Discard any deferred wait response from the previous channel — it belongs
+    // to the old context and would be confusing if delivered after the switch.
+    this.clearDeferredWaitRetry();
+
     if (this.router) {
       const routerLogChannel = await this.router.getLogChannel();
       if (routerLogChannel) {
