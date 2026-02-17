@@ -2688,6 +2688,11 @@ Use channel names (the part before the colon). Do not explain.`,
     const ttsStream = await textToSpeechStream(spokenText);
     this.stopWaitingLoop();
     this.player.stopPlayback('speak-response-preempt');
+    // Close any stale grace windows so the gate is closed during playback.
+    // Only wake-word interrupts should stop active TTS; grace reopens after.
+    this.ctx.gateGraceUntil = 0;
+    this.ctx.promptGraceUntil = 0;
+    this.clearGraceTimer();
     await this.player.playStream(ttsStream);
     this.ctx.lastPlaybackText = spokenText;
     this.ctx.lastPlaybackCompletedAt = Date.now();
