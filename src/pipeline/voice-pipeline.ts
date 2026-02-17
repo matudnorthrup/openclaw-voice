@@ -2681,8 +2681,15 @@ Use channel names (the part before the colon). Do not explain.`,
         this.queueState!.markHeard(item.id);
       }
       this.responsePoller?.check();
+    } else if (activity.newMessages.length > 1) {
+      // Multiple new messages — read them all via formatForTTS
+      parts.push(`Switched to ${activity.displayName}.`);
+      const formatted = this.inboxTracker!.formatForTTS(activity.newMessages);
+      if (formatted) {
+        parts.push(formatted);
+      }
     } else {
-      // No queued responses — brief context from last message
+      // Single or no new messages — brief context from last message
       parts.push(this.buildSwitchConfirmation(activity.displayName));
     }
 

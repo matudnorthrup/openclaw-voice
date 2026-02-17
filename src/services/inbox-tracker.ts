@@ -75,11 +75,13 @@ export class InboxTracker {
       // messages (voice-user, voice-assistant) are already handled by the
       // ResponsePoller / QueueState pipeline — counting them here causes
       // self-triggering ghost notifications every time the user speaks.
-      const VOICE_LABELS = new Set(['voice-user', 'voice-assistant']);
+      // discord-assistant messages are text-agent echo responses triggered
+      // by voice injection — they'd cause ghost "New message" notifications.
+      const BOT_LABELS = new Set(['voice-user', 'voice-assistant', 'discord-assistant']);
       const newMessages = allMessages.filter((m, idx) =>
         this.getMessageStamp(m, idx) > baselineStamp
           && m.role !== 'system'
-          && !VOICE_LABELS.has((m as any).label ?? ''),
+          && !BOT_LABELS.has((m as any).label ?? ''),
       );
       const newMessageCount = newMessages.length;
 
