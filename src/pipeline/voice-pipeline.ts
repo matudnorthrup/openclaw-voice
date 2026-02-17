@@ -298,8 +298,9 @@ export class VoicePipeline {
       return;
     }
 
-    // SPEAKING with active playback is not a stall — long TTS responses are legitimate
-    if (stateType === 'SPEAKING' && (this.player.isPlaying() || this.player.isWaiting())) {
+    // Active playback is not a stall — long TTS responses are legitimate
+    // regardless of state (voice commands speak while in PROCESSING).
+    if (this.player.isPlaying() || this.player.isWaiting()) {
       this.resetStallWatchdog();
       return;
     }
