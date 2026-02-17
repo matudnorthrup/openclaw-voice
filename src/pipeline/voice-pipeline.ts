@@ -61,6 +61,10 @@ export class VoicePipeline {
   // Classifier state
   private lastClassifierTimedOut = false;
 
+  // Inbox background poll — detects text-originated messages in inbox mode
+  private inboxPollTimer: NodeJS.Timeout | null = null;
+  private static readonly INBOX_POLL_INTERVAL_MS = 20_000;
+
   // Stall watchdog
   private stallWatchdogTimer: NodeJS.Timeout | null = null;
   private lastTransitionAt = Date.now();
@@ -275,6 +279,7 @@ export class VoicePipeline {
     }
     this.deferredIdleNotifyTimers.clear();
     this.idleNotifyRetryCount.clear();
+    this.stopInboxPoll();
   }
 
   private transitionAndResetWatchdog(event: PipelineEvent): TransitionEffect[] {
@@ -2254,6 +2259,46 @@ Use channel names (the part before the colon). Do not explain.`,
     };
     await this.speakResponse(labels[mode], { inbox: true });
     await this.playReadyEarcon();
+
+    // Start/stop background inbox poll based on mode
+    if (mode === 'queue' || mode === 'ask') {
+      this.startInboxPoll();
+    } else {
+      this.stopInboxPoll();
+    }
+  }
+
+  private startInboxPoll(): void {
+    if (this.inboxPollTimer) return;
+    this.inboxPollTimer = setInterval(() => void this.pollInboxForTextActivity(), VoicePipeline.INBOX_POLL_INTERVAL_MS);
+    console.log(`Inbox background poll started (every ${VoicePipeline.INBOX_POLL_INTERVAL_MS / 1000}s)`);
+  }
+
+  private stopInboxPoll(): void {
+    if (this.inboxPollTimer) {
+      clearInterval(this.inboxPollTimer);
+      this.inboxPollTimer = null;
+      console.log('Inbox background poll stopped');
+    }
+  }
+
+  private async pollInboxForTextActivity(): Promise<void> {
+    if (!this.inboxTracker?.isActive() || !this.router) return;
+
+    try {
+      const channels = this.router.getAllChannelSessionKeys();
+      const activities = await this.inboxTracker.checkInbox(channels);
+
+      for (const activity of activities) {
+        // Only notify for channels with new gateway messages (text-originated).
+        // Voice-originated responses are handled by ResponsePoller's onReady callback.
+        if (activity.newMessageCount > 0 && activity.queuedReadyCount === 0) {
+          this.notifyIfIdle(`New message in ${activity.displayName}.`);
+        }
+      }
+    } catch (err: any) {
+      console.warn(`Inbox background poll error: ${err.message}`);
+    }
   }
 
   private async handleGatedMode(enabled: boolean): Promise<void> {
