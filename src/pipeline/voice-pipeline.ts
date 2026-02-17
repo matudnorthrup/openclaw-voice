@@ -653,6 +653,34 @@ export class VoicePipeline {
           void this.maybeCueMissedWakeFromLLM(transcript, mode, inGracePeriod);
           // Don't stop waiting loop — pending wait callback is active
           this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        } else if (mode !== 'wait') {
+          // In queue/ask mode, allow bare navigation commands (next, inbox check,
+          // etc.) through the gate without requiring the wake word.  This lets
+          // the user respond to notifications naturally.
+          const bareCommand = this.matchBareQueueCommand(transcript);
+          if (bareCommand) {
+            const resolved = this.resolveDoneCommandForContext(bareCommand, transcript);
+            console.log(`Gate bypass (${mode} mode bare command): ${resolved.type}`);
+            void this.playFastCue('listening');
+            await this.handleVoiceCommand(resolved, userId);
+            return;
+          } else {
+            console.log(`Gated: discarded "${transcript}" (no bare command match in ${mode} mode)`);
+            if (this.looksLikeBareCommandAttempt(transcript)) {
+              const now = Date.now();
+              if (now >= this.ctx.failedWakeCueCooldownUntil) {
+                this.ctx.failedWakeCueCooldownUntil = now + 1500;
+                console.log('Failed command attempt without wake word: emitting error earcon');
+                void this.playFastCue('error');
+              }
+            } else {
+              this.cueFailedWakeIfNeeded(transcript);
+              void this.maybeCueMissedWakeFromLLM(transcript, mode, inGracePeriod);
+            }
+            this.stopWaitingLoop();
+            this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+            return;
+          }
         } else {
           console.log(`Gated: discarded "${transcript}"`);
           if (this.looksLikeBareCommandAttempt(transcript)) {
