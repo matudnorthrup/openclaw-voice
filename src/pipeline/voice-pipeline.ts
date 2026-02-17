@@ -2778,6 +2778,11 @@ Use channel names (the part before the colon). Do not explain.`,
       this.scheduleDeferredIdleNotify(message, 900);
       return;
     }
+    if (this.receiver.hasActiveSpeech()) {
+      console.log(`Idle notify deferred (active speech): "${message}"`);
+      this.scheduleDeferredIdleNotify(message, 1500);
+      return;
+    }
 
     const existing = this.deferredIdleNotifyTimers.get(message);
     if (existing) {
@@ -2799,7 +2804,7 @@ Use channel names (the part before the colon). Do not explain.`,
     textToSpeechStream(message)
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
-        if (!this.isBusy() && !this.player.isPlaying()) {
+        if (!this.isBusy() && !this.player.isPlaying() && !this.receiver.hasActiveSpeech()) {
           // Any fresh playback closes old grace windows. This prevents stale
           // ready-grace from allowing no-wake interruptions mid-notification.
           this.ctx.gateGraceUntil = 0;
