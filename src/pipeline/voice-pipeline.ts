@@ -56,6 +56,10 @@ export class VoicePipeline {
   private graceExpiryTimer: NodeJS.Timeout | null = null;
   private deferredWaitRetryTimer: NodeJS.Timeout | null = null;
   private deferredIdleNotifyTimers = new Map<string, NodeJS.Timeout>();
+  private idleNotifyRetryCount = new Map<string, number>();
+
+  // Classifier state
+  private lastClassifierTimedOut = false;
 
   // Stall watchdog
   private stallWatchdogTimer: NodeJS.Timeout | null = null;
@@ -270,6 +274,7 @@ export class VoicePipeline {
       clearTimeout(timer);
     }
     this.deferredIdleNotifyTimers.clear();
+    this.idleNotifyRetryCount.clear();
   }
 
   private transitionAndResetWatchdog(event: PipelineEvent): TransitionEffect[] {
@@ -726,6 +731,7 @@ export class VoicePipeline {
       if (allowLlmInference && !runClassifier) {
         console.log('Skipping LLM command classifier for likely prompt utterance');
       }
+      this.lastClassifierTimedOut = false;
       const inferredCommand = runClassifier
         ? await this.inferVoiceCommandLLM(transcript, mode, inGracePeriod)
         : null;
@@ -736,6 +742,23 @@ export class VoicePipeline {
         const totalMs = Date.now() - pipelineStart;
         console.log(`Voice command complete: ${totalMs}ms total`);
         return;
+      }
+
+      // Guard: discard likely-noise utterances that reached the prompt handler
+      // without wake word.  When the classifier timed out we have zero signal —
+      // short fragments are almost certainly filler ("Bye", "Mm", half-sentences).
+      // Even without a timeout, single-word non-commands are never useful prompts.
+      if (!hasWakeWord) {
+        const wordCount = transcript.trim().split(/\s+/).filter(Boolean).length;
+        const threshold = this.lastClassifierTimedOut ? 5 : 2;
+        if (wordCount < threshold) {
+          console.log(
+            `Discarding short non-command utterance (${wordCount} words, classifierTimeout=${this.lastClassifierTimedOut}): "${transcript.trim()}"`,
+          );
+          void this.playFastCue('error');
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+          return;
+        }
       }
 
       if (Date.now() < this.ctx.newPostTimeoutPromptGuardUntil) {
@@ -2778,7 +2801,11 @@ Use channel names (the part before the colon). Do not explain.`,
     if (blockOnBusy || this.player.isPlaying()) {
       // Use a longer retry when actively playing to avoid log spam during long TTS
       const retryMs = this.player.isPlaying() ? 5000 : 900;
-      console.log(`Idle notify skipped (busy): "${message}"`);
+      const retryNum = (this.idleNotifyRetryCount.get(message) ?? 0) + 1;
+      this.idleNotifyRetryCount.set(message, retryNum);
+      if (retryNum <= 1 || retryNum % 10 === 0) {
+        console.log(`Idle notify skipped (busy, attempt ${retryNum}): "${message}"`);
+      }
       this.scheduleDeferredIdleNotify(message, retryMs);
       return;
     }
@@ -2806,7 +2833,13 @@ Use channel names (the part before the colon). Do not explain.`,
       return;
     }
 
-    console.log(`Idle notify: "${message}"`);
+    const retries = this.idleNotifyRetryCount.get(message) ?? 0;
+    if (retries > 0) {
+      console.log(`Idle notify: "${message}" (after ${retries} retries)`);
+    } else {
+      console.log(`Idle notify: "${message}"`);
+    }
+    this.idleNotifyRetryCount.delete(message);
     this.logToInbox(`**${config.botName}:** ${message}`);
     this.ctx.idleNotifyInFlight = true;
 
@@ -2965,6 +2998,9 @@ Use channel names (the part before the colon). Do not explain.`,
       ]);
     } catch (err: any) {
       console.warn(`LLM command classifier failed: ${err.message}`);
+      if (err.message?.includes('timeout')) {
+        this.lastClassifierTimedOut = true;
+      }
       return null;
     }
 
