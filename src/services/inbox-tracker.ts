@@ -71,10 +71,24 @@ export class InboxTracker {
         snapshots[ch.sessionKey] = baselineStamp;
         snapshotsChanged = true;
       }
+      // Only count genuinely external messages as "new".  Voice-originated
+      // messages (voice-user, voice-assistant) are already handled by the
+      // ResponsePoller / QueueState pipeline — counting them here causes
+      // self-triggering ghost notifications every time the user speaks.
+      const VOICE_LABELS = new Set(['voice-user', 'voice-assistant']);
       const newMessages = allMessages.filter((m, idx) =>
-        this.getMessageStamp(m, idx) > baselineStamp && m.role !== 'system',
+        this.getMessageStamp(m, idx) > baselineStamp
+          && m.role !== 'system'
+          && !VOICE_LABELS.has((m as any).label ?? ''),
       );
       const newMessageCount = newMessages.length;
+
+      // Auto-advance baseline past voice-only activity so the snapshot doesn't
+      // fall behind and re-scan the same filtered-out messages every poll cycle.
+      if (newMessageCount === 0 && latestStamp > baselineStamp) {
+        snapshots[ch.sessionKey] = latestStamp;
+        snapshotsChanged = true;
+      }
 
       // Get queued ready items for this channel
       const readyItems = this.queueState.getReadyItems().filter((i) => i.sessionKey === ch.sessionKey);
