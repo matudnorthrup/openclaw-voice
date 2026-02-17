@@ -27,14 +27,17 @@ export class InboxTracker {
 
   async activate(channels: ChannelInfo[]): Promise<void> {
     const snapshots: Record<string, number> = {};
+    const now = Date.now();
 
-    // Snapshot at zero — all existing channel activity is "unread"
+    // Initialize snapshots to current time — only messages arriving AFTER
+    // activation will be treated as "new".  A zero baseline would cause every
+    // existing message in every channel to appear unread (ghost notifications).
     for (const ch of channels) {
-      snapshots[ch.sessionKey] = 0;
+      snapshots[ch.sessionKey] = now;
     }
 
     this.queueState.setSnapshots(snapshots);
-    console.log(`InboxTracker: activated with ${Object.keys(snapshots).length} channel snapshots`);
+    console.log(`InboxTracker: activated with ${Object.keys(snapshots).length} channel snapshots (baseline=${now})`);
   }
 
   deactivate(): void {
@@ -58,8 +61,10 @@ export class InboxTracker {
       const latestStamp = allMessages.length > 0
         ? this.getMessageStamp(allMessages[allMessages.length - 1], allMessages.length - 1)
         : 0;
-      // Legacy migration: old snapshots were capped message counts (e.g. 40).
-      const baselineStamp = rawBaseline > 0 && rawBaseline < 1_000_000_000_000
+      // Migration: snapshots that are 0 (never visited) or legacy capped message
+      // counts (e.g. 40) aren't real timestamps — reset to the latest so we only
+      // track genuinely new messages going forward.
+      const baselineStamp = rawBaseline < 1_000_000_000_000
         ? latestStamp
         : rawBaseline;
       if (baselineStamp !== rawBaseline) {
