@@ -2285,10 +2285,27 @@ Use channel names (the part before the colon). Do not explain.`,
           }
         }
 
-        const failureText = 'I could not complete that request because the gateway connection failed. Please try again.';
-        queueRef.markReady(queueItemId, 'Dispatch failed: gateway connection error.', failureText);
-        pollerRef?.check();
-        this.notifyIfIdle(`Dispatch failed for ${displayName}.`);
+        // Classify the error for a useful spoken message
+        const msg = err.message?.toLowerCase() ?? '';
+        const isNetwork = msg.includes('fetch failed') || msg.includes('econnrefused')
+          || msg.includes('timeout') || msg.includes('enotfound');
+        const reason = isNetwork
+          ? 'A network error occurred.'
+          : `The gateway returned an error.`;
+        const spokenError = `Sorry, that didn't go through. ${reason} You may need to repeat that.`;
+
+        // Speak the failure directly — the user is actively waiting
+        this.stopWaitingLoop();
+        this.player.stopPlayback('dispatch-failure');
+        try {
+          this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
+          await this.speakResponse(spokenError);
+          this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
+          await this.playReadyEarcon();
+        } catch {
+          // Last resort: fall back to idle notify
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        }
       }
     })();
 
