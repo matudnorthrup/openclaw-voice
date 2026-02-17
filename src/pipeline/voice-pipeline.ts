@@ -2142,6 +2142,11 @@ Use channel names (the part before the colon). Do not explain.`,
     const gatewaySync = this.gatewaySync;
     const session = this.session;
 
+    // Set cool-down BEFORE the LLM call so inbox poll ignores any messages
+    // created in this gateway session during processing (getResponse creates
+    // unlabeled chat API messages that would otherwise trigger notifications).
+    this.recentVoiceDispatchChannels.set(sessionKey, Date.now());
+
     void (async () => {
       try {
         // Use the originating channel snapshot for history so switches that
@@ -2248,6 +2253,8 @@ Use channel names (the part before the colon). Do not explain.`,
             const count = await this.getCurrentMessageCount(sessionKey);
             this.inboxTracker.markSeen(sessionKey, count);
           }
+          // Refresh cool-down so it covers text-agent echo responses
+          this.recentVoiceDispatchChannels.set(sessionKey, Date.now());
         }
 
         pollerRef?.check();

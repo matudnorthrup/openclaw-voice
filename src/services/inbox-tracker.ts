@@ -71,17 +71,14 @@ export class InboxTracker {
         snapshots[ch.sessionKey] = baselineStamp;
         snapshotsChanged = true;
       }
-      // Only count genuinely external messages as "new".  Voice-originated
-      // messages (voice-user, voice-assistant) are already handled by the
-      // ResponsePoller / QueueState pipeline — counting them here causes
-      // self-triggering ghost notifications every time the user speaks.
-      // discord-assistant messages are text-agent echo responses triggered
-      // by voice injection — they'd cause ghost "New message" notifications.
-      const BOT_LABELS = new Set(['voice-user', 'voice-assistant', 'discord-assistant']);
+      // Only count messages labeled 'discord-user' as "new".  These represent
+      // genuine human activity in Discord text channels.  Everything else is
+      // either voice-originated (voice-user, voice-assistant), bot/text-agent
+      // responses (discord-assistant, unlabeled gateway chat API messages), or
+      // system messages — none of which should trigger inbox notifications.
       const newMessages = allMessages.filter((m, idx) =>
         this.getMessageStamp(m, idx) > baselineStamp
-          && m.role !== 'system'
-          && !BOT_LABELS.has((m as any).label ?? ''),
+          && (m as any).label === 'discord-user',
       );
       const newMessageCount = newMessages.length;
 
