@@ -2886,6 +2886,18 @@ Use channel names (the part before the colon). Do not explain.`,
       this.scheduleDeferredIdleNotify(message, delayMs);
       return;
     }
+    // Wait-mode dispatches are fire-and-forget — the state machine goes back
+    // to IDLE while the LLM is still processing.  Treat this as busy so that
+    // notifications don't play on top of the pending response delivery.
+    if (this.ctx.pendingWaitCallback) {
+      const retryNum = (this.idleNotifyRetryCount.get(message) ?? 0) + 1;
+      this.idleNotifyRetryCount.set(message, retryNum);
+      if (retryNum <= 1 || retryNum % 10 === 0) {
+        console.log(`Idle notify skipped (pending wait, attempt ${retryNum}): "${message}"`);
+      }
+      this.scheduleDeferredIdleNotify(message, 2000);
+      return;
+    }
     // INBOX_FLOW is an "awaiting user" context; treat it as idle enough for
     // queue-ready notifications so responses don't get silently suppressed.
     const stateType = this.stateMachine.getStateType();
