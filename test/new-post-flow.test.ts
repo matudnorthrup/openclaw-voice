@@ -1,8 +1,8 @@
 /**
  * Layer 7: New Post Flow Tests
  *
- * Verifies the three-step guided forum post creation:
- *   forum → title → body → create
+ * Verifies the two-step guided forum post creation:
+ *   forum → title → create (title used as activation body)
  * Plus cancel at each step, timeout, post-timeout prompt guard,
  * forum not found, no forums, and creation failure.
  */
@@ -181,7 +181,7 @@ describe('Layer 7: New Post Flow', () => {
 
   // ── 7.1: Full happy path ────────────────────────────────────────────
 
-  it('7.1 — full happy path: forum → title → body → post created', async () => {
+  it('7.1 — full happy path: forum → title → post created', async () => {
     const { pipeline, router } = makePipeline();
 
     // Step 1: Start new post flow
@@ -197,21 +197,13 @@ describe('Layer 7: New Post Flow', () => {
     earconHistory.length = 0;
     playerCalls.length = 0;
 
-    // Step 3: Give the title
+    // Step 3: Give the title — creates post immediately (title used as activation body)
     await simulateUtterance(pipeline, 'Fix the login page');
-    expect(getState(pipeline)).toBe('NEW_POST_FLOW');
-    expect(earconHistory).toContain('acknowledged');
-
-    earconHistory.length = 0;
-    playerCalls.length = 0;
-
-    // Step 4: Give the body — creates post and falls through to LLM
-    await simulateUtterance(pipeline, 'The login page shows a blank screen on mobile');
 
     expect(router.createForumPost).toHaveBeenCalledWith(
       'forum-1',
       'Fix the login page',
-      'The login page shows a blank screen on mobile',
+      'Fix the login page',
     );
     expect(earconHistory).toContain('acknowledged');
     expect(getState(pipeline)).toBe('IDLE');
@@ -251,26 +243,6 @@ describe('Layer 7: New Post Flow', () => {
     earconHistory.length = 0;
 
     await simulateUtterance(pipeline, 'nevermind');
-
-    expect(earconHistory).toContain('cancelled');
-    expect(getState(pipeline)).toBe('IDLE');
-
-    pipeline.stop();
-  });
-
-  // ── 7.4: Cancel at body step ────────────────────────────────────────
-
-  it('7.4 — cancel at body step exits flow', async () => {
-    const { pipeline } = makePipeline();
-
-    await simulateUtterance(pipeline, 'Watson, create a new post');
-    await simulateUtterance(pipeline, 'bugs');
-    await simulateUtterance(pipeline, 'Fix login');
-    expect(getState(pipeline)).toBe('NEW_POST_FLOW');
-
-    earconHistory.length = 0;
-
-    await simulateUtterance(pipeline, 'forget it');
 
     expect(earconHistory).toContain('cancelled');
     expect(getState(pipeline)).toBe('IDLE');
@@ -341,15 +313,14 @@ describe('Layer 7: New Post Flow', () => {
     const { pipeline, router } = makePipeline();
     router.createForumPost.mockResolvedValue({ success: false, error: 'Permission denied' });
 
-    // Go through full flow
+    // Go through full flow (forum → title triggers creation)
     await simulateUtterance(pipeline, 'Watson, create a new post');
     await simulateUtterance(pipeline, 'bugs');
-    await simulateUtterance(pipeline, 'Fix login');
 
     earconHistory.length = 0;
     playerCalls.length = 0;
 
-    await simulateUtterance(pipeline, 'The login page is broken');
+    await simulateUtterance(pipeline, 'Fix login');
 
     expect(router.createForumPost).toHaveBeenCalled();
     expect(playerCalls).toContain('playStream'); // error message

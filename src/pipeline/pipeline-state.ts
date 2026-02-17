@@ -58,7 +58,7 @@ export interface AwaitingSwitchChoiceState {
 
 export interface NewPostFlowState {
   type: 'NEW_POST_FLOW';
-  step: 'forum' | 'title' | 'body';
+  step: 'forum' | 'title';
   forumId?: string;
   forumName?: string;
   title?: string;
@@ -106,8 +106,8 @@ export type PipelineEvent =
   | { type: 'ENTER_CHANNEL_SELECTION'; options: ChannelOption[]; timeoutMs?: number }
   | { type: 'ENTER_QUEUE_CHOICE'; userId: string; transcript: string; timeoutMs?: number }
   | { type: 'ENTER_SWITCH_CHOICE'; lastMessage: string; timeoutMs?: number }
-  | { type: 'ENTER_NEW_POST_FLOW'; step: 'forum' | 'title' | 'body'; forumId?: string; forumName?: string; title?: string; timeoutMs?: number }
-  | { type: 'NEW_POST_ADVANCE'; step: 'forum' | 'title' | 'body'; forumId?: string; forumName?: string; title?: string; timeoutMs?: number }
+  | { type: 'ENTER_NEW_POST_FLOW'; step: 'forum' | 'title'; forumId?: string; forumName?: string; title?: string; timeoutMs?: number }
+  | { type: 'NEW_POST_ADVANCE'; step: 'forum' | 'title'; forumId?: string; forumName?: string; title?: string; timeoutMs?: number }
   | { type: 'ENTER_INBOX_FLOW'; items: any[]; returnChannel?: string | null }
   | { type: 'INBOX_ADVANCE' }
   | { type: 'AWAITING_INPUT_RECEIVED'; recognized: boolean }
@@ -253,7 +253,7 @@ export class PipelineStateMachine {
       case 'ENTER_NEW_POST_FLOW': {
         this.clearTimers();
         const contract = getInteractionContractById(
-          event.step === 'forum' ? 'new-post-forum' : event.step === 'title' ? 'new-post-title' : 'new-post-body',
+          event.step === 'forum' ? 'new-post-forum' : 'new-post-title',
         );
         const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {
@@ -273,7 +273,7 @@ export class PipelineStateMachine {
       case 'NEW_POST_ADVANCE': {
         this.clearTimers();
         const contract = getInteractionContractById(
-          event.step === 'forum' ? 'new-post-forum' : event.step === 'title' ? 'new-post-title' : 'new-post-body',
+          event.step === 'forum' ? 'new-post-forum' : 'new-post-title',
         );
         const timeoutMs = event.timeoutMs ?? contract.defaultTimeoutMs;
         this.state = {

@@ -321,17 +321,6 @@ describe('PipelineStateMachine', () => {
       });
       expect(sm.getNewPostFlowState()?.step).toBe('title');
       expect(sm.getNewPostFlowState()?.forumId).toBe('forum1');
-
-      sm.transition({
-        type: 'NEW_POST_ADVANCE',
-        step: 'body',
-        forumId: 'forum1',
-        forumName: 'General',
-        title: 'My Post',
-        timeoutMs: 60000,
-      });
-      expect(sm.getNewPostFlowState()?.step).toBe('body');
-      expect(sm.getNewPostFlowState()?.title).toBe('My Post');
     });
 
     it('reprompts correctly per step', () => {
@@ -342,10 +331,6 @@ describe('PipelineStateMachine', () => {
       sm.transition({ type: 'NEW_POST_ADVANCE', step: 'title', forumId: 'f1', timeoutMs: 30000 });
       effects = sm.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
       expect(effects).toContainEqual({ type: 'speak', text: 'Say the title, or cancel.' });
-
-      sm.transition({ type: 'NEW_POST_ADVANCE', step: 'body', forumId: 'f1', title: 'T', timeoutMs: 60000 });
-      effects = sm.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
-      expect(effects).toContainEqual({ type: 'speak', text: 'Say the prompt, or cancel.' });
     });
 
     it('fires timeout warning before expiry', () => {
@@ -360,13 +345,6 @@ describe('PipelineStateMachine', () => {
       expect(timeoutEffects[0]).toContainEqual({ type: 'earcon', name: 'timeout-warning' });
     });
 
-    it('uses contract default timeout for body step', () => {
-      sm.transition({
-        type: 'ENTER_NEW_POST_FLOW',
-        step: 'body',
-      });
-      expect(sm.getNewPostFlowState()?.timeoutMs).toBe(180000);
-    });
   });
 
   describe('INBOX_FLOW', () => {

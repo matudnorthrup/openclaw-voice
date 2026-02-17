@@ -569,15 +569,10 @@ export class VoicePipeline {
       if (this.stateMachine.getNewPostFlowState()) {
         const flowState = this.stateMachine.getNewPostFlowState()!;
         console.log(`New-post flow (${flowState.step}): "${transcript}"`);
-        const fallThrough = await this.handleNewPostStep(transcript);
-        if (!fallThrough) {
-          const totalMs = Date.now() - pipelineStart;
-          console.log(`Voice command (new-post flow) complete: ${totalMs}ms total`);
-          return;
-        }
-        // Body step completed — fall through to LLM with body as transcript
-        transcript = fallThrough;
-        console.log('New-post flow complete — falling through to LLM');
+        await this.handleNewPostStep(transcript);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command (new-post flow) complete: ${totalMs}ms total`);
+        return;
       }
 
       // Gate check: in gated mode, discard utterances that don't start with the wake word
@@ -940,9 +935,9 @@ export class VoicePipeline {
     await this.playReadyEarcon();
   }
 
-  private async handleNewPostStep(transcript: string): Promise<string | null> {
+  private async handleNewPostStep(transcript: string): Promise<void> {
     const flowState = this.stateMachine.getNewPostFlowState();
-    if (!flowState || !this.router) return null;
+    if (!flowState || !this.router) return;
 
     const { step } = flowState;
 
@@ -954,7 +949,7 @@ export class VoicePipeline {
         const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
-        return null;
+        return;
       }
 
       const match = this.router.findForumChannel(input);
@@ -962,7 +957,7 @@ export class VoicePipeline {
         await this.repromptAwaiting();
         await this.speakResponse(`I couldn't find a forum matching "${transcript}". Try again, or say cancel.`);
         await this.playReadyEarcon();
-        return null;
+        return;
       }
 
       this.transitionAndResetWatchdog({
@@ -975,7 +970,7 @@ export class VoicePipeline {
       await this.player.playEarcon('acknowledged');
       await this.speakResponse(`Got it, ${match.name}. What should the post be called?`);
       await this.playReadyEarcon();
-      return null;
+      return;
     }
 
     if (step === 'title') {
@@ -985,51 +980,31 @@ export class VoicePipeline {
         const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
-        return null;
+        return;
       }
 
-      this.transitionAndResetWatchdog({
-        type: 'NEW_POST_ADVANCE',
-        step: 'body',
-        forumId: flowState.forumId,
-        forumName: flowState.forumName,
-        title: input,
-      });
-
-      await this.player.playEarcon('acknowledged');
-      await this.speakResponse(`Title: ${input}. What's the prompt?`);
-      await this.playReadyEarcon();
-      return null;
-    }
-
-    if (step === 'body') {
-      const body = transcript.trim();
-
-      if (this.isCancelIntent(body)) {
-        const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
-        await this.applyEffects(effects);
-        await this.speakResponse('Cancelled.');
-        return null;
-      }
-
-      const { forumId, forumName, title } = flowState;
+      const { forumId, forumName } = flowState;
       this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
 
-      const result = await this.router.createForumPost(forumId!, title!, body);
+      // Create the thread immediately using the title as the activation body.
+      // Previously a separate "body" step collected a prompt that doubled as
+      // both the thread's initial Discord message and the first LLM dispatch,
+      // but the gateway inject would fail on that first round because the
+      // agent hadn't bootstrapped the session yet. By skipping the body step
+      // and letting the user speak their prompt naturally afterward, the first
+      // real interaction goes through the normal voice flow.
+      const result = await this.router.createForumPost(forumId!, input, input);
       if (result.success) {
         await this.onChannelSwitch();
-        console.log(`Created forum post "${title}" in ${result.forumName}, switched to thread ${result.threadId}`);
+        console.log(`Created forum post "${input}" in ${result.forumName}, switched to thread ${result.threadId}`);
         await this.player.playEarcon('acknowledged');
-        await this.speakResponse(`Created ${title} in ${forumName}. You're now in the new thread.`);
-        // Return body so pipeline falls through to LLM
-        return body;
+        await this.speakResponse(`Created ${input} in ${forumName}. Go ahead.`);
+        await this.playReadyEarcon();
       } else {
         console.warn(`Forum post creation failed: ${result.error}`);
         await this.speakResponse(`Sorry, I couldn't create the post. ${result.error}`);
       }
     }
-
-    return null;
   }
 
   private isCancelIntent(text: string): boolean {

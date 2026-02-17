@@ -6,7 +6,6 @@ export type InteractionContractId =
   | 'switch-choice'
   | 'new-post-forum'
   | 'new-post-title'
-  | 'new-post-body'
   | 'inbox-flow';
 
 export interface InteractionContract {
@@ -65,15 +64,6 @@ export const INTERACTION_CONTRACTS: Record<InteractionContractId, InteractionCon
     feedbackOnRecognized: 'acknowledged',
     readyCueAfterHandling: true,
   },
-  'new-post-body': {
-    id: 'new-post-body',
-    defaultTimeoutMs: 180_000,
-    repromptText: 'Say the prompt, or cancel.',
-    timeoutText: 'New post flow timed out.',
-    acceptedIntents: ['body', 'cancel'],
-    feedbackOnRecognized: 'acknowledged',
-    readyCueAfterHandling: true,
-  },
   'inbox-flow': {
     id: 'inbox-flow',
     defaultTimeoutMs: 120_000,
@@ -99,8 +89,7 @@ export function getInteractionContractForState(state: PipelineState): Interactio
       return INTERACTION_CONTRACTS['switch-choice'];
     case 'NEW_POST_FLOW':
       if (state.step === 'forum') return INTERACTION_CONTRACTS['new-post-forum'];
-      if (state.step === 'title') return INTERACTION_CONTRACTS['new-post-title'];
-      return INTERACTION_CONTRACTS['new-post-body'];
+      return INTERACTION_CONTRACTS['new-post-title'];
     case 'INBOX_FLOW':
       return INTERACTION_CONTRACTS['inbox-flow'];
     default:
