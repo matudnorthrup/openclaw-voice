@@ -2273,6 +2273,18 @@ Use channel names (the part before the colon). Do not explain.`,
         console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
         // Clear pending wait state so the pipeline doesn't get stuck forever
         this.cancelPendingWait(`dispatch failed: ${err.message}`);
+
+        // Best-effort: inject the user message into the gateway so the text
+        // agent at least sees what was said, even though the LLM call failed.
+        if (gatewaySync?.isConnected()) {
+          try {
+            await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+            console.log(`Gateway inject (failed dispatch recovery) voice-user ok for ${queueItemId}`);
+          } catch {
+            // Already in error path — don't mask the original failure
+          }
+        }
+
         const failureText = 'I could not complete that request because the gateway connection failed. Please try again.';
         queueRef.markReady(queueItemId, 'Dispatch failed: gateway connection error.', failureText);
         pollerRef?.check();
