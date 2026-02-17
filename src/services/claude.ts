@@ -17,7 +17,25 @@ export interface GetResponseResult {
 }
 
 const MAX_HISTORY = 20;
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1500;
 const conversations = new Map<string, Message[]>();
+
+async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (err: any) {
+      lastError = err;
+      if (attempt < MAX_RETRIES) {
+        console.warn(`${label} fetch failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}): ${err.message} — retrying in ${RETRY_DELAY_MS}ms`);
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      }
+    }
+  }
+  throw lastError!;
+}
 
 export async function getResponse(
   userId: string,
@@ -43,7 +61,7 @@ export async function getResponse(
     ...history,
   ];
 
-  const apiResponse = await fetch(`${config.gatewayUrl}/v1/chat/completions`, {
+  const apiResponse = await fetchWithRetry(`${config.gatewayUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -55,7 +73,7 @@ export async function getResponse(
       messages,
       user: userId,
     }),
-  });
+  }, 'Claude LLM');
 
   if (!apiResponse.ok) {
     const body = await apiResponse.text();
@@ -87,7 +105,7 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
 
   const sessionKey = `agent:${config.gatewayAgentId}:discord:channel:${config.utilityChannelId}`;
 
-  const apiResponse = await fetch(`${config.gatewayUrl}/v1/chat/completions`, {
+  const apiResponse = await fetchWithRetry(`${config.gatewayUrl}/v1/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -99,7 +117,7 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
       messages,
       user: sessionKey,
     }),
-  });
+  }, 'Quick completion');
 
   if (!apiResponse.ok) {
     const body = await apiResponse.text();
