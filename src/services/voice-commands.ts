@@ -65,7 +65,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     .toLowerCase()
     .replace(/[.!?,]+$/, '')
     .replace(/\bin-?box\b/g, 'inbox')
-    .replace(/\bin\s+box\b/g, 'inbox');
+    .replace(/\bin\s+box\b/g, 'inbox')
+    .replace(/\b(?:wheat|weight|wade|weigh)\b/g, 'wait');
   if (!rest) {
     return { type: 'wake-check' };
   }
