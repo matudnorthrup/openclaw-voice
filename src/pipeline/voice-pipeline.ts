@@ -232,6 +232,13 @@ export class VoicePipeline {
 
   setInboxTracker(tracker: InboxTracker): void {
     this.inboxTracker = tracker;
+
+    // If mode is already queue/ask (persisted from previous session), start the
+    // background inbox poll immediately so text-originated messages get detected.
+    const mode = this.queueState?.getMode();
+    if (mode === 'queue' || mode === 'ask') {
+      this.startInboxPoll();
+    }
   }
 
   async onChannelSwitch(): Promise<void> {
