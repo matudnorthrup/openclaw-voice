@@ -467,7 +467,9 @@ export class VoicePipeline {
     }
 
     const gatedInterrupt = wasPlayingResponse && gatedMode;
-    const gatedSpeakingProbe = gatedInterrupt && isSpeakingAtStart;
+    // Allow gated interrupts during PROCESSING too — inbox item readback and
+    // voice command responses play TTS while in PROCESSING state, not SPEAKING.
+    const gatedSpeakingProbe = gatedInterrupt && (isSpeakingAtStart || stateAtStart === 'PROCESSING');
     const gateClosedCueInterrupt = gatedInterrupt && this.player.isPlayingEarcon('gate-closed');
     let keepCurrentState = false;
     let playedListeningEarly = false;
