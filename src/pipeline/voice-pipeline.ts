@@ -66,6 +66,10 @@ export class VoicePipeline {
   private static readonly INBOX_POLL_INTERVAL_MS = 20_000;
   // Track last-notified stamp per channel to avoid repeat notifications
   private inboxPollNotifiedStamps = new Map<string, number>();
+  // Tracks channels with recent voice dispatches — suppress inbox "new message"
+  // notifications during the cool-down to avoid echo responses from the text agent.
+  private recentVoiceDispatchChannels = new Map<string, number>();
+  private static readonly VOICE_DISPATCH_COOLDOWN_MS = 120_000;
 
   // Stall watchdog
   private stallWatchdogTimer: NodeJS.Timeout | null = null;
@@ -2202,6 +2206,8 @@ Use channel names (the part before the colon). Do not explain.`,
               const count = await this.getCurrentMessageCount(sessionKey);
               this.inboxTracker.markSeen(sessionKey, count);
             }
+            // Record dispatch so inbox poll ignores text-agent echo responses
+            this.recentVoiceDispatchChannels.set(sessionKey, Date.now());
           }
 
           cb(response);
@@ -2329,19 +2335,28 @@ Use channel names (the part before the colon). Do not explain.`,
       const channels = this.router.getAllChannelSessionKeys();
       const activities = await this.inboxTracker.checkInbox(channels);
 
+      const now = Date.now();
       for (const activity of activities) {
         // Only notify for channels with new gateway messages (text-originated).
         // Voice-originated responses are handled by ResponsePoller's onReady callback.
         if (activity.newMessageCount > 0 && activity.queuedReadyCount === 0) {
-          // Deduplicate: only notify once per channel until a NEW message arrives
-          // (i.e. the latestStamp changes from what we last notified about).
+          // Skip channels with recent voice dispatches — the text agent often
+          // generates echo responses to voice-injected messages, which look like
+          // "new" text messages but aren't useful to the user.
+          const lastDispatch = this.recentVoiceDispatchChannels.get(activity.sessionKey) ?? 0;
+          if (now - lastDispatch < VoicePipeline.VOICE_DISPATCH_COOLDOWN_MS) continue;
+
+          // Deduplicate: only notify once per channel until a genuinely NEW message
+          // arrives.  Use Date.now() as fallback when messages lack timestamps so
+          // the dedup still works.
           const lastNotified = this.inboxPollNotifiedStamps.get(activity.sessionKey) ?? 0;
-          const latestStamp = activity.newMessages.length > 0
+          const rawStamp = activity.newMessages.length > 0
             ? Math.max(...activity.newMessages.map((m: any) => m.timestamp ?? 0))
             : 0;
-          if (latestStamp > 0 && latestStamp <= lastNotified) continue;
+          const effectiveStamp = rawStamp > 0 ? rawStamp : now;
+          if (effectiveStamp <= lastNotified) continue;
 
-          this.inboxPollNotifiedStamps.set(activity.sessionKey, latestStamp || Date.now());
+          this.inboxPollNotifiedStamps.set(activity.sessionKey, effectiveStamp);
           this.notifyIfIdle(`New message in ${activity.displayName}.`);
         }
       }

@@ -120,6 +120,20 @@ export class QueueState {
       this.mode = data.mode || 'wait';
       this.items = data.items || [];
       this.channelSnapshots = data.channelSnapshots || {};
+
+      // Mark stale "ready" items from previous sessions as heard —
+      // they would otherwise trigger notifications forever on every restart.
+      let staleCount = 0;
+      for (const item of this.items) {
+        if (item.status === 'ready') {
+          item.status = 'heard';
+          staleCount++;
+        }
+      }
+      if (staleCount > 0) {
+        console.log(`QueueState: marked ${staleCount} stale ready items as heard`);
+        this.save();
+      }
     } catch {
       // File doesn't exist or is corrupt — start fresh
       this.mode = 'wait';
