@@ -72,7 +72,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
 
   // Mode switch — must come before "switch to X" to avoid matching "switch to inbox mode" as a channel switch
-  const modeMatch = rest.match(/^(?:switch\s+to\s+)?(inbox|queue|wait|ask)\s+mode$/);
+  // Avoid "switch to" prefix here — it collides with the channel-switch regex when STT mangles words.
+  // Use "enable", "activate", "set", or bare "<mode> mode" instead.
+  const modeMatch = rest.match(/^(?:(?:enable|activate|set)\s+)?(inbox|queue|wait|ask)\s+mode$/);
   if (modeMatch) {
     const spoken = modeMatch[1];
     const mode: VoiceMode = spoken === 'inbox' ? 'queue' : spoken as VoiceMode;
