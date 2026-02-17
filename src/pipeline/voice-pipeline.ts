@@ -459,6 +459,15 @@ export class VoicePipeline {
         console.log('Ignoring utterance during short post-choice debounce window');
         return;
       }
+      // If TTS is actively playing during PROCESSING (e.g. voice command
+      // response, speakResponse), any captured audio is speaker bleed or
+      // ambient noise — not intentional user input.  Discard it rather than
+      // buffering, because replaying it after grace opens produces gibberish
+      // prompts.
+      if (this.player.isPlaying()) {
+        console.log('Discarding utterance captured during active TTS playback (PROCESSING)');
+        return;
+      }
       console.log('Already processing — buffering utterance');
       const effects = this.transitionAndResetWatchdog({ type: 'UTTERANCE_RECEIVED' });
       this.stateMachine.bufferUtterance(userId, wavBuffer, durationMs);
