@@ -728,16 +728,6 @@ export class VoicePipeline {
         return;
       }
 
-      // Safety guard: in queue mode, avoid silently dispatching free-form prompts
-      // from open-mic chatter during grace windows. Commands still work via
-      // deterministic/LLM command paths above; prompts require explicit wake.
-      if (mode === 'queue' && inGracePeriod && !hasWakeWord) {
-        console.log(`Queue prompt suppressed (wake required): "${transcript}"`);
-        this.stopWaitingLoop();
-        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
-        return;
-      }
-
       if (Date.now() < this.ctx.newPostTimeoutPromptGuardUntil) {
         const remainingMs = this.ctx.newPostTimeoutPromptGuardUntil - Date.now();
         console.log(
