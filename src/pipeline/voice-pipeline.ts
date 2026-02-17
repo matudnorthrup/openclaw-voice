@@ -2639,8 +2639,8 @@ Use channel names (the part before the colon). Do not explain.`,
 
     // "inbox list", "inbox", "what do I have", "check inbox", "what's new", etc.
     if (
-      /^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(navInput) ||
-      /\binbox\s+list\b/.test(navInput)
+      /^(?:inbox(?:\s+(?:list|status|check))?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(navInput) ||
+      /\binbox\s+(?:list|status|check)\b/.test(navInput)
     ) {
       return { type: 'inbox-check' };
     }
@@ -2762,8 +2762,10 @@ Use channel names (the part before the colon). Do not explain.`,
     const stateType = this.stateMachine.getStateType();
     const blockOnBusy = stateType !== 'IDLE' && stateType !== 'INBOX_FLOW';
     if (blockOnBusy || this.player.isPlaying()) {
+      // Use a longer retry when actively playing to avoid log spam during long TTS
+      const retryMs = this.player.isPlaying() ? 5000 : 900;
       console.log(`Idle notify skipped (busy): "${message}"`);
-      this.scheduleDeferredIdleNotify(message, 900);
+      this.scheduleDeferredIdleNotify(message, retryMs);
       return;
     }
     if (this.ctx.idleNotifyInFlight) {

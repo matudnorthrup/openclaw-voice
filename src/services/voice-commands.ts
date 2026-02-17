@@ -168,7 +168,7 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
 
   // "inbox list", "what do I have", "check inbox", "what's new", "inbox"
-  if (/^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(rest)) {
+  if (/^(?:inbox(?:\s+(?:list|status|check))?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(rest)) {
     return { type: 'inbox-check' };
   }
   if (/\bback\s+to\s+inbox\b/.test(rest) || /\binbox\s+list\b/.test(rest)) {
