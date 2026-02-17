@@ -986,14 +986,12 @@ export class VoicePipeline {
       const { forumId, forumName } = flowState;
       this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
 
-      // Create the thread immediately using the title as the activation body.
-      // Previously a separate "body" step collected a prompt that doubled as
-      // both the thread's initial Discord message and the first LLM dispatch,
-      // but the gateway inject would fail on that first round because the
-      // agent hadn't bootstrapped the session yet. By skipping the body step
-      // and letting the user speak their prompt naturally afterward, the first
-      // real interaction goes through the normal voice flow.
-      const result = await this.router.createForumPost(forumId!, input, input);
+      // Use a generic activation body that invites the agent to respond
+      // quickly, bootstrapping the gateway session. The natural latency of
+      // TTS confirmation + the user formulating their prompt gives the agent
+      // time to reply before the first real voice interaction arrives.
+      const activationBody = 'New voice thread. Let me know when you\'re ready.';
+      const result = await this.router.createForumPost(forumId!, input, activationBody);
       if (result.success) {
         await this.onChannelSwitch();
         console.log(`Created forum post "${input}" in ${result.forumName}, switched to thread ${result.threadId}`);

@@ -203,7 +203,7 @@ describe('Layer 7: New Post Flow', () => {
     expect(router.createForumPost).toHaveBeenCalledWith(
       'forum-1',
       'Fix the login page',
-      'Fix the login page',
+      'New voice thread. Let me know when you\'re ready.',
     );
     expect(earconHistory).toContain('acknowledged');
     expect(getState(pipeline)).toBe('IDLE');
