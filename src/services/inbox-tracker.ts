@@ -66,7 +66,9 @@ export class InboxTracker {
         snapshots[ch.sessionKey] = baselineStamp;
         snapshotsChanged = true;
       }
-      const newMessages = allMessages.filter((m, idx) => this.getMessageStamp(m, idx) > baselineStamp);
+      const newMessages = allMessages.filter((m, idx) =>
+        this.getMessageStamp(m, idx) > baselineStamp && m.role !== 'system',
+      );
       const newMessageCount = newMessages.length;
 
       // Get queued ready items for this channel
