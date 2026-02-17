@@ -5,10 +5,13 @@ import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
 import { GatewaySync } from './services/gateway-sync.js';
-import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { getTtsBackend, setTtsBackend, getAvailableTtsBackends } from './services/tts.js';
 import { QueueState, type VoiceMode } from './services/queue-state.js';
 import { ResponsePoller } from './services/response-poller.js';
 import { InboxTracker } from './services/inbox-tracker.js';
+import { DependencyMonitor, type DependencyStatus } from './services/dependency-monitor.js';
+import { HealthMonitor } from './services/health-monitor.js';
 import { VoiceConnectionStatus, entersState } from '@discordjs/voice';
 import { ChannelType, TextChannel, VoiceState, SlashCommandBuilder, REST, Routes, ChatInputCommandInteraction, GuildMember, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuInteraction, ButtonInteraction } from 'discord.js';
 
@@ -27,10 +30,16 @@ let gatewaySync: GatewaySync | null = null;
 let leaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let queueState: QueueState | null = null;
 let responsePoller: ResponsePoller | null = null;
+let dependencyMonitor: DependencyMonitor | null = null;
+let healthMonitor: HealthMonitor | null = null;
 
 // --- Text command handlers ---
 
 client.on('messageCreate', async (message) => {
+  if (message.author.id === client.user?.id) return;
+
+  await syncDiscordMessageToGateway(message);
+
   if (message.author.bot) return;
 
   if (message.content === '~join') {
@@ -132,8 +141,70 @@ client.on('messageCreate', async (message) => {
       }
     }
     await message.reply(lines.join('\n'));
+  } else if (message.content === '~health') {
+    const status = dependencyMonitor
+      ? await dependencyMonitor.checkOnce()
+      : { whisperUp: false, ttsUp: false };
+    const ttsLabel = config.ttsBackend === 'kokoro'
+      ? 'Kokoro'
+      : config.ttsBackend === 'chatterbox'
+        ? 'Chatterbox'
+        : 'TTS backend';
+
+    const lines: string[] = [];
+
+    // Pipeline snapshot
+    if (pipeline) {
+      const snap = pipeline.getHealthSnapshot();
+      const uptimeMin = Math.floor(snap.uptime / 60_000);
+      lines.push(`**Pipeline:** ${snap.pipelineState} (${Math.round(snap.pipelineStateAge / 1000)}s)`);
+      lines.push(`**Uptime:** ${uptimeMin}m`);
+      lines.push(`**Mode:** ${snap.mode === 'queue' ? 'inbox' : snap.mode}`);
+      if (snap.activeChannel) lines.push(`**Channel:** ${snap.activeChannel}`);
+      lines.push(`**Queue:** ${snap.queueReady} ready, ${snap.queuePending} pending`);
+      lines.push(`**Gateway:** ${snap.gatewayConnected ? 'connected' : 'disconnected'}`);
+    }
+
+    lines.push(`**STT (Whisper):** ${status.whisperUp ? 'up' : 'down'}`);
+    lines.push(`**TTS (${ttsLabel}):** ${status.ttsUp ? 'up' : 'down'}`);
+
+    // Counters
+    if (pipeline) {
+      const c = pipeline.getCounters();
+      lines.push('');
+      lines.push(`**Counters:**`);
+      lines.push(`  Utterances: ${c.utterancesProcessed} | Commands: ${c.commandsRecognized} | LLM: ${c.llmDispatches}`);
+      lines.push(`  Errors: ${c.errors} | STT fail: ${c.sttFailures} | TTS fail: ${c.ttsFailures}`);
+      lines.push(`  Invariant violations: ${c.invariantViolations} | Stall watchdog: ${c.stallWatchdogFires}`);
+    }
+
+    await message.reply(lines.join('\n'));
   }
 });
+
+async function syncDiscordMessageToGateway(message: any): Promise<void> {
+  if (!gatewaySync || !gatewaySync.isConnected()) return;
+  if (!message.guildId) return;
+  if (message.content.startsWith('~')) return;
+  if (message.content.startsWith('/')) return;
+  if (!message.content.trim()) return;
+  if (!message.channel || !('type' in message.channel)) return;
+
+  // Mirror text/thread messages into per-channel gateway sessions so
+  // voice readback and text channels stay in sync.
+  if (![ChannelType.GuildText, ChannelType.PublicThread, ChannelType.PrivateThread].includes(message.channel.type)) {
+    return;
+  }
+
+  const sessionKey = GatewaySync.sessionKeyForChannel(message.channelId);
+  const label = message.author.bot ? 'discord-assistant' : 'discord-user';
+  const ok = await gatewaySync.inject(sessionKey, message.content.trim(), label);
+  if (!ok) {
+    console.warn(`Gateway text sync failed channel=${message.channelId} label=${label}`);
+  } else {
+    console.log(`Gateway text sync ok channel=${message.channelId} label=${label}`);
+  }
+}
 
 // --- Voice state update: auto-join/leave ---
 
@@ -255,11 +326,11 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       const inboxTracker = new InboxTracker(queueState, gatewaySync);
       pipeline.setInboxTracker(inboxTracker);
 
-      // Auto-activate inbox if already in queue/ask mode (restart recovery)
-      // Snapshot at CURRENT message counts so everything starts as "seen"
-      const currentMode = queueState.getMode();
-      if (currentMode === 'queue' || currentMode === 'ask') {
-        const channels = router.getAllChannelSessionKeys();
+      // Ensure inbox snapshots exist across all modes so text-originated updates
+      // remain discoverable via inbox-check even in wait mode.
+      const channels = router.getAllChannelSessionKeys();
+      const existingSnapshots = queueState.getSnapshots();
+      if (Object.keys(existingSnapshots).length === 0) {
         void (async () => {
           try {
             const startedAt = Date.now();
@@ -267,7 +338,7 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
               await new Promise((resolve) => setTimeout(resolve, 200));
             }
             if (!gatewaySync.isConnected()) {
-              console.warn('InboxTracker: restart snapshot skipped (gateway not connected yet)');
+              console.warn('InboxTracker: startup snapshot skipped (gateway not connected yet)');
               return;
             }
             const snapshots: Record<string, number> = {};
@@ -276,15 +347,62 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
               snapshots[ch.sessionKey] = result?.messages?.length ?? 0;
             }
             queueState.setSnapshots(snapshots);
-            console.log(`InboxTracker: restart snapshot — ${Object.entries(snapshots).map(([k, v]) => `${k.split(':').pop()}=${v}`).join(', ')}`);
+            console.log(`InboxTracker: startup snapshot — ${Object.entries(snapshots).map(([k, v]) => `${k.split(':').pop()}=${v}`).join(', ')}`);
           } catch (err: any) {
-            console.warn(`InboxTracker restart snapshot failed: ${err.message}`);
+            console.warn(`InboxTracker startup snapshot failed: ${err.message}`);
           }
         })();
       }
     }
 
     pipeline.start();
+
+    if (dependencyMonitor) {
+      dependencyMonitor.stop();
+      dependencyMonitor = null;
+    }
+    dependencyMonitor = new DependencyMonitor((status: DependencyStatus, previous: DependencyStatus | null) => {
+      const whisperChanged = !previous || previous.whisperUp !== status.whisperUp;
+      const ttsChanged = !previous || previous.ttsUp !== status.ttsUp;
+
+      if (whisperChanged) {
+        if (status.whisperUp) {
+          console.log('Dependency health: Whisper is reachable');
+        } else {
+          console.warn('Dependency health: Whisper is unreachable');
+          pipeline?.notifyDependencyIssue('stt', 'Speech recognition is unavailable right now.');
+        }
+      }
+
+      if (ttsChanged) {
+        if (status.ttsUp) {
+          console.log('Dependency health: TTS backend is reachable');
+        } else {
+          console.warn('Dependency health: TTS backend is unreachable');
+          pipeline?.notifyDependencyIssue('tts', 'Voice output is unavailable right now.');
+        }
+      }
+    });
+    dependencyMonitor.start();
+
+    // Wire health monitor
+    if (healthMonitor) {
+      healthMonitor.stop();
+      healthMonitor = null;
+    }
+    healthMonitor = new HealthMonitor({
+      getSnapshot: () => {
+        const snap = pipeline!.getHealthSnapshot();
+        const depStatus = dependencyMonitor?.getLastStatus();
+        if (depStatus) {
+          snap.dependencies.whisper = depStatus.whisperUp ? 'up' : 'down';
+          snap.dependencies.tts = depStatus.ttsUp ? 'up' : 'down';
+        }
+        return snap;
+      },
+      logChannel: logChannel ?? null,
+    });
+    healthMonitor.start();
 
     if (message) {
       await message.reply('Joined voice channel. Listening...');
@@ -298,6 +416,14 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
 }
 
 function handleLeave(): void {
+  if (healthMonitor) {
+    healthMonitor.stop();
+    healthMonitor = null;
+  }
+  if (dependencyMonitor) {
+    dependencyMonitor.stop();
+    dependencyMonitor = null;
+  }
   if (responsePoller) {
     responsePoller.stop();
     responsePoller = null;
@@ -314,6 +440,10 @@ function handleLeave(): void {
 
 function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBuilder<any>[] } {
   const s = getVoiceSettings();
+  const currentMode = queueState?.getMode() ?? 'wait';
+  const modeLabel = currentMode === 'queue' ? 'inbox' : currentMode;
+  const ttsBackend = getTtsBackend();
+  const ttsLabel: Record<string, string> = { elevenlabs: 'ElevenLabs', kokoro: 'Kokoro', chatterbox: 'Chatterbox' };
 
   // Determine noise preset label
   const presetMap: Record<number, string> = { 300: 'Low', 500: 'Medium', 800: 'High' };
@@ -322,11 +452,25 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
   const embed = new EmbedBuilder()
     .setTitle('Voice Settings')
     .addFields(
-      { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech. Raise if the bot is picking up background noise.', inline: false },
-      { name: `Silence Delay — ${s.silenceDurationMs}ms`, value: 'How long to wait after you stop talking before processing. Increase if the bot cuts you off mid-sentence.', inline: false },
-      { name: `Min Speech Duration — ${s.minSpeechDurationMs}ms`, value: 'Shortest utterance the bot will accept. Raise to ignore brief noises like coughs or "um".', inline: false },
+      { name: `Voice Mode — ${modeLabel}`, value: '**Wait:** respond immediately. **Inbox:** queue responses for review. **Ask:** confirm before processing.', inline: false },
+      { name: `Gated — ${s.gated ? 'ON' : 'OFF'}  ·  TTS — ${ttsLabel[ttsBackend] ?? ttsBackend}`, value: 'Gated requires wake word for each utterance. TTS selects the speech engine.', inline: false },
+      { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech.', inline: false },
+      { name: `Silence Delay — ${s.silenceDurationMs}ms  ·  Min Speech — ${s.minSpeechDurationMs}ms`, value: 'Silence delay: pause before processing. Min speech: shortest accepted utterance.', inline: false },
     );
 
+  // Row 1: Voice Mode select
+  const modeRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId('mode-select')
+      .setPlaceholder('Voice mode')
+      .addOptions(
+        { label: 'Wait', description: 'Respond to each utterance immediately', value: 'wait', default: currentMode === 'wait' },
+        { label: 'Inbox', description: 'Queue responses, review on demand', value: 'queue', default: currentMode === 'queue' },
+        { label: 'Ask', description: 'Confirm before processing each utterance', value: 'ask', default: currentMode === 'ask' },
+      ),
+  );
+
+  // Row 2: Noise threshold select
   const noiseRow = new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('noise-select')
@@ -338,6 +482,7 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
       ),
   );
 
+  // Row 3: Silence delay buttons
   const delayRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('label-delay').setLabel('Silence Delay').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('delay-minus').setLabel('-500ms').setStyle(ButtonStyle.Secondary),
@@ -346,6 +491,7 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
     new ButtonBuilder().setCustomId('delay-plus').setLabel('+500ms').setStyle(ButtonStyle.Secondary),
   );
 
+  // Row 4: Min speech buttons
   const minSpeechRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId('label-minspeech').setLabel('Min Speech').setStyle(ButtonStyle.Primary).setDisabled(true),
     new ButtonBuilder().setCustomId('minspeech-minus').setLabel('-100ms').setStyle(ButtonStyle.Secondary),
@@ -354,7 +500,22 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
     new ButtonBuilder().setCustomId('minspeech-plus').setLabel('+100ms').setStyle(ButtonStyle.Secondary),
   );
 
-  return { embeds: [embed], components: [noiseRow, delayRow, minSpeechRow] };
+  // Row 5: Gated toggle + TTS backend buttons
+  const availableTts = getAvailableTtsBackends();
+  const toggleRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId('gated-toggle')
+      .setLabel(s.gated ? '🔒 Gated: ON' : '🔓 Gated: OFF')
+      .setStyle(s.gated ? ButtonStyle.Success : ButtonStyle.Secondary),
+    ...availableTts.map((b) =>
+      new ButtonBuilder()
+        .setCustomId(`tts-${b}`)
+        .setLabel(ttsLabel[b] ?? b)
+        .setStyle(b === ttsBackend ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    ),
+  );
+
+  return { embeds: [embed], components: [modeRow, noiseRow, delayRow, minSpeechRow, toggleRow] };
 }
 
 // --- Slash command handler ---
@@ -364,6 +525,28 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isStringSelectMenu() && interaction.customId === 'noise-select') {
     const value = parseInt(interaction.values[0], 10);
     setSpeechThreshold(value);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isStringSelectMenu() && interaction.customId === 'mode-select') {
+    const mode = interaction.values[0] as VoiceMode;
+    if (!queueState) queueState = new QueueState();
+    queueState.setMode(mode);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'gated-toggle') {
+    const s = getVoiceSettings();
+    setGatedMode(!s.gated);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId.startsWith('tts-')) {
+    const backend = interaction.customId.slice('tts-'.length) as 'elevenlabs' | 'kokoro' | 'chatterbox';
+    setTtsBackend(backend);
     await interaction.update(buildSettingsPanel());
     return;
   }

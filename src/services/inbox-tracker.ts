@@ -48,26 +48,33 @@ export class InboxTracker {
 
   async checkInbox(channels: ChannelInfo[]): Promise<ChannelActivity[]> {
     const snapshots = this.queueState.getSnapshots();
+    let snapshotsChanged = false;
     const activities: ChannelActivity[] = [];
 
     for (const ch of channels) {
-      const baselineCount = snapshots[ch.sessionKey] ?? 0;
-      const result = await this.gatewaySync.getHistory(ch.sessionKey, 40);
-      const currentCount = result?.messages?.length ?? 0;
-      const newMessageCount = Math.max(0, currentCount - baselineCount);
+      const rawBaseline = snapshots[ch.sessionKey] ?? 0;
+      const result = await this.gatewaySync.getHistory(ch.sessionKey, 80);
+      const allMessages = result?.messages ?? [];
+      const latestStamp = allMessages.length > 0
+        ? this.getMessageStamp(allMessages[allMessages.length - 1], allMessages.length - 1)
+        : 0;
+      // Legacy migration: old snapshots were capped message counts (e.g. 40).
+      const baselineStamp = rawBaseline > 0 && rawBaseline < 1_000_000_000_000
+        ? latestStamp
+        : rawBaseline;
+      if (baselineStamp !== rawBaseline) {
+        snapshots[ch.sessionKey] = baselineStamp;
+        snapshotsChanged = true;
+      }
+      const newMessages = allMessages.filter((m, idx) => this.getMessageStamp(m, idx) > baselineStamp);
+      const newMessageCount = newMessages.length;
 
       // Get queued ready items for this channel
       const readyItems = this.queueState.getReadyItems().filter((i) => i.sessionKey === ch.sessionKey);
 
-      console.log(`InboxTracker: check ${ch.name} — snapshot=${baselineCount} current=${currentCount} new=${newMessageCount} ready=${readyItems.length}`);
+      console.log(`InboxTracker: check ${ch.name} — snapshotStamp=${baselineStamp} latestStamp=${latestStamp} new=${newMessageCount} ready=${readyItems.length}`);
 
       if (newMessageCount > 0 || readyItems.length > 0) {
-        // Extract new messages (the ones beyond the snapshot)
-        const allMessages = result?.messages ?? [];
-        const newMessages = newMessageCount > 0
-          ? allMessages.slice(baselineCount)
-          : [];
-
         activities.push({
           channelName: ch.name,
           displayName: ch.displayName,
@@ -77,6 +84,10 @@ export class InboxTracker {
           newMessages,
         });
       }
+    }
+
+    if (snapshotsChanged) {
+      this.queueState.setSnapshots(snapshots);
     }
 
     return activities;
@@ -92,16 +103,19 @@ export class InboxTracker {
     if (newMessages.length === 0) return '';
 
     // Filter to user/assistant messages with content
-    const msgs = newMessages.filter((m) => m.role !== 'system' && m.content);
+    const msgs = newMessages
+      .filter((m) => m.role !== 'system' && m.content)
+      .map((m) => ({ message: m, text: this.extractSpeechText(m.content) }))
+      .filter((m) => m.text.length > 0);
 
     if (msgs.length === 0) return '';
 
     if (msgs.length <= 5) {
       // Verbatim with speaker labels
       return msgs.map((m) => {
-        const speaker = m.role === 'user' ? 'User' : 'Assistant';
-        const label = m.label === 'voice-user' ? 'You' : speaker;
-        const content = typeof m.content === 'string' ? m.content : String(m.content);
+        const speaker = m.message.role === 'user' ? 'User' : 'Assistant';
+        const label = m.message.label === 'voice-user' ? 'You' : speaker;
+        const content = m.text;
         return `${label}: ${content}`;
       }).join(' ... ');
     }
@@ -109,16 +123,16 @@ export class InboxTracker {
     if (msgs.length <= 15) {
       // Condensed: first 2 + "N more" + last 2
       const first = msgs.slice(0, 2).map((m) => {
-        const speaker = m.role === 'user' ? 'User' : 'Assistant';
-        const label = m.label === 'voice-user' ? 'You' : speaker;
-        const content = typeof m.content === 'string' ? m.content : String(m.content);
+        const speaker = m.message.role === 'user' ? 'User' : 'Assistant';
+        const label = m.message.label === 'voice-user' ? 'You' : speaker;
+        const content = m.text;
         return `${label}: ${content}`;
       }).join(' ... ');
 
       const last = msgs.slice(-2).map((m) => {
-        const speaker = m.role === 'user' ? 'User' : 'Assistant';
-        const label = m.label === 'voice-user' ? 'You' : speaker;
-        const content = typeof m.content === 'string' ? m.content : String(m.content);
+        const speaker = m.message.role === 'user' ? 'User' : 'Assistant';
+        const label = m.message.label === 'voice-user' ? 'You' : speaker;
+        const content = m.text;
         return `${label}: ${content}`;
       }).join(' ... ');
 
@@ -128,15 +142,61 @@ export class InboxTracker {
 
     // 16+ messages: just count + most recent
     const lastMsg = msgs[msgs.length - 1];
-    const speaker = lastMsg.role === 'user' ? 'User' : 'Assistant';
-    const label = lastMsg.label === 'voice-user' ? 'You' : speaker;
-    const content = typeof lastMsg.content === 'string' ? lastMsg.content : String(lastMsg.content);
+    const speaker = lastMsg.message.role === 'user' ? 'User' : 'Assistant';
+    const label = lastMsg.message.label === 'voice-user' ? 'You' : speaker;
+    const content = lastMsg.text;
     return `${msgs.length} messages. Most recent, ${label}: ${content}`;
   }
 
   private async getMessageCount(sessionKey: string): Promise<number> {
     if (!this.gatewaySync.isConnected()) return 0;
-    const result = await this.gatewaySync.getHistory(sessionKey, 40);
-    return result?.messages?.length ?? 0;
+    const result = await this.gatewaySync.getHistory(sessionKey, 80);
+    const messages = result?.messages ?? [];
+    if (messages.length === 0) return 0;
+    return this.getMessageStamp(messages[messages.length - 1], messages.length - 1);
+  }
+
+  private getMessageStamp(message: ChatMessage & { timestamp?: number }, fallbackIndex: number): number {
+    const ts = (message as any)?.timestamp;
+    if (typeof ts === 'number' && Number.isFinite(ts)) {
+      return ts;
+    }
+    // Fallback keeps stable ordering even when timestamp is absent.
+    return fallbackIndex + 1;
+  }
+
+  private extractSpeechText(content: unknown): string {
+    if (typeof content === 'string') {
+      return this.cleanSpeechText(content);
+    }
+    if (Array.isArray(content)) {
+      const joined = content
+        .map((block: any) => {
+          if (!block || typeof block !== 'object') return '';
+          if (block.type === 'text' && typeof block.text === 'string') return block.text;
+          if (typeof block.text === 'string') return block.text;
+          if (typeof block.content === 'string') return block.content;
+          return '';
+        })
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      return this.cleanSpeechText(joined);
+    }
+    if (content && typeof content === 'object') {
+      const c: any = content;
+      if (typeof c.text === 'string') return this.cleanSpeechText(c.text);
+      if (typeof c.content === 'string') return this.cleanSpeechText(c.content);
+    }
+    return '';
+  }
+
+  private cleanSpeechText(text: string): string {
+    return text
+      .replace(/^\[(?:discord-user|discord-assistant)\]\s*/i, '')
+      .replace(/^\*\*You:\*\*\s*/i, '')
+      .replace(/^\*\*Watson(?: Voice)?:\*\*\s*/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
   }
 }

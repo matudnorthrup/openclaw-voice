@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createPrivateKey, sign } from 'node:crypto';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { config } from '../config.js';
 
 interface RpcResponse {
@@ -30,10 +33,76 @@ export interface ChatMessage {
   label?: string;
 }
 
+interface DeviceIdentity {
+  deviceId: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+}
+
 const RPC_TIMEOUT_MS = 10_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+
+const OPENCLAW_STATE_DIR = join(homedir(), '.openclaw');
+const DEVICE_IDENTITY_PATH = join(OPENCLAW_STATE_DIR, 'identity', 'device.json');
+
+const ROLE = 'operator';
+const SCOPES = ['operator.read', 'operator.write', 'operator.admin'];
+const CLIENT_ID = 'gateway-client';
+const CLIENT_MODE = 'backend';
+
+function base64UrlEncode(buf: Buffer): string {
+  return buf.toString('base64').replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/g, '');
+}
+
+function publicKeyRawBase64Url(publicKeyPem: string): string {
+  // Extract raw 32-byte Ed25519 public key from PEM (last 32 bytes of DER)
+  const der = Buffer.from(
+    publicKeyPem.replace(/-----BEGIN PUBLIC KEY-----/g, '').replace(/-----END PUBLIC KEY-----/g, '').replace(/\s/g, ''),
+    'base64',
+  );
+  // Ed25519 SPKI is 44 bytes: 12-byte header + 32-byte key
+  const raw = der.subarray(der.length - 32);
+  return base64UrlEncode(raw);
+}
+
+function loadDeviceIdentity(): DeviceIdentity | null {
+  try {
+    if (!existsSync(DEVICE_IDENTITY_PATH)) return null;
+    const parsed = JSON.parse(readFileSync(DEVICE_IDENTITY_PATH, 'utf8'));
+    if (parsed?.version === 1 && parsed.deviceId && parsed.publicKeyPem && parsed.privateKeyPem) {
+      return { deviceId: parsed.deviceId, publicKeyPem: parsed.publicKeyPem, privateKeyPem: parsed.privateKeyPem };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildSignedDevice(identity: DeviceIdentity, token: string, nonce: string | undefined) {
+  const signedAtMs = Date.now();
+  const version = nonce ? 'v2' : 'v1';
+  const scopeStr = SCOPES.join(',');
+  const parts = [version, identity.deviceId, CLIENT_ID, CLIENT_MODE, ROLE, scopeStr, String(signedAtMs), token];
+  if (version === 'v2') parts.push(nonce ?? '');
+  const payload = parts.join('|');
+
+  const key = createPrivateKey(identity.privateKeyPem);
+  const signature = base64UrlEncode(sign(null, Buffer.from(payload, 'utf8'), key));
+
+  return {
+    device: {
+      id: identity.deviceId,
+      publicKey: publicKeyRawBase64Url(identity.publicKeyPem),
+      signature,
+      signedAt: signedAtMs,
+      nonce,
+    },
+  };
+}
+
+const PING_INTERVAL_MS = 25_000;
 
 export class GatewaySync {
   private ws: WebSocket | null = null;
@@ -42,7 +111,9 @@ export class GatewaySync {
   private destroyed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
   private wsUrl: string;
+  private deviceIdentity: DeviceIdentity | null;
 
   static get defaultSessionKey(): string {
     return `agent:${config.gatewayAgentId}:main`;
@@ -56,6 +127,12 @@ export class GatewaySync {
     // Derive WebSocket URL from gatewayUrl (http → ws)
     const base = config.gatewayUrl.replace(/^http/, 'ws');
     this.wsUrl = base;
+    this.deviceIdentity = loadDeviceIdentity();
+    if (this.deviceIdentity) {
+      console.log(`Loaded OpenClaw device identity: ${this.deviceIdentity.deviceId.slice(0, 8)}...`);
+    } else {
+      console.warn('No OpenClaw device identity found; scopes may be limited');
+    }
   }
 
   async connect(): Promise<void> {
@@ -65,6 +142,7 @@ export class GatewaySync {
 
   destroy(): void {
     this.destroyed = true;
+    this.stopPing();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -86,6 +164,12 @@ export class GatewaySync {
     return this.connected;
   }
 
+  getConnectionState(): 'connected' | 'reconnecting' | 'disconnected' {
+    if (this.connected) return 'connected';
+    if (this.reconnectTimer !== null) return 'reconnecting';
+    return 'disconnected';
+  }
+
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
     try {
       const params: any = { sessionKey, message };
@@ -94,6 +178,18 @@ export class GatewaySync {
       return result;
     } catch (err: any) {
       console.warn(`GatewaySync inject failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  async listSessions(): Promise<{ key: string; displayName?: string; channel?: string; status?: string }[] | null> {
+    try {
+      const result = await this.rpc('sessions.list', {});
+      if (result?.sessions) return result.sessions;
+      if (Array.isArray(result)) return result;
+      return null;
+    } catch (err: any) {
+      console.warn(`GatewaySync listSessions failed: ${err.message}`);
       return null;
     }
   }
@@ -130,17 +226,28 @@ export class GatewaySync {
           // Handle connect challenge — send connect request
           if (msg.type === 'event' && msg.event === 'connect.challenge') {
             connectId = randomUUID();
+            const nonce = (msg as any).payload?.nonce as string | undefined;
+
+            const connectParams: any = {
+              minProtocol: 3,
+              maxProtocol: 3,
+              role: ROLE,
+              scopes: SCOPES,
+              client: { id: CLIENT_ID, mode: CLIENT_MODE, version: '1.0.0', platform: 'node' },
+              auth: { token: config.gatewayToken },
+            };
+
+            // Add device identity signing for full scope access
+            if (this.deviceIdentity) {
+              const { device } = buildSignedDevice(this.deviceIdentity, config.gatewayToken, nonce);
+              connectParams.device = device;
+            }
+
             this.send({
               type: 'req',
               id: connectId,
               method: 'connect',
-              params: {
-                minProtocol: 3,
-                maxProtocol: 3,
-                scopes: ['operator.admin'],
-                client: { id: 'gateway-client', mode: 'backend', version: '1.0.0', platform: 'node' },
-                auth: { token: config.gatewayToken },
-              },
+              params: connectParams,
             });
             return;
           }
@@ -153,6 +260,7 @@ export class GatewaySync {
               if (msg.ok && msg.payload?.type === 'hello-ok') {
                 this.connected = true;
                 this.reconnectAttempt = 0;
+                this.startPing();
                 console.log('Connected to OpenClaw gateway');
                 if (!settled) { settled = true; resolve(); }
               } else {
@@ -182,6 +290,7 @@ export class GatewaySync {
           const wasConnected = this.connected;
           this.connected = false;
           this.ws = null;
+          this.stopPing();
 
           // Reject pending requests
           for (const [id, req] of this.pending) {
@@ -234,6 +343,22 @@ export class GatewaySync {
       this.pending.set(id, { resolve, reject, timer });
       this.send({ type: 'req', id, method, params });
     });
+  }
+
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.send({ type: 'ping' });
+      }
+    }, PING_INTERVAL_MS);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
   }
 
   private scheduleReconnect(): void {

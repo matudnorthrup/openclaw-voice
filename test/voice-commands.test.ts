@@ -49,7 +49,7 @@ describe('parseVoiceCommand — existing commands still work', () => {
 
   it('list command', () => {
     const result = parseVoiceCommand('Hey Watson, list channels', BOT);
-    expect(result).toEqual({ type: 'list' });
+    expect(result).toEqual({ type: 'inbox-check' });
   });
 
   it('default command', () => {
@@ -61,11 +61,98 @@ describe('parseVoiceCommand — existing commands still work', () => {
     const result = parseVoiceCommand('Hey Watson, settings', BOT);
     expect(result).toEqual({ type: 'settings' });
   });
+
+  it('noise command with "noise level" phrasing', () => {
+    const result = parseVoiceCommand('Hey Watson, set noise level high', BOT);
+    expect(result).toEqual({ type: 'noise', level: 'high' });
+  });
+
+  it('noise command with numeric "noise level to" phrasing', () => {
+    const result = parseVoiceCommand('Hey Watson, set noise level to 800', BOT);
+    expect(result).toEqual({ type: 'noise', level: '800' });
+  });
+
+  it('delay command with milliseconds suffix', () => {
+    const result = parseVoiceCommand('Hey Watson, set delay 500 milliseconds', BOT);
+    expect(result).toEqual({ type: 'delay', value: 500 });
+  });
+
+  it('delay command with ms suffix', () => {
+    const result = parseVoiceCommand('Hey Watson, set delay to 750 ms', BOT);
+    expect(result).toEqual({ type: 'delay', value: 750 });
+  });
+});
+
+describe('parseVoiceCommand — dispatch command', () => {
+  it('parses dispatch with plain body', () => {
+    const result = parseVoiceCommand(
+      'Hey Watson, dispatch to health channel please start my morning routine',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'health channel please start my morning routine',
+    });
+  });
+
+  it('parses dispatch with "this message" phrase', () => {
+    const result = parseVoiceCommand(
+      'Hello Watson, dispatch this message to planning: draft my evening checklist',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'planning: draft my evening checklist',
+    });
+  });
+
+  it('parses dispatch with "this in my" variant', () => {
+    const result = parseVoiceCommand(
+      'Hello Watson, dispatch this in my walmart channel please add abuela flour tortillas',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'my walmart channel please add abuela flour tortillas',
+    });
+  });
+
+  it('parses dispatch with polite prefix', () => {
+    const result = parseVoiceCommand(
+      'Hello Watson, please dispatch this to my walmart channel add two 36 packs of eggs',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'my walmart channel add two 36 packs of eggs',
+    });
+  });
+
+  it('parses multiline dispatch transcript from STT chunking', () => {
+    const result = parseVoiceCommand(
+      'Hello, Watson.\nDispatch to health.\nPlease start my morning health data review.',
+      BOT,
+    );
+    expect(result).toEqual({
+      type: 'dispatch',
+      body: 'health. please start my morning health data review',
+    });
+  });
+
+  it('does not parse dispatch without wake trigger', () => {
+    const result = parseVoiceCommand('dispatch to planning finish my notes', BOT);
+    expect(result).toBeNull();
+  });
 });
 
 describe('parseVoiceCommand — mode commands', () => {
   it('parses "inbox mode"', () => {
     const result = parseVoiceCommand('Hey Watson, inbox mode', BOT);
+    expect(result).toEqual({ type: 'mode', mode: 'queue' });
+  });
+
+  it('parses "in box mode" STT split variant', () => {
+    const result = parseVoiceCommand('Hello Watson, in box mode', BOT);
     expect(result).toEqual({ type: 'mode', mode: 'queue' });
   });
 
@@ -161,6 +248,11 @@ describe('parseVoiceCommand — inbox check', () => {
     expect(result).toEqual({ type: 'inbox-check' });
   });
 
+  it('parses "in-box list" STT hyphen variant', () => {
+    const result = parseVoiceCommand('Hey Watson, in-box list', BOT);
+    expect(result).toEqual({ type: 'inbox-check' });
+  });
+
   it('parses "back to inbox, inbox list"', () => {
     const result = parseVoiceCommand('Hey Watson, back to inbox, inbox list', BOT);
     expect(result).toEqual({ type: 'inbox-check' });
@@ -220,22 +312,78 @@ describe('parseVoiceCommand — inbox next', () => {
 
   it('parses "skip"', () => {
     const result = parseVoiceCommand('Hey Watson, skip', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 
   it('parses "skip this"', () => {
     const result = parseVoiceCommand('Hey Watson, skip this', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 
   it('parses "skip this one"', () => {
     const result = parseVoiceCommand('Hey Watson, skip this one', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
   });
 
   it('parses "skip it"', () => {
     const result = parseVoiceCommand('Hey Watson, skip it', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
+  });
+});
+
+describe('parseVoiceCommand — inbox clear', () => {
+  it('parses "clear inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, clear inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-clear' });
+  });
+
+  it('parses "clear the inbox"', () => {
+    const result = parseVoiceCommand('Hey Watson, clear the inbox', BOT);
+    expect(result).toEqual({ type: 'inbox-clear' });
+  });
+
+  it('parses "mark inbox read"', () => {
+    const result = parseVoiceCommand('Hey Watson, mark inbox read', BOT);
+    expect(result).toEqual({ type: 'inbox-clear' });
+  });
+});
+
+describe('parseVoiceCommand — read last message', () => {
+  it('parses "read the last message"', () => {
+    const result = parseVoiceCommand('Hey Watson, read the last message', BOT);
+    expect(result).toEqual({ type: 'read-last-message' });
+  });
+
+  it('parses "last message"', () => {
+    const result = parseVoiceCommand('Hello Watson, last message', BOT);
+    expect(result).toEqual({ type: 'read-last-message' });
+  });
+});
+
+describe('parseVoiceCommand — hear full message', () => {
+  it('parses "hear full message"', () => {
+    const result = parseVoiceCommand('Hello Watson, hear full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "read full message"', () => {
+    const result = parseVoiceCommand('Hey Watson, read full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "here full message" STT homophone', () => {
+    const result = parseVoiceCommand('Hey Watson, here full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "hear a full message"', () => {
+    const result = parseVoiceCommand('Hey Watson, hear a full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
+
+  it('parses "full message"', () => {
+    const result = parseVoiceCommand('Watson, full message', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
   });
 });
 
@@ -257,7 +405,34 @@ describe('parseVoiceCommand — Hello Watson trigger', () => {
 
   it('parses "Hello Watson, skip"', () => {
     const result = parseVoiceCommand('Hello Watson, skip', BOT);
-    expect(result).toEqual({ type: 'inbox-next' });
+    expect(result).toEqual({ type: 'pause' });
+  });
+});
+
+describe('parseVoiceCommand — wake check', () => {
+  it('parses "Hello Watson" with no trailing command', () => {
+    const result = parseVoiceCommand('Hello Watson', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses "Hey Watson," with no trailing command', () => {
+    const result = parseVoiceCommand('Hey Watson,', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses "Watson." with no trailing command', () => {
+    const result = parseVoiceCommand('Watson.', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses repeated wake-only phrase with punctuation', () => {
+    const result = parseVoiceCommand('Hello Watson. Hello Watson.', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
+  });
+
+  it('parses repeated wake-only phrase with comma separator', () => {
+    const result = parseVoiceCommand('Hello Watson, Watson', BOT);
+    expect(result).toEqual({ type: 'wake-check' });
   });
 });
 
@@ -275,6 +450,18 @@ describe('parseVoiceCommand — voice status', () => {
   it('parses "Hello Watson, voice status"', () => {
     const result = parseVoiceCommand('Hello Watson, voice status', BOT);
     expect(result).toEqual({ type: 'voice-status' });
+  });
+});
+
+describe('parseVoiceCommand — silent wait', () => {
+  it('parses "Hello Watson, silent"', () => {
+    const result = parseVoiceCommand('Hello Watson, silent', BOT);
+    expect(result).toEqual({ type: 'silent-wait' });
+  });
+
+  it('parses "Hey Watson, wait quietly"', () => {
+    const result = parseVoiceCommand('Hey Watson, wait quietly', BOT);
+    expect(result).toEqual({ type: 'silent-wait' });
   });
 });
 

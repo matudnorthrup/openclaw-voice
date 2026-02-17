@@ -2,6 +2,7 @@ import type { VoiceMode } from './queue-state.js';
 
 export type VoiceCommand =
   | { type: 'switch'; channel: string }
+  | { type: 'dispatch'; body: string }
   | { type: 'list' }
   | { type: 'default' }
   | { type: 'noise'; level: string }
@@ -12,11 +13,18 @@ export type VoiceCommand =
   | { type: 'mode'; mode: VoiceMode }
   | { type: 'inbox-check' }
   | { type: 'inbox-next' }
+  | { type: 'inbox-clear' }
+  | { type: 'read-last-message' }
   | { type: 'voice-status' }
+  | { type: 'voice-channel' }
   | { type: 'gated-mode'; enabled: boolean }
+  | { type: 'wake-check' }
+  | { type: 'silent-wait' }
+  | { type: 'hear-full-message' }
   | { type: 'pause' }
   | { type: 'replay' }
-  | { type: 'earcon-tour' };
+  | { type: 'earcon-tour' }
+  | { type: 'what-channel' };
 
 export interface ChannelOption {
   index: number;
@@ -31,11 +39,36 @@ export function matchesWakeWord(transcript: string, botName: string): boolean {
 
 export function parseVoiceCommand(transcript: string, botName: string): VoiceCommand | null {
   const trimmed = transcript.trim();
-  const trigger = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}[,.]?\\s+`, 'i');
+  const trigger = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}[,.]?\\s*`, 'i');
   const match = trimmed.match(trigger);
   if (!match) return null;
 
-  const rest = trimmed.slice(match[0].length).trim().toLowerCase().replace(/[.!?,]+$/, '');
+  // Handle repeated wake-only utterances like:
+  // "Hello Watson. Hello Watson."
+  // "Hello Watson, Watson"
+  const restRaw = trimmed.slice(match[0].length).trim();
+  if (restRaw.length > 0) {
+    const wakeOnlySegment = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}$`, 'i');
+    const segments = restRaw
+      .split(/[.!?]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (segments.length > 0 && segments.every((seg) => wakeOnlySegment.test(seg))) {
+      return { type: 'wake-check' };
+    }
+  }
+
+  const rest = trimmed
+    .slice(match[0].length)
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
+    .replace(/[.!?,]+$/, '')
+    .replace(/\bin-?box\b/g, 'inbox')
+    .replace(/\bin\s+box\b/g, 'inbox');
+  if (!rest) {
+    return { type: 'wake-check' };
+  }
 
   // Mode switch — must come before "switch to X" to avoid matching "switch to inbox mode" as a channel switch
   const modeMatch = rest.match(/^(?:switch\s+to\s+)?(inbox|queue|wait|ask)\s+mode$/);
@@ -45,15 +78,34 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'mode', mode };
   }
 
+  // "dispatch to <channel> <payload>", "dispatch this message to <channel> <payload>",
+  // and natural variants like "dispatch this in my <channel> ..."
+  // Keep this before switch parsing so dispatch phrases don't degrade into channel switch.
+  const dispatchMatch = rest.match(
+    /^(?:(?:please|can\s+you|could\s+you|would\s+you)\s+)*(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
+  );
+  if (dispatchMatch) {
+    const body = dispatchMatch[1].trim();
+    if (body.length > 0) {
+      return { type: 'dispatch', body };
+    }
+  }
+
   // "switch to X", "go to X", "change to X", "move to X"
+  // Exclude "inbox" — handled below as inbox-check
   const switchMatch = rest.match(/^(?:switch|go|change|move)\s+to\s+(.+)$/);
   if (switchMatch) {
-    return { type: 'switch', channel: switchMatch[1].trim() };
+    const target = switchMatch[1].trim();
+    if (/^(?:inbox|the\s+inbox|my\s+inbox)$/.test(target)) {
+      return { type: 'inbox-check' };
+    }
+    return { type: 'switch', channel: target };
   }
 
   // "change channels", "switch channels", "list channels", "show channels"
+  // Voice UX: map these to inbox status rather than channel enumeration.
   if (/^(?:change|switch|list|show)\s+channels?$/.test(rest)) {
-    return { type: 'list' };
+    return { type: 'inbox-check' };
   }
 
   // "go back", "go to default", "go home", "default", "go to default channel"
@@ -61,14 +113,16 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'default' };
   }
 
-  // "set noise to high", "noise low", "noise 800"
-  const noiseMatch = rest.match(/^(?:set\s+)?noise\s+(?:to\s+)?(.+)$/);
+  // "set noise to high", "set noise level high", "noise low", "noise 800"
+  const noiseMatch = rest.match(/^(?:set\s+)?noise(?:\s+level)?\s+(?:to\s+)?(.+)$/);
   if (noiseMatch) {
     return { type: 'noise', level: noiseMatch[1].trim() };
   }
 
-  // "set delay to 3000", "delay 2000"
-  const delayMatch = rest.match(/^(?:set\s+)?delay\s+(?:to\s+)?(\d+)$/);
+  // "set delay to 3000", "delay 2000", "set delay 500 milliseconds"
+  const delayMatch = rest.match(
+    /^(?:set\s+)?delay\s+(?:to\s+)?(\d+)(?:\s*(?:ms|millisecond|milliseconds))?$/,
+  );
   if (delayMatch) {
     return { type: 'delay', value: parseInt(delayMatch[1], 10) };
   }
@@ -90,9 +144,19 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'new-post' };
   }
 
+  // "what channel", "channel", "which channel", "current channel", "where am I"
+  if (/^(?:(?:what|which|current)\s+)?channel$|^where\s+am\s+i$/.test(rest)) {
+    return { type: 'what-channel' };
+  }
+
   // "voice status", "status"
   if (/^(?:voice\s+)?status$/.test(rest)) {
     return { type: 'voice-status' };
+  }
+
+  // "voice channel", "what channel", "which channel", "current channel", "where am I"
+  if (/^(?:(?:voice|what|which|current)\s+channel|where\s+am\s+i|what\s+channel\s+(?:am\s+i\s+(?:in|on)|is\s+this))$/.test(rest)) {
+    return { type: 'voice-channel' };
   }
 
   // "gated mode", "gate on" → enable gated; "open mode", "gate off", "ungated mode" → disable
@@ -111,13 +175,33 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'inbox-check' };
   }
 
-  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip"
-  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(rest)) {
+  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on"
+  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(rest)) {
     return { type: 'inbox-next' };
   }
 
-  // "pause", "stop", "stop talking", "be quiet", "shut up", "shush", "hush", "quiet", "silence", "enough"
-  if (/^(?:pause|stop(?:\s+talking)?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough)$/.test(rest)) {
+  // "clear inbox", "clear the inbox", "mark inbox read", "clear all"
+  if (/^(?:clear\s+(?:the\s+)?inbox|mark\s+(?:the\s+)?inbox\s+(?:as\s+)?read|mark\s+all\s+read|clear\s+all)$/.test(rest)) {
+    return { type: 'inbox-clear' };
+  }
+
+  // "read last message", "read the last message", "last message"
+  if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(rest)) {
+    return { type: 'read-last-message' };
+  }
+
+  // "hear full message", "hear a full message", "here full message" (STT homophone), "read full message", "full message"
+  if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full\s+message$|^full\s+message$/.test(rest)) {
+    return { type: 'hear-full-message' };
+  }
+
+  // "silent", "wait quietly", "quiet wait" — only meaningful while a wait is in-flight
+  if (/^(?:silent|silently|wait\s+quietly|quiet\s+wait)$/.test(rest)) {
+    return { type: 'silent-wait' };
+  }
+
+  // "pause", "stop", "skip", "be quiet", etc.
+  if (/^(?:pause|stop(?:\s+talking)?|skip(?:\s+(?:this(?:\s+(?:one|message|part))?|it|that))?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough)$/.test(rest)) {
     return { type: 'pause' };
   }
 

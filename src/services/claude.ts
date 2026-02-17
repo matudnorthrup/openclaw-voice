@@ -77,7 +77,7 @@ export async function getResponse(
   return { response: assistantText, history };
 }
 
-export async function quickCompletion(systemPrompt: string, userMessage: string): Promise<string> {
+export async function quickCompletion(systemPrompt: string, userMessage: string, maxTokens = 50): Promise<string> {
   const start = Date.now();
 
   const messages: Message[] = [
@@ -95,7 +95,7 @@ export async function quickCompletion(systemPrompt: string, userMessage: string)
     },
     body: JSON.stringify({
       model: `openclaw:${config.gatewayAgentId}`,
-      max_tokens: 50,
+      max_tokens: maxTokens,
       messages,
       user: sessionKey,
     }),

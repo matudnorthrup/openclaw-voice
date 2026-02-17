@@ -10,7 +10,8 @@ export type EarconName =
   | 'timeout-warning'
   | 'cancelled'
   | 'ready'
-  | 'busy';
+  | 'busy'
+  | 'gate-closed';
 
 const cache = new Map<EarconName, Buffer>();
 
@@ -83,137 +84,168 @@ function mixToWav(mix: Float64Array): Buffer {
 }
 
 /**
- * Soft C5→E5 with a bit more hold — "I captured your speech" (~230ms)
+ * Single high A5 tap — "Heard you" (~200ms)
+ * Brief, bright, high register. Distinct from everything else by being
+ * the only earcon in the A5 range with a single-note shape.
  */
 function generateListening(): Buffer {
-  const duration = 0.23;
+  const duration = 0.2;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
-  const amp = 2500;
 
-  // C5 (523 Hz) for first half
-  const note1 = warmBellTone(523, amp, 0.14, 9);
-  mixInto(mix, note1, 0);
-
-  // E5 (659 Hz) for second half
-  const note2 = warmBellTone(659, amp * 0.72, 0.13, 9.5);
-  mixInto(mix, note2, Math.floor(0.1 * SAMPLE_RATE));
+  // A5 (880 Hz) — high, light, quick
+  const note = warmBellTone(880, 2400, 0.18, 8);
+  mixInto(mix, note, 0);
 
   return mixToWav(mix);
 }
 
 /**
- * Warm ascending bell motif C4→E4→G4→C5 — "Got it" (~320ms)
+ * Warm ascending G4→C5 — "Got it" (~500ms)
+ * Celebratory ascending perfect fourth. No echo (distinguishes from processing loop).
  */
 function generateAcknowledged(): Buffer {
-  const duration = 0.32;
+  const duration = 0.5;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
-  const amp = 3300;
+  const amp = 3200;
 
-  const note1 = warmBellTone(262, amp, 0.11, 7.3); // C4
+  // G4 (392 Hz)
+  const note1 = warmBellTone(392, amp, 0.35, 6);
   mixInto(mix, note1, 0);
-  const note2 = warmBellTone(330, amp * 0.93, 0.11, 7.6); // E4
-  mixInto(mix, note2, Math.floor(0.055 * SAMPLE_RATE));
-  const note3 = warmBellTone(392, amp * 0.88, 0.12, 7.8); // G4
-  mixInto(mix, note3, Math.floor(0.115 * SAMPLE_RATE));
-  const note4 = warmBellTone(523, amp * 0.84, 0.12, 7); // C5
-  mixInto(mix, note4, Math.floor(0.175 * SAMPLE_RATE));
+
+  // C5 (523 Hz) — ascending fourth, bright finish
+  const note2 = warmBellTone(523, amp * 0.85, 0.3, 6);
+  mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
 
 /**
- * Descending E4→C4 — "Didn't understand" (~300ms)
+ * Low descending G3→E3 — "Didn't understand" (~450ms)
+ * Dropped into low register so negative cues feel distinct from positive ones.
  */
 function generateError(): Buffer {
-  const duration = 0.3;
-  const samples = Math.floor(duration * SAMPLE_RATE);
-  const mix = new Float64Array(samples);
-  const amp = 4000;
-
-  // E4 (330 Hz)
-  const note1 = tone(330, amp, 0.18, 8);
-  mixInto(mix, note1, 0);
-
-  // C4 (262 Hz)
-  const note2 = tone(262, amp * 0.85, 0.18, 8);
-  mixInto(mix, note2, Math.floor(0.14 * SAMPLE_RATE));
-
-  return mixToWav(mix);
-}
-
-/**
- * Two quick A5 pings — "About to time out" (~250ms)
- */
-function generateTimeoutWarning(): Buffer {
-  const duration = 0.25;
-  const samples = Math.floor(duration * SAMPLE_RATE);
-  const mix = new Float64Array(samples);
-  const amp = 4000;
-
-  // First A5 ping (880 Hz)
-  const ping1 = tone(880, amp, 0.1, 15);
-  mixInto(mix, ping1, 0);
-
-  // Second A5 ping
-  const ping2 = tone(880, amp, 0.1, 15);
-  mixInto(mix, ping2, Math.floor(0.13 * SAMPLE_RATE));
-
-  return mixToWav(mix);
-}
-
-/**
- * Descending G4→D4 — "Flow ended / timed out" (~350ms)
- */
-function generateCancelled(): Buffer {
-  const duration = 0.35;
+  const duration = 0.45;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
   const amp = 3500;
 
-  // G4 (392 Hz)
-  const note1 = tone(392, amp, 0.2, 7);
+  // E4 (330 Hz) — mid-low, clearly audible
+  const note1 = warmBellTone(330, 4500, 0.3, 6);
   mixInto(mix, note1, 0);
 
-  // D4 (294 Hz)
-  const note2 = tone(294, amp * 0.8, 0.2, 7);
-  mixInto(mix, note2, Math.floor(0.17 * SAMPLE_RATE));
+  // C4 (262 Hz) — descending
+  const note2 = warmBellTone(262, 4500 * 0.8, 0.28, 6.5);
+  mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
 
 /**
- * Distinct warm cadence A4→D5→F#5→D5 — "Your turn to speak" (~360ms)
+ * Tick-tock clock: four alternating knocks — "Time running out" (~700ms)
+ * Percussive, fast-decay tones alternating between two close pitches
+ * like a clock mechanism. Tick (higher) → tock (lower) × 2.
+ */
+function generateTimeoutWarning(): Buffer {
+  const duration = 0.7;
+  const samples = Math.floor(duration * SAMPLE_RATE);
+  const mix = new Float64Array(samples);
+  const amp = 3200;
+  const knockDecay = 18; // Very fast decay = percussive knock
+
+  // Tick (D5, 587 Hz) — sharp, bright
+  const tick = warmBellTone(587, amp, 0.1, knockDecay);
+  // Tock (A4, 440 Hz) — slightly lower, duller
+  const tock = warmBellTone(440, amp * 0.85, 0.1, knockDecay);
+
+  // tick-tock tick-tock with even spacing
+  mixInto(mix, tick, 0);
+  mixInto(mix, tock, Math.floor(0.15 * SAMPLE_RATE));
+  mixInto(mix, tick, Math.floor(0.33 * SAMPLE_RATE));
+  mixInto(mix, tock, Math.floor(0.48 * SAMPLE_RATE));
+
+  return mixToWav(mix);
+}
+
+/**
+ * Three-note warm descent G4→E4→C4 — "Flow ended / winding down" (~600ms)
+ * Deliberate three-step descent distinguishes from gate-closed's single tap.
+ */
+function generateCancelled(): Buffer {
+  const duration = 0.6;
+  const samples = Math.floor(duration * SAMPLE_RATE);
+  const mix = new Float64Array(samples);
+  const amp = 3000;
+
+  // G4 (392 Hz) — start, boosted for low-end resolve
+  const note1 = warmBellTone(392, 4200, 0.3, 6);
+  mixInto(mix, note1, 0);
+
+  // E4 (330 Hz) — step down
+  const note2 = warmBellTone(330, 4200 * 0.85, 0.28, 6.5);
+  mixInto(mix, note2, Math.floor(0.16 * SAMPLE_RATE));
+
+  // C4 (262 Hz) — resolve to bottom
+  const note3 = warmBellTone(262, 4200 * 0.75, 0.25, 7);
+  mixInto(mix, note3, Math.floor(0.32 * SAMPLE_RATE));
+
+  return mixToWav(mix);
+}
+
+/**
+ * Charge refrain: E5→G5→C6 — "Your turn!" (~700ms)
+ * Three ascending notes ending on a high C6 resolve. The signature sound
+ * of the system — memorable, bright, unmistakable. Given space to ring.
  */
 function generateReady(): Buffer {
-  const duration = 0.36;
+  const duration = 0.7;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
-  const amp = 3050;
+  const amp = 2800;
 
-  const strike1 = warmBellTone(440, amp, 0.13, 7.4); // A4
-  mixInto(mix, strike1, 0);
-  const strike2 = warmBellTone(587, amp * 0.96, 0.14, 7.1); // D5
-  mixInto(mix, strike2, Math.floor(0.085 * SAMPLE_RATE));
-  const strike3 = warmBellTone(740, amp * 0.84, 0.11, 7.6); // F#5
-  mixInto(mix, strike3, Math.floor(0.165 * SAMPLE_RATE));
-  const strike4 = warmBellTone(587, amp * 0.74, 0.12, 7.1); // D5 resolve
-  mixInto(mix, strike4, Math.floor(0.235 * SAMPLE_RATE));
+  // E5 (659 Hz) — launch
+  const note1 = warmBellTone(659, amp, 0.25, 6.5);
+  mixInto(mix, note1, 0);
+
+  // G5 (784 Hz) — step up
+  const note2 = warmBellTone(784, amp * 0.9, 0.25, 6.5);
+  mixInto(mix, note2, Math.floor(0.14 * SAMPLE_RATE));
+
+  // C6 (1047 Hz) — bright resolve, let it ring out
+  const note3 = warmBellTone(1047, amp * 0.85, 0.4, 5);
+  mixInto(mix, note3, Math.floor(0.28 * SAMPLE_RATE));
 
   return mixToWav(mix);
 }
 
 /**
- * Brief low G3 hum — "I heard you but I'm busy" (~150ms)
+ * Warm low G3 hum — "I heard you but I'm busy" (~300ms)
  */
 function generateBusy(): Buffer {
-  const duration = 0.15;
+  const duration = 0.3;
   const samples = Math.floor(duration * SAMPLE_RATE);
   const mix = new Float64Array(samples);
 
-  // G3 (196 Hz) — low, subtle
-  const note = tone(196, 3500, duration, 6);
+  // C4 (262 Hz) — low-mid, audible hum
+  const note = warmBellTone(262, 7000, 0.25, 5);
+  mixInto(mix, note, 0);
+
+  return mixToWav(mix);
+}
+
+/**
+ * Single soft D4 tap — "Gate shut" (~250ms)
+ * Minimal, subtle, mid-low register. A quiet "click shut" — distinct from
+ * listening's high A5 tap and busy's low G3 hum.
+ */
+function generateGateClosed(): Buffer {
+  const duration = 0.25;
+  const samples = Math.floor(duration * SAMPLE_RATE);
+  const mix = new Float64Array(samples);
+
+  // Single soft A4 (440 Hz) — clearly audible, quick decay
+  const note = warmBellTone(440, 5000, 0.2, 8);
   mixInto(mix, note, 0);
 
   return mixToWav(mix);
@@ -227,6 +259,7 @@ const generators: Record<EarconName, () => Buffer> = {
   'cancelled': generateCancelled,
   'ready': generateReady,
   'busy': generateBusy,
+  'gate-closed': generateGateClosed,
 };
 
 /**
@@ -259,5 +292,5 @@ export function getEarcon(name: EarconName): Buffer {
  */
 export const EARCON_NAMES: EarconName[] = [
   'listening', 'acknowledged', 'error', 'timeout-warning',
-  'cancelled', 'ready', 'busy',
+  'cancelled', 'ready', 'busy', 'gate-closed',
 ];

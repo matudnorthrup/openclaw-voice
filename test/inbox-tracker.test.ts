@@ -66,28 +66,29 @@ describe('InboxTracker', () => {
   describe('checkInbox', () => {
     it('returns channels with new activity', async () => {
       const qs = createMockQueueState();
-      // Set baseline snapshots
+      // Use timestamp-sized baselines to avoid legacy migration path
+      const T = 1_700_000_000_000;
       qs.setSnapshots({
-        'session:health': 2,
-        'session:finance': 1,
+        'session:health': T + 2000,
+        'session:finance': T + 1000,
         'session:planning': 0,
       });
 
-      // Health now has 4 messages (2 new), finance still 1, planning still 0
+      // Health now has 4 messages (2 new since T+2000), finance still at baseline
       const historyMap: Record<string, ChatMessage[]> = {
         'session:health': [
-          { role: 'user', content: 'hi' },
-          { role: 'assistant', content: 'hello' },
-          { role: 'user', content: 'new msg 1' },
-          { role: 'assistant', content: 'new msg 2' },
+          { role: 'user', content: 'hi', timestamp: T + 1000 },
+          { role: 'assistant', content: 'hello', timestamp: T + 2000 },
+          { role: 'user', content: 'new msg 1', timestamp: T + 3000 },
+          { role: 'assistant', content: 'new msg 2', timestamp: T + 4000 },
         ],
         'session:finance': [
-          { role: 'user', content: 'budget' },
+          { role: 'user', content: 'budget', timestamp: T + 1000 },
         ],
         'session:planning': [],
-      };
+      } as any;
 
-      const gs = createMockGatewaySync(historyMap);
+      const gs = createMockGatewaySync(historyMap as any);
       const tracker = new InboxTracker(qs as any, gs as any);
 
       const activities = await tracker.checkInbox(testChannels);

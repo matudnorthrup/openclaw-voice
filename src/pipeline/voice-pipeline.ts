@@ -9,7 +9,10 @@ import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import { parseVoiceCommand, matchesWakeWord, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
 import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
-import { PipelineStateMachine, type TransitionEffect } from './pipeline-state.js';
+import { PipelineStateMachine, type TransitionEffect, type PipelineEvent } from './pipeline-state.js';
+import { checkPipelineInvariants, type InvariantContext } from './pipeline-invariants.js';
+import { createTransientContext, resetTransientContext, type TransientContext } from './transient-context.js';
+import { createHealthCounters, type HealthCounters, type HealthSnapshot } from '../services/health-snapshot.js';
 import { initEarcons, type EarconName } from '../audio/earcons.js';
 import type { ChannelRouter } from '../services/channel-router.js';
 import type { GatewaySync } from '../services/gateway-sync.js';
@@ -20,8 +23,15 @@ import type { InboxTracker, ChannelActivity } from '../services/inbox-tracker.js
 
 export class VoicePipeline {
   private static readonly READY_GRACE_MS = 5_000;
+  // Absorb Discord/VAD timing jitter at the ready->speak handoff.
+  private static readonly READY_HANDOFF_TOLERANCE_MS = 600;
+  // Rejected-audio reprompts are useful for brief misses, but noisy long chunks
+  // create chaotic beep loops in guided flows.
+  private static readonly MAX_REJECTED_REPROMPT_MS = 2200;
   private static readonly PROCESSING_LOOP_START_DELAY_MS = 350;
   private static readonly FAST_CUE_COALESCE_MS = 220;
+  private static readonly COMMAND_CLASSIFIER_MAX_CHARS = 420;
+  private static readonly NEW_POST_TIMEOUT_PROMPT_GUARD_MS = 8_000;
 
   private receiver: AudioReceiver;
   private player: DiscordAudioPlayer;
@@ -34,17 +44,145 @@ export class VoicePipeline {
   private responsePoller: ResponsePoller | null = null;
   private inboxTracker: InboxTracker | null = null;
   private inboxLogChannel: TextChannel | null = null;
-  private lastSpokenText: string = '';
-  private silentWait = false;
-  private gateGraceUntil = 0;
-  private promptGraceUntil = 0;
-  private rejectRepromptInFlight = false;
-  private rejectRepromptCooldownUntil = 0;
-  private ignoreProcessingUtterancesUntil = 0;
+
+  // Centralized transient state (reset on stop/stall)
+  private ctx: TransientContext = createTransientContext();
+
+  // Timer handles (cleared via clearAllTimers)
   private waitingLoopTimer: NodeJS.Timeout | null = null;
   private fastCueTimer: NodeJS.Timeout | null = null;
   private pendingFastCue: EarconName | null = null;
   private pendingFastCueResolvers: Array<() => void> = [];
+  private graceExpiryTimer: NodeJS.Timeout | null = null;
+  private deferredWaitRetryTimer: NodeJS.Timeout | null = null;
+  private deferredIdleNotifyTimers = new Map<string, NodeJS.Timeout>();
+
+  // Stall watchdog
+  private stallWatchdogTimer: NodeJS.Timeout | null = null;
+  private lastTransitionAt = Date.now();
+  private stallWatchdogFires = 0;
+  private static readonly STALL_WATCHDOG_MS = 60_000;
+
+  // Health counters
+  private counters: HealthCounters = createHealthCounters();
+  private readonly startedAt = Date.now();
+
+  private stamp(): string {
+    return new Date().toISOString();
+  }
+
+  private shouldCueFailedWake(transcript: string): boolean {
+    const input = transcript.trim().toLowerCase();
+    if (!input) return false;
+    // Explicit near-wake attempts (common STT confusion: "weak test/check")
+    // should always get feedback in gated mode.
+    if (/\b(?:wake|weak)\s+(?:check|test)\b/i.test(input)) return true;
+    // Near-miss wake guard: mentions bot name + likely command words,
+    // but does not pass strict wake-at-start matching.
+    if (!/\bwatson\b/i.test(input)) return false;
+    if (matchesWakeWord(transcript, config.botName)) return false;
+    const words = input.split(/\s+/).filter(Boolean);
+    if (words.length <= 3) return true;
+    return /\b(?:hello|hey|inbox|switch|go|list|status|read|dispatch|next|done)\b/i.test(input);
+  }
+
+  private looksLikeBareCommandAttempt(transcript: string): boolean {
+    const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/g, '');
+    if (!input) return false;
+    if (matchesWakeWord(transcript, config.botName)) return false;
+    const words = input.split(/\s+/).filter(Boolean);
+    if (words.length === 0 || words.length > 20) return false;
+    if (/^(?:switch|go|change|move)\s+to\s+.+$/.test(input)) return true;
+    if (/\b(?:switch|go|change|move)\s+to\s+[a-z0-9#:_-]{2,}/.test(input)) return true;
+    return /^(?:inbox(?:\s+list)?|next|done|skip|clear\s+(?:the\s+)?inbox|read\s+(?:the\s+)?last\s+message|last\s+message|voice\s+status|status)$/.test(input) ||
+      /\b(?:inbox|next|done|skip|read\s+(?:the\s+)?last\s+message|last\s+message|voice\s+status)\b/.test(input);
+  }
+
+  private seemsCommandLikeForMissedWakeLLM(transcript: string): boolean {
+    const input = transcript.trim().toLowerCase();
+    if (!input) return false;
+    const words = input.split(/\s+/).filter(Boolean);
+    if (words.length === 0 || words.length > 18) return false;
+    return /\b(?:switch|go to|change to|move to|inbox|mode|read|last message|next|skip|clear|dispatch|status|replay|repeat|pause|silent)\b/.test(input);
+  }
+
+  private shouldRunCommandClassifier(transcript: string): boolean {
+    const input = transcript.trim();
+    if (!input) return false;
+    const words = input.split(/\s+/).filter(Boolean);
+    // Long freeform utterances are overwhelmingly prompts; skip classifier to
+    // avoid delaying acknowledgement on normal channel prompts.
+    if (words.length >= 9 && !this.seemsCommandLikeForMissedWakeLLM(input)) {
+      return false;
+    }
+    return true;
+  }
+
+  private async maybeCueMissedWakeFromLLM(transcript: string, mode: VoiceMode, inGracePeriod: boolean): Promise<void> {
+    if (this.ctx.missedWakeAnalysisInFlight) return;
+    if (!this.seemsCommandLikeForMissedWakeLLM(transcript)) return;
+    this.ctx.missedWakeAnalysisInFlight = true;
+    try {
+      const inferred = await this.inferVoiceCommandLLM(transcript, mode, inGracePeriod);
+      if (!inferred) return;
+      const now = Date.now();
+      if (now < this.ctx.failedWakeCueCooldownUntil) return;
+      this.ctx.failedWakeCueCooldownUntil = now + 1500;
+      console.log(`Missed wake inferred by LLM (intent=${inferred.type}) — emitting error earcon`);
+      void this.playFastCue('error');
+    } finally {
+      this.ctx.missedWakeAnalysisInFlight = false;
+    }
+  }
+
+  private cueFailedWakeIfNeeded(transcript: string): void {
+    if (!this.shouldCueFailedWake(transcript)) return;
+    const now = Date.now();
+    if (now < this.ctx.failedWakeCueCooldownUntil) return;
+    this.ctx.failedWakeCueCooldownUntil = now + 1500;
+    console.log('Failed-wake guard: emitting error earcon');
+    void this.playFastCue('error');
+  }
+
+  private getReadyItemsForSession(sessionKey: string, channelName?: string) {
+    return this.queueState?.getReadyItems().filter(
+      (item) => item.sessionKey === sessionKey || (!!channelName && item.channel === channelName),
+    ) ?? [];
+  }
+
+  private isNonLexicalTranscript(transcript: string): boolean {
+    const text = transcript.trim();
+    if (!text) return true;
+
+    // Whisper markers like "[BLANK_AUDIO]" / "[SOUND]" should never route into
+    // command parsing or prompt dispatch.
+    if (/^(?:\s*\[[a-z0-9_ -]+\]\s*)+$/i.test(text)) return true;
+
+    // If there's no alphabetic signal at all, treat as non-lexical noise.
+    return !/[a-z]/i.test(text);
+  }
+
+  private normalizeForEcho(text: string): string {
+    return text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  private isLikelyPlaybackEcho(transcript: string): boolean {
+    if (matchesWakeWord(transcript, config.botName)) return false;
+    if (!this.ctx.lastPlaybackText || !this.ctx.lastPlaybackCompletedAt) return false;
+    if (Date.now() - this.ctx.lastPlaybackCompletedAt > 15_000) return false;
+
+    const spoken = this.normalizeForEcho(this.ctx.lastPlaybackText);
+    const heard = this.normalizeForEcho(transcript);
+    if (!spoken || !heard) return false;
+    if (heard.length < 8) return false;
+    if (heard.split(' ').length < 2) return false;
+
+    return spoken.includes(heard);
+  }
 
   constructor(
     connection: VoiceConnection,
@@ -104,20 +242,119 @@ export class VoicePipeline {
 
   stop(): void {
     this.receiver.stop();
-    this.clearFastCueQueue();
-    this.player.stopPlayback();
+    this.clearAllTimers();
+    this.player.stopPlayback('pipeline-stop');
+    resetTransientContext(this.ctx);
     this.stateMachine.destroy();
     console.log('Voice pipeline stopped');
+  }
+
+  private clearAllTimers(): void {
+    this.clearFastCueQueue();
+    this.clearGraceTimer();
+    this.clearDeferredWaitRetry();
+    if (this.waitingLoopTimer) {
+      clearTimeout(this.waitingLoopTimer);
+      this.waitingLoopTimer = null;
+    }
+    this.player.stopWaitingLoop();
+    if (this.stallWatchdogTimer) {
+      clearTimeout(this.stallWatchdogTimer);
+      this.stallWatchdogTimer = null;
+    }
+    for (const timer of this.deferredIdleNotifyTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.deferredIdleNotifyTimers.clear();
+  }
+
+  private transitionAndResetWatchdog(event: PipelineEvent): TransitionEffect[] {
+    const effects = this.stateMachine.transition(event);
+    this.resetStallWatchdog();
+    return effects;
+  }
+
+  private resetStallWatchdog(): void {
+    this.lastTransitionAt = Date.now();
+    if (this.stallWatchdogTimer) {
+      clearTimeout(this.stallWatchdogTimer);
+    }
+    this.stallWatchdogTimer = setTimeout(
+      () => this.onStallWatchdogFired(),
+      VoicePipeline.STALL_WATCHDOG_MS,
+    );
+  }
+
+  private onStallWatchdogFired(): void {
+    this.stallWatchdogTimer = null;
+    const stateType = this.stateMachine.getStateType();
+    if (stateType === 'IDLE') {
+      // Re-arm for next cycle
+      this.resetStallWatchdog();
+      return;
+    }
+
+    // SPEAKING with active playback is not a stall — long TTS responses are legitimate
+    if (stateType === 'SPEAKING' && (this.player.isPlaying() || this.player.isWaiting())) {
+      this.resetStallWatchdog();
+      return;
+    }
+
+    this.stallWatchdogFires++;
+    this.counters.stallWatchdogFires++;
+    const ageMs = Date.now() - this.lastTransitionAt;
+    console.warn(
+      `Stall watchdog fired: state=${stateType} age=${ageMs}ms fires=${this.stallWatchdogFires} — force-resetting to IDLE`,
+    );
+
+    this.clearAllTimers();
+    resetTransientContext(this.ctx);
+    this.player.stopPlayback('stall-watchdog');
+    this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+    void this.player.playEarcon('error');
+    this.resetStallWatchdog();
+  }
+
+  private getInvariantContext(): InvariantContext {
+    return {
+      stateType: this.stateMachine.getStateType(),
+      hasStateMachineTimers: this.stateMachine.hasActiveTimers(),
+      isPlayerPlaying: this.player.isPlaying(),
+      isPlayerWaiting: this.player.isWaiting(),
+      waitingLoopTimerActive: this.waitingLoopTimer !== null,
+      deferredWaitRetryTimerActive: this.deferredWaitRetryTimer !== null,
+      pendingWaitCallback: this.ctx.pendingWaitCallback !== null,
+    };
   }
 
   isPlaying(): boolean {
     return this.player.isPlaying();
   }
 
+  getHealthSnapshot(): HealthSnapshot {
+    const stateType = this.stateMachine.getStateType();
+    return {
+      pipelineState: stateType,
+      pipelineStateAge: Date.now() - this.lastTransitionAt,
+      uptime: Date.now() - this.startedAt,
+      mode: (this.queueState?.getMode() ?? 'wait') as string,
+      activeChannel: this.router?.getActiveChannel()?.name ?? null,
+      queueReady: this.queueState?.getReadyItems().length ?? 0,
+      queuePending: this.queueState?.getPendingItems().length ?? 0,
+      gatewayConnected: this.gatewaySync?.isConnected() ?? false,
+      dependencies: { whisper: 'unknown', tts: 'unknown' },
+      counters: { ...this.counters },
+    };
+  }
+
+  getCounters(): HealthCounters {
+    return this.counters;
+  }
+
   interrupt(): void {
     if (this.player.isPlaying()) {
       console.log('Interrupting playback');
-      this.player.stopPlayback();
+      this.player.stopPlayback('external-interrupt');
     }
   }
 
@@ -142,6 +379,20 @@ export class VoicePipeline {
    * Apply a list of transition effects produced by the state machine.
    */
   private async applyEffects(effects: TransitionEffect[]): Promise<void> {
+    // When guided new-post flow times out, prevent immediate follow-on dictation
+    // from being treated as a normal channel prompt.
+    const newPostTimedOut = effects.some(
+      (effect) =>
+        effect.type === 'speak' &&
+        effect.text.toLowerCase().includes('new post flow timed out'),
+    );
+    if (newPostTimedOut) {
+      this.ctx.newPostTimeoutPromptGuardUntil = Date.now() + VoicePipeline.NEW_POST_TIMEOUT_PROMPT_GUARD_MS;
+      console.log(
+        `New-post timeout guard enabled for ${VoicePipeline.NEW_POST_TIMEOUT_PROMPT_GUARD_MS}ms`,
+      );
+    }
+
     for (const effect of effects) {
       switch (effect.type) {
         case 'earcon':
@@ -151,7 +402,7 @@ export class VoicePipeline {
           await this.speakResponse(effect.text);
           break;
         case 'stop-playback':
-          this.player.stopPlayback();
+          this.player.stopPlayback('state-machine-effect');
           break;
         case 'start-waiting-loop':
           this.startWaitingLoop();
@@ -164,17 +415,23 @@ export class VoicePipeline {
   }
 
   private async handleUtterance(userId: string, wavBuffer: Buffer, durationMs: number): Promise<void> {
+    this.counters.utterancesProcessed++;
+    // Clear stale speculative queue item (safety net for timeout edge case)
+    if (this.ctx.speculativeQueueItemId && !this.stateMachine.getQueueChoiceState()) {
+      this.ctx.speculativeQueueItemId = null;
+    }
+
     const stateAtStart = this.stateMachine.getStateType();
     const isSpeakingAtStart = stateAtStart === 'SPEAKING';
     const gatedMode = getVoiceSettings().gated;
     const nowAtCapture = Date.now();
     const utteranceStartEstimate = nowAtCapture - Math.max(0, durationMs);
     const graceFromGateAtCapture =
-      nowAtCapture < this.gateGraceUntil ||
-      utteranceStartEstimate < this.gateGraceUntil;
+      nowAtCapture < this.ctx.gateGraceUntil ||
+      utteranceStartEstimate < (this.ctx.gateGraceUntil + VoicePipeline.READY_HANDOFF_TOLERANCE_MS);
     const graceFromPromptAtCapture =
-      nowAtCapture < this.promptGraceUntil ||
-      utteranceStartEstimate < this.promptGraceUntil;
+      nowAtCapture < this.ctx.promptGraceUntil ||
+      utteranceStartEstimate < (this.ctx.promptGraceUntil + VoicePipeline.READY_HANDOFF_TOLERANCE_MS);
 
     // Interrupt TTS playback if user speaks — but don't kill the waiting tone
     const wasPlayingResponse = this.player.isPlaying() && !this.player.isWaiting();
@@ -182,22 +439,23 @@ export class VoicePipeline {
     // Open mode: interrupt immediately. Gated mode: defer until after transcription.
     if (wasPlayingResponse && !gatedMode) {
       console.log('User spoke during playback — interrupting');
-      this.player.stopPlayback();
+      this.player.stopPlayback('speech-during-playback-open-mode');
     }
 
     const gatedInterrupt = wasPlayingResponse && gatedMode;
     const gatedSpeakingProbe = gatedInterrupt && isSpeakingAtStart;
+    const gateClosedCueInterrupt = gatedInterrupt && this.player.isPlayingEarcon('gate-closed');
     let keepCurrentState = false;
     let playedListeningEarly = false;
 
     // Check if busy — buffer utterance instead of silently dropping
     if (this.isProcessing() && !gatedSpeakingProbe) {
-      if (Date.now() < this.ignoreProcessingUtterancesUntil) {
+      if (Date.now() < this.ctx.ignoreProcessingUtterancesUntil) {
         console.log('Ignoring utterance during short post-choice debounce window');
         return;
       }
       console.log('Already processing — buffering utterance');
-      const effects = this.stateMachine.transition({ type: 'UTTERANCE_RECEIVED' });
+      const effects = this.transitionAndResetWatchdog({ type: 'UTTERANCE_RECEIVED' });
       this.stateMachine.bufferUtterance(userId, wavBuffer, durationMs);
       await this.applyEffects(effects);
       return;
@@ -205,18 +463,22 @@ export class VoicePipeline {
 
     // Transition to TRANSCRIBING
     if (!gatedSpeakingProbe) {
-      this.stateMachine.transition({ type: 'UTTERANCE_RECEIVED' });
+      this.transitionAndResetWatchdog({ type: 'UTTERANCE_RECEIVED' });
     }
 
     // For AWAITING states, play listening earcon immediately — no wake word needed,
     // so we know this is a valid interaction before STT even runs
     const stateType = this.stateMachine.getStateType();
-    if (this.stateMachine.isAwaitingState() || stateType === 'INBOX_FLOW') {
-      void this.playFastCue('listening');
+    if (this.stateMachine.isAwaitingState()) {
+      // Play immediately here (no fast-cue coalescing) so it can't fire late and
+      // preempt a near-immediate spoken command response.
+      void this.player.playEarcon('listening');
       playedListeningEarly = true;
     } else if (gatedMode && (graceFromGateAtCapture || graceFromPromptAtCapture)) {
       // In grace, speech should feel accepted immediately even for non-awaiting turns.
-      void this.playFastCue('listening');
+      // Play immediately here (no fast-cue coalescing) so it can't fire late and
+      // preempt a near-immediate spoken command response.
+      void this.player.playEarcon('listening');
       playedListeningEarly = true;
     }
 
@@ -224,9 +486,11 @@ export class VoicePipeline {
 
     try {
       // Start waiting indicator sound
-      // Skip for: gated mode (deferred until wake word), AWAITING states (no processing needed)
+      // Skip for: gated mode (deferred until wake word), AWAITING states (no processing needed),
+      // and inbox/ask capture where a queue acknowledgement is expected instead of "processing".
       const isAwaiting = this.stateMachine.isAwaitingState() || this.stateMachine.getStateType() === 'INBOX_FLOW';
-      if (!gatedMode && !isAwaiting) {
+      const modeAtCapture = this.queueState?.getMode() ?? 'wait';
+      if (!gatedMode && !isAwaiting && modeAtCapture === 'wait') {
         this.startWaitingLoop();
       }
 
@@ -243,11 +507,37 @@ export class VoicePipeline {
           keepCurrentState = true;
           return;
         }
-        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         return;
       }
 
-      this.stateMachine.transition({ type: 'TRANSCRIPT_READY', transcript });
+      if (this.isNonLexicalTranscript(transcript)) {
+        console.log(`Non-lexical transcript ignored: "${transcript}"`);
+        this.stopWaitingLoop();
+        if (this.stateMachine.isAwaitingState()) {
+          await this.playReadyEarcon();
+        } else if (gatedSpeakingProbe) {
+          keepCurrentState = true;
+        } else {
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        }
+        return;
+      }
+
+      if (this.isLikelyPlaybackEcho(transcript)) {
+        console.log(`Playback echo suppressed: "${transcript}"`);
+        this.stopWaitingLoop();
+        if (this.stateMachine.isAwaitingState()) {
+          await this.playReadyEarcon();
+        } else if (gatedSpeakingProbe) {
+          keepCurrentState = true;
+        } else {
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        }
+        return;
+      }
+
+      this.transitionAndResetWatchdog({ type: 'TRANSCRIPT_READY', transcript });
 
       // Step 1.5: Check for awaiting responses (bypass LLM)
       // These are valid interactions that don't need a wake word
@@ -292,50 +582,104 @@ export class VoicePipeline {
 
       // Gate check: in gated mode, discard utterances that don't start with the wake word
       // Grace period: skip gate for 5s after Watson finishes speaking
-      const inGracePeriod = graceFromGateAtCapture ||
-        graceFromPromptAtCapture ||
-        Date.now() < this.gateGraceUntil ||
-        Date.now() < this.promptGraceUntil;
-      if (gatedMode && !inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
+      // While a wait callback is pending, require wake word in gated mode.
+      // Grace windows are intended for explicit "your turn" handoffs, not
+      // background processing where accidental noises can cause interruptions.
+      const mode = this.queueState?.getMode() ?? 'wait';
+      const allowGraceBypass = this.ctx.pendingWaitCallback === null;
+      const hasWakeWord = matchesWakeWord(transcript, config.botName);
+      const inGracePeriod = (
+        allowGraceBypass &&
+        (
+          graceFromGateAtCapture ||
+          graceFromPromptAtCapture ||
+          Date.now() < (this.ctx.gateGraceUntil + VoicePipeline.READY_HANDOFF_TOLERANCE_MS) ||
+          Date.now() < (this.ctx.promptGraceUntil + VoicePipeline.READY_HANDOFF_TOLERANCE_MS)
+        )
+      );
+      const interruptGraceEligible = allowGraceBypass && (graceFromGateAtCapture || graceFromPromptAtCapture);
+
+      // By design in gated mode, interrupting active playback must include wake word.
+      if (gatedInterrupt && !hasWakeWord && !gateClosedCueInterrupt && !interruptGraceEligible) {
+        console.log(`Gated interrupt rejected (wake word required): "${transcript}"`);
+        if (gatedSpeakingProbe) {
+          keepCurrentState = true;
+        } else {
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        }
+        return;
+      }
+      if (gatedMode && !inGracePeriod && !hasWakeWord) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
           // Don't stop playback — Watson keeps talking
-          keepCurrentState = true;
+          if (gatedSpeakingProbe) {
+            keepCurrentState = true;
+          } else {
+            this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+          }
+          this.cueFailedWakeIfNeeded(transcript);
+        } else if (this.ctx.pendingWaitCallback) {
+          console.log(`Gated: discarded "${transcript}" (wait processing continues)`);
+          this.cueFailedWakeIfNeeded(transcript);
+          void this.maybeCueMissedWakeFromLLM(transcript, mode, inGracePeriod);
+          // Don't stop waiting loop — pending wait callback is active
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         } else {
           console.log(`Gated: discarded "${transcript}"`);
+          if (this.looksLikeBareCommandAttempt(transcript)) {
+            const now = Date.now();
+            if (now >= this.ctx.failedWakeCueCooldownUntil) {
+              this.ctx.failedWakeCueCooldownUntil = now + 1500;
+              console.log('Failed command attempt without wake word: emitting error earcon');
+              void this.playFastCue('error');
+            }
+          } else {
+            this.cueFailedWakeIfNeeded(transcript);
+            void this.maybeCueMissedWakeFromLLM(transcript, mode, inGracePeriod);
+          }
           this.stopWaitingLoop();
-          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         }
         return;
       }
 
+      const preParsedCommand = parseVoiceCommand(transcript, config.botName);
+      const suppressListeningCue = preParsedCommand?.type === 'wake-check';
+
       // Valid interaction confirmed — play listening earcon and wait for it to finish
-      if (!playedListeningEarly) {
+      this.clearGraceTimer();
+      if (!playedListeningEarly && !suppressListeningCue) {
         await this.playFastCue('listening');
       }
-      if (graceFromPromptAtCapture || Date.now() < this.promptGraceUntil) {
-        this.promptGraceUntil = 0;
+      if (graceFromPromptAtCapture || Date.now() < this.ctx.promptGraceUntil) {
+        this.ctx.promptGraceUntil = 0;
       }
 
       // Gated mode: passed gate check — start waiting loop now
       // Skip in ask mode — no LLM processing, Watson just speaks "Inbox, or wait?"
-      const mode = this.queueState?.getMode() ?? 'wait';
       if (gatedMode) {
-        if (inGracePeriod && !matchesWakeWord(transcript, config.botName)) {
+        if (inGracePeriod && !hasWakeWord) {
           console.log('Gate grace period: processing without wake word');
         }
         if (gatedInterrupt) {
-          console.log('Gated interrupt: wake word confirmed, interrupting playback');
-          this.player.stopPlayback();
-          this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-        }
-        if (mode !== 'ask') {
-          this.startWaitingLoop(VoicePipeline.PROCESSING_LOOP_START_DELAY_MS);
+          if (gateClosedCueInterrupt && !hasWakeWord) {
+            console.log('Gated interrupt: allowing speech over gate-closed cue');
+            this.player.stopPlayback('speech-over-gate-closed-cue');
+          } else if (!hasWakeWord && interruptGraceEligible) {
+            console.log('Gated interrupt: accepted during ready handoff grace');
+            this.player.stopPlayback('speech-during-playback-gated-grace');
+          } else {
+            console.log('Gated interrupt: wake word confirmed, interrupting playback');
+            this.player.stopPlayback('speech-during-playback-gated-wake');
+          }
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         }
       }
 
-      const command = parseVoiceCommand(transcript, config.botName);
+      const command = preParsedCommand;
       if (command) {
+        const resolvedCommand = this.resolveDoneCommandForContext(command, transcript);
         if (command.type === 'new-post') {
           console.log('New-post command: starting guided flow');
           await this.startNewPostFlow();
@@ -343,27 +687,78 @@ export class VoicePipeline {
           console.log(`Voice command complete: ${totalMs}ms total`);
           return;
         } else {
-          console.log(`Voice command detected: ${command.type}`);
-          await this.handleVoiceCommand(command);
+          console.log(`Voice command detected: ${resolvedCommand.type}`);
+          await this.handleVoiceCommand(resolvedCommand, userId);
           const totalMs = Date.now() - pipelineStart;
           console.log(`Voice command complete: ${totalMs}ms total`);
           return;
         }
       }
 
-      // In queue/ask mode, also match bare navigation commands without "Hey Watson" prefix
-      if (mode !== 'wait') {
+      // In queue/ask mode, or during grace windows, match bare navigation commands
+      // without requiring the wake word.
+      if (mode !== 'wait' || inGracePeriod) {
         const bareCommand = this.matchBareQueueCommand(transcript);
         if (bareCommand) {
-          console.log(`Bare queue command detected: ${bareCommand.type}`);
-          await this.handleVoiceCommand(bareCommand);
+          const resolvedBareCommand = this.resolveDoneCommandForContext(bareCommand, transcript);
+          console.log(`Bare queue command detected: ${resolvedBareCommand.type}`);
+          await this.handleVoiceCommand(resolvedBareCommand, userId);
           const totalMs = Date.now() - pipelineStart;
           console.log(`Voice command complete: ${totalMs}ms total`);
           return;
         }
       }
 
-      this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
+      // Fallback command classifier (LLM): catches STT variations that regex misses.
+      // During gated playback interrupts without wake word, avoid LLM command
+      // inference to reduce false positives from cough/noise transcripts.
+      const allowLlmInference = !(gatedInterrupt && !hasWakeWord);
+      const runClassifier = allowLlmInference && this.shouldRunCommandClassifier(transcript);
+      if (allowLlmInference && !runClassifier) {
+        console.log('Skipping LLM command classifier for likely prompt utterance');
+      }
+      const inferredCommand = runClassifier
+        ? await this.inferVoiceCommandLLM(transcript, mode, inGracePeriod)
+        : null;
+      if (inferredCommand) {
+        const resolvedInferred = this.resolveDoneCommandForContext(inferredCommand, transcript);
+        console.log(`Voice command detected (LLM): ${resolvedInferred.type}`);
+        await this.handleVoiceCommand(resolvedInferred, userId);
+        const totalMs = Date.now() - pipelineStart;
+        console.log(`Voice command complete: ${totalMs}ms total`);
+        return;
+      }
+
+      // Safety guard: in queue mode, avoid silently dispatching free-form prompts
+      // from open-mic chatter during grace windows. Commands still work via
+      // deterministic/LLM command paths above; prompts require explicit wake.
+      if (mode === 'queue' && inGracePeriod && !hasWakeWord) {
+        console.log(`Queue prompt suppressed (wake required): "${transcript}"`);
+        this.stopWaitingLoop();
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        return;
+      }
+
+      if (Date.now() < this.ctx.newPostTimeoutPromptGuardUntil) {
+        const remainingMs = this.ctx.newPostTimeoutPromptGuardUntil - Date.now();
+        console.log(
+          `Prompt dispatch suppressed by new-post timeout guard (${Math.max(0, remainingMs)}ms remaining)`,
+        );
+        await this.player.playEarcon('error');
+        await this.speakResponse(
+          'Post creation timed out. I did not send that message. Say create post to try again.',
+          { inbox: true },
+        );
+        await this.playReadyEarcon();
+        return;
+      }
+
+      this.cancelPendingWait('new prompt dispatch');
+
+      this.transitionAndResetWatchdog({ type: 'PROCESSING_STARTED' });
+      if (mode === 'wait') {
+        this.startWaitingLoop(VoicePipeline.PROCESSING_LOOP_START_DELAY_MS);
+      }
 
       if (mode === 'queue') {
         await this.handleQueueMode(userId, transcript);
@@ -377,14 +772,27 @@ export class VoicePipeline {
       console.log(`Pipeline complete: ${totalMs}ms total`);
     } catch (error) {
       console.error('Pipeline error:', error);
+      this.counters.errors++;
+      const dependencyIssue = this.classifyDependencyIssue(error);
+      if (dependencyIssue) {
+        if (dependencyIssue.type === 'stt') this.counters.sttFailures++;
+        if (dependencyIssue.type === 'tts') this.counters.ttsFailures++;
+        this.notifyDependencyIssue(dependencyIssue.type, dependencyIssue.message);
+      } else {
+        void this.playFastCue('error');
+      }
       this.stopWaitingLoop();
-      this.player.stopPlayback();
+      this.player.stopPlayback('pipeline-error');
     } finally {
       // Don't overwrite AWAITING/flow states — they were set intentionally by handlers
       const st = this.stateMachine.getStateType();
       if (!keepCurrentState && !this.stateMachine.isAwaitingState() && st !== 'INBOX_FLOW') {
-        this.stateMachine.transition({ type: 'PROCESSING_COMPLETE' });
+        this.transitionAndResetWatchdog({ type: 'PROCESSING_COMPLETE' });
       }
+
+      // Run invariant checks
+      const violations = checkPipelineInvariants(this.getInvariantContext());
+      this.counters.invariantViolations += violations.length;
 
       // Re-process buffered utterance if any
       const buffered = this.stateMachine.getBufferedUtterance();
@@ -404,31 +812,48 @@ export class VoicePipeline {
     // Avoid noisy reprompt loops in command-selection states.
     // Keep this only for guided new-post flow where users benefit from correction.
     if (st !== 'NEW_POST_FLOW') return;
-    if (this.rejectRepromptInFlight) return;
-    if (Date.now() < this.rejectRepromptCooldownUntil) return;
+    if (this.player.isPlaying() || this.isProcessing()) {
+      console.log(`Rejected audio ignored during active playback/processing from ${userId} (${durationMs}ms)`);
+      return;
+    }
+    if (durationMs > VoicePipeline.MAX_REJECTED_REPROMPT_MS) {
+      console.log(`Rejected audio ignored (too long for reprompt) from ${userId} (${durationMs}ms)`);
+      return;
+    }
+    if (this.ctx.rejectRepromptInFlight) return;
+    if (Date.now() < this.ctx.rejectRepromptCooldownUntil) return;
 
-    this.rejectRepromptInFlight = true;
-    this.rejectRepromptCooldownUntil = Date.now() + 5000;
+    this.ctx.rejectRepromptInFlight = true;
+    this.ctx.rejectRepromptCooldownUntil = Date.now() + 5000;
     console.log(`Rejected low-confidence audio during ${st} from ${userId} (${durationMs}ms)`);
 
     void (async () => {
       try {
-        const effects = this.stateMachine.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+        const effects = this.transitionAndResetWatchdog({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
         await this.applyEffects(effects);
         await this.playReadyEarcon();
       } finally {
-        this.rejectRepromptInFlight = false;
+        this.ctx.rejectRepromptInFlight = false;
       }
     })();
   }
 
-  private async handleVoiceCommand(command: VoiceCommand): Promise<void> {
-    if (command.type === 'switch' || command.type === 'list' || command.type === 'default') {
+  private async handleVoiceCommand(command: VoiceCommand, userId = 'voice-user'): Promise<void> {
+    this.counters.commandsRecognized++;
+    // Any explicit command means user intent is clear; clear transient post-timeout guard.
+    this.ctx.newPostTimeoutPromptGuardUntil = 0;
+    if (command.type !== 'silent-wait') {
+      this.cancelPendingWait(`voice command: ${command.type}`);
+    }
+    if (command.type === 'switch' || command.type === 'list' || command.type === 'default' || command.type === 'dispatch') {
       this.clearInboxFlowIfActive(`voice command: ${command.type}`);
     }
     switch (command.type) {
       case 'switch':
         await this.handleDirectSwitch(command.channel);
+        break;
+      case 'dispatch':
+        await this.handleDispatch(command.body, userId);
         break;
       case 'list':
         await this.handleListChannels();
@@ -457,11 +882,32 @@ export class VoicePipeline {
       case 'inbox-next':
         await this.handleInboxNext();
         break;
+      case 'inbox-clear':
+        await this.handleInboxClear();
+        break;
+      case 'read-last-message':
+        await this.handleReadLastMessage();
+        break;
+      case 'what-channel':
+        await this.handleWhatChannel();
+        break;
       case 'voice-status':
         await this.handleVoiceStatus();
         break;
+      case 'voice-channel':
+        await this.handleVoiceChannel();
+        break;
       case 'gated-mode':
         await this.handleGatedMode(command.enabled);
+        break;
+      case 'wake-check':
+        await this.handleWakeCheck();
+        break;
+      case 'silent-wait':
+        await this.handleSilentWait();
+        break;
+      case 'hear-full-message':
+        await this.handleHearFullMessage();
         break;
       case 'pause':
         this.handlePause();
@@ -485,7 +931,7 @@ export class VoicePipeline {
     }
 
     const names = forums.map((f) => f.name).join(', ');
-    this.stateMachine.transition({
+    this.transitionAndResetWatchdog({
       type: 'ENTER_NEW_POST_FLOW',
       step: 'forum',
     });
@@ -504,8 +950,8 @@ export class VoicePipeline {
       const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
 
       // Check for cancel
-      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/.test(input)) {
-        const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+      if (this.isCancelIntent(input)) {
+        const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
         return null;
@@ -519,7 +965,7 @@ export class VoicePipeline {
         return null;
       }
 
-      this.stateMachine.transition({
+      this.transitionAndResetWatchdog({
         type: 'NEW_POST_ADVANCE',
         step: 'title',
         forumId: match.id,
@@ -535,14 +981,14 @@ export class VoicePipeline {
     if (step === 'title') {
       const input = transcript.trim().replace(/[.!?]+$/, '');
 
-      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(input)) {
-        const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+      if (this.isCancelIntent(input)) {
+        const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
         return null;
       }
 
-      this.stateMachine.transition({
+      this.transitionAndResetWatchdog({
         type: 'NEW_POST_ADVANCE',
         step: 'body',
         forumId: flowState.forumId,
@@ -559,15 +1005,15 @@ export class VoicePipeline {
     if (step === 'body') {
       const body = transcript.trim();
 
-      if (/^(?:cancel|nevermind|never\s*mind|forget\s*it|stop)$/i.test(body.toLowerCase().replace(/[.!?,]+$/, ''))) {
-        const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+      if (this.isCancelIntent(body)) {
+        const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
         return null;
       }
 
       const { forumId, forumName, title } = flowState;
-      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
 
       const result = await this.router.createForumPost(forumId!, title!, body);
       if (result.success) {
@@ -586,11 +1032,27 @@ export class VoicePipeline {
     return null;
   }
 
+  private isCancelIntent(text: string): boolean {
+    const normalized = text
+      .toLowerCase()
+      .replace(/[.!?,]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return /\b(?:cancel|nevermind|never mind|forget it|stop)\b/.test(normalized);
+  }
+
   private async handleDirectSwitch(channelName: string): Promise<void> {
     if (!this.router) return;
 
-    this.startWaitingLoop();
+    const mode = this.queueState?.getMode() ?? 'wait';
+    if (mode === 'wait') {
+      this.startWaitingLoop();
+    }
     try {
+      // Channel resolution can take a moment (fuzzy + LLM fallback).
+      // Confirm acceptance immediately so long silences feel intentional.
+      await this.playFastCue('acknowledged');
+
       // Try to find the channel by fuzzy matching against known channels
       const allChannels = this.router.listChannels();
       let match = allChannels.find((c) => this.channelNamesMatch(channelName, c.name, c.displayName));
@@ -613,20 +1075,8 @@ export class VoicePipeline {
               if (threadResult.success) {
                 await this.onChannelSwitch();
                 const displayName = threadResult.displayName || llmResult.best.displayName;
-                const lastMsg = this.router.getLastMessage();
-                if (lastMsg) {
-                  const fullContent = lastMsg.role === 'user'
-                    ? `You last said: ${lastMsg.content}`
-                    : lastMsg.content;
-                  this.stateMachine.transition({
-                    type: 'ENTER_SWITCH_CHOICE',
-                    lastMessage: fullContent,
-                  });
-                  await this.speakResponse(`Switched to ${displayName}. Last message, or new prompt?`, { inbox: true });
-                  await this.playReadyEarcon();
-                } else {
-                  await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
-                }
+                await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
+                await this.playReadyEarcon();
                 return;
               }
             }
@@ -641,7 +1091,7 @@ export class VoicePipeline {
             const lines = options.map((o) => `${o.index}: ${o.displayName}`);
             const responseText = `No exact match for ${channelName}. Did you mean: ${lines.join('. ')}? Say a number or channel name.`;
 
-            this.stateMachine.transition({
+            this.transitionAndResetWatchdog({
               type: 'ENTER_CHANNEL_SELECTION',
               options,
             });
@@ -659,11 +1109,10 @@ export class VoicePipeline {
       let responseText: string;
       if (result.success) {
         await this.onChannelSwitch();
+        const activeSessionKey = this.router.getActiveSessionKey();
 
         // Check for queued responses — read them in full
-        const readyItems = this.queueState?.getReadyItems().filter(
-          (i) => i.channel === target,
-        ) ?? [];
+        const readyItems = this.getReadyItemsForSession(activeSessionKey, target);
 
         if (readyItems.length > 0) {
           responseText = `Switched to ${result.displayName || target}.`;
@@ -672,37 +1121,31 @@ export class VoicePipeline {
             this.queueState!.markHeard(item.id);
           }
           this.responsePoller?.check();
-        } else {
-          // No queued responses — check if there's a last message to offer
-          const lastMsg = this.router.getLastMessage();
-          if (lastMsg) {
-            const displayName = result.displayName || target;
-            responseText = `Switched to ${displayName}. Last message, or new prompt?`;
+        } else if (this.inboxTracker?.isActive() && this.router) {
+          // Coming from inbox — check if this channel has new messages to read
+          const sessionKey = this.router.getActiveSessionKey();
+          const channels = this.router.getAllChannelSessionKeys();
+          const activities = await this.inboxTracker.checkInbox(channels);
+          const activity = activities.find((a) => a.sessionKey === sessionKey);
 
-            // Store full last message for reading if user says "read"
-            const fullContent = lastMsg.role === 'user'
-              ? `You last said: ${lastMsg.content}`
-              : lastMsg.content;
+          if (activity && activity.newMessages.length > 0) {
+            const formatted = this.inboxTracker.formatForTTS(activity.newMessages);
+            responseText = `Switched to ${result.displayName || target}. ${formatted}`;
 
-            this.stateMachine.transition({
-              type: 'ENTER_SWITCH_CHOICE',
-              lastMessage: fullContent,
-            });
-
-            // Update inbox snapshot now (don't wait for choice)
-            if (this.inboxTracker?.isActive()) {
-              const sessionKey = this.router.getActiveSessionKey();
-              const currentCount = await this.getCurrentMessageCount(sessionKey);
-              console.log(`InboxTracker: markSeen ${target} (${sessionKey}) count=${currentCount}`);
-              this.inboxTracker.markSeen(sessionKey, currentCount);
+            // Advance inbox flow past this channel so "next" skips to the following one
+            let flowState = this.stateMachine.getInboxFlowState();
+            if (flowState) {
+              const flowItems = flowState.items as ChannelActivity[];
+              while (flowState && flowState.index < flowItems.length && flowItems[flowState.index]?.sessionKey === sessionKey) {
+                this.transitionAndResetWatchdog({ type: 'INBOX_ADVANCE' });
+                flowState = this.stateMachine.getInboxFlowState();
+              }
             }
-
-            await this.speakResponse(responseText, { inbox: true });
-            await this.playReadyEarcon();
-            return;
           } else {
             responseText = `Switched to ${result.displayName || target}.`;
           }
+        } else {
+          responseText = `Switched to ${result.displayName || target}.`;
         }
 
         // Update inbox snapshot for this channel so it's marked as "seen"
@@ -802,7 +1245,7 @@ Use channel names (the part before the colon). Do not explain.`,
     const responseText = `Here are your recent channels. ${lines.join('. ')}. Say a number or channel name.`;
 
     // Enter selection mode via state machine
-    this.stateMachine.transition({
+    this.transitionAndResetWatchdog({
       type: 'ENTER_CHANNEL_SELECTION',
       options,
     });
@@ -826,7 +1269,7 @@ Use channel names (the part before the colon). Do not explain.`,
     }
 
     // Recognized — clear the awaiting state
-    this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+    this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
     await this.acknowledgeAwaitingChoice();
 
     const result = await this.router.switchTo(selected.name);
@@ -892,6 +1335,29 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private async handleVoiceChannel(): Promise<void> {
+    if (this.router) {
+      const active = this.router.getActiveChannel();
+      const displayName = (active as any).displayName || active.name;
+      await this.speakResponse(displayName, { inbox: true });
+    } else {
+      await this.speakResponse('No channel active.', { inbox: true });
+    }
+    await this.playReadyEarcon();
+  }
+
+  private async handleWhatChannel(): Promise<void> {
+    if (!this.router) {
+      await this.speakResponse('Channel routing is not available right now.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+    const active = this.router.getActiveChannel();
+    const displayName = (active as any).displayName || active.name;
+    await this.speakResponse(displayName, { inbox: true });
+    await this.playReadyEarcon();
+  }
+
   private async handleVoiceStatus(): Promise<void> {
     const parts: string[] = [];
 
@@ -926,47 +1392,380 @@ Use channel names (the part before the colon). Do not explain.`,
     const noiseLabel = presetMap[s.speechThreshold] ?? String(s.speechThreshold);
     parts.push(`Noise: ${noiseLabel}. Delay: ${s.silenceDurationMs} milliseconds.`);
 
+    // Gateway connection
+    const gwState = this.gatewaySync?.getConnectionState?.() ?? 'disconnected';
+    parts.push(`Gateway: ${gwState}.`);
+
+    // Error count
+    if (this.counters.errors > 0) {
+      parts.push(`${this.counters.errors} errors since start.`);
+    }
+
     await this.speakResponse(parts.join(' '), { inbox: true });
     await this.playReadyEarcon();
+  }
+
+  private async handleReadLastMessage(): Promise<void> {
+    if (!this.router) {
+      await this.speakResponse('Channel routing is not available right now.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const active = this.router.getActiveChannel();
+    const displayName = (active as any).displayName || active.name;
+    const lastMsg = await this.router.getLastMessageFresh();
+    if (!lastMsg) {
+      await this.speakResponse(`I don't see a recent message in ${displayName}.`, { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const normalized = this.toSpokenText(lastMsg.content, '').trim();
+    const isVeryShort = normalized.length > 0 && normalized.length < 24;
+    const raw = lastMsg.role === 'user'
+      ? (
+        isVeryShort
+          ? `The last message is short. You said: ${normalized}`
+          : `You last said: ${lastMsg.content}`
+      )
+      : (
+        isVeryShort
+          ? `The last message is short. ${normalized}`
+          : this.toSpokenText(lastMsg.content, 'Message available.')
+      );
+    const spoken = raw.length > 900 ? `${raw.slice(0, 900)}...` : raw;
+    await this.speakResponse(spoken, { inbox: true });
+    await this.playReadyEarcon();
+  }
+
+  private async handleDispatch(body: string, userId: string): Promise<void> {
+    if (!this.router || !this.queueState) {
+      await this.speakResponse('Dispatch is not available right now.');
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const parsed = this.parseDispatchBody(body);
+    if (!parsed) {
+      const fail = 'Dispatch failed. Say: dispatch to channel name, then your message.';
+      this.logToInbox(`**${config.botName}:** ${fail}`);
+      await this.speakResponse(fail, { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const target = this.resolveDispatchTarget(parsed.channelQuery);
+    if (!target) {
+      const fail = `Dispatch failed. I couldn't find channel ${parsed.channelQuery}.`;
+      this.logToInbox(`**${config.botName}:** ${fail}`);
+      await this.speakResponse(fail, { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const sessionKey = this.router.getSessionKeyFor(target.name);
+    const systemPrompt = this.router.getSystemPromptFor(target.name);
+
+    this.log(`**You:** ${parsed.payload}`, target.name);
+    this.session.appendUserMessage(userId, parsed.payload, target.name);
+
+    const item = this.queueState.enqueue({
+      channel: target.name,
+      displayName: target.displayName,
+      sessionKey,
+      userMessage: parsed.payload,
+    });
+
+    this.dispatchToLLMFireAndForget(userId, parsed.payload, item.id, {
+      channelName: target.name,
+      displayName: target.displayName,
+      sessionKey,
+      systemPrompt,
+    });
+
+    await this.player.playEarcon('acknowledged');
+    await this.speakResponse(`Dispatched to ${target.displayName}.`, { inbox: true });
+    await this.playReadyEarcon();
+  }
+
+  private parseDispatchBody(body: string): { channelQuery: string; payload: string } | null {
+    const trimmed = body.trim().replace(/^[,.\s]+|[,.\s]+$/g, '');
+    if (!trimmed) return null;
+
+    const direct = trimmed.match(/^(.+?)\s*[:\-]\s*(.+)$/);
+    if (direct) {
+      const channelQuery = direct[1].trim().replace(/\s+channel$/i, '').trim();
+      const payload = direct[2].trim();
+      if (channelQuery && payload) return { channelQuery, payload };
+    }
+
+    const said = trimmed.match(/^(.+?)\s+(?:that|say|saying)\s+(.+)$/i);
+    if (said) {
+      const channelQuery = said[1].trim().replace(/\s+channel$/i, '').trim();
+      const payload = said[2].trim();
+      if (channelQuery && payload) return { channelQuery, payload };
+    }
+
+    const tokens = this.tokenizeWithPositions(trimmed);
+    if (tokens.length < 2) return null;
+
+    let best: { name: string; displayName: string; consumed: number } | null = null;
+    for (const channel of this.router!.listChannels()) {
+      const variantSets = [channel.name, channel.displayName]
+        .flatMap((label) => this.channelMatchForms(label))
+        .map((form) => form.split(' ').filter(Boolean));
+
+      for (const variant of variantSets) {
+        const consumed = this.matchDispatchPrefix(tokens, variant);
+        if (consumed === 0) continue;
+        if (!best || consumed > best.consumed) {
+          best = { name: channel.name, displayName: channel.displayName, consumed };
+        }
+      }
+    }
+
+    if (!best) return null;
+    if (best.consumed >= tokens.length) return null;
+
+    const payloadStart = tokens[best.consumed].start;
+    const payload = trimmed.slice(payloadStart).trim();
+    if (!payload) return null;
+    return { channelQuery: best.name, payload };
+  }
+
+  private resolveDispatchTarget(channelQuery: string): { name: string; displayName: string } | null {
+    if (!this.router) return null;
+    const all = this.router.listChannels();
+    return all.find((c) => this.channelNamesMatch(channelQuery, c.name, c.displayName)) ?? null;
+  }
+
+  private tokenizeWithPositions(text: string): Array<{ token: string; start: number }> {
+    const out: Array<{ token: string; start: number }> = [];
+    const re = /[a-z0-9]+/gi;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      out.push({ token: match[0].toLowerCase(), start: match.index });
+    }
+    return out;
+  }
+
+  private matchDispatchPrefix(
+    tokens: Array<{ token: string; start: number }>,
+    candidate: string[],
+  ): number {
+    if (candidate.length === 0) return 0;
+    let idx = 0;
+
+    while (
+      idx < tokens.length &&
+      (
+        tokens[idx].token === 'to' ||
+        tokens[idx].token === 'the' ||
+        tokens[idx].token === 'my'
+      )
+    ) {
+      idx++;
+    }
+
+    for (let j = 0; j < candidate.length; j++) {
+      if (idx + j >= tokens.length) return 0;
+      if (tokens[idx + j].token !== candidate[j]) return 0;
+    }
+
+    let consumed = idx + candidate.length;
+    if (consumed < tokens.length && tokens[consumed].token === 'channel') {
+      consumed += 1;
+    }
+    return consumed;
+  }
+
+  private resolveDoneCommandForContext(command: VoiceCommand, transcript: string): VoiceCommand {
+    if (command.type !== 'inbox-next') return command;
+    if (this.stateMachine.getInboxFlowState()) return command;
+
+    const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
+    const wakePrefix = config.botName.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const donePattern = new RegExp(
+      `^(?:(?:hey|hello),?\\s+)?${wakePrefix}[,.]?\\s*(?:done|(?:i'?m|i\\s+am)\\s+done)$|^(?:done|(?:i'?m|i\\s+am)\\s+done)$`,
+      'i',
+    );
+    if (donePattern.test(input)) {
+      return { type: 'default' };
+    }
+    return command;
+  }
+
+  private cancelPendingWait(reason: string): void {
+    if (this.ctx.pendingWaitCallback) {
+      console.log(`Cancelling pending wait (${reason})`);
+      this.ctx.pendingWaitCallback = null;
+      this.ctx.activeWaitQueueItemId = null;
+      this.ctx.quietPendingWait = false;
+      this.stopWaitingLoop();
+      // Queue item stays as pending/ready — shows up in inbox
+    }
+  }
+
+  private async handleSilentWait(): Promise<void> {
+    if (!this.ctx.pendingWaitCallback) {
+      await this.speakResponse('Nothing is processing right now.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    this.ctx.quietPendingWait = true;
+    this.stopWaitingLoop();
+    console.log('Silent wait enabled for active processing item');
+  }
+
+  private deliverWaitResponse(responseText: string): void {
+    void (async () => {
+      try {
+        this.stopWaitingLoop();
+        this.player.stopPlayback('wait-response-delivery');
+        if (!this.isBusy() || this.player.isWaiting()) {
+          this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
+          await this.speakResponse(responseText, { allowSummary: true, forceFull: false });
+          this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
+          await this.playReadyEarcon();
+        } else {
+          // Pipeline got busy (often due to an overlapping command like "silent").
+          // Retry delivery once we return to idle instead of dropping it.
+          console.log('Wait response delivery deferred (pipeline busy)');
+          this.deferWaitResponse(responseText);
+        }
+      } catch (err: any) {
+        console.error(`Wait response delivery failed: ${err.message}`);
+      }
+    })();
+  }
+
+  private deferWaitResponse(responseText: string): void {
+    this.ctx.deferredWaitResponseText = responseText;
+    if (this.deferredWaitRetryTimer) return;
+    this.deferredWaitRetryTimer = setInterval(() => {
+      if (!this.ctx.deferredWaitResponseText) {
+        this.clearDeferredWaitRetry();
+        return;
+      }
+      if (this.isBusy() || this.player.isPlaying()) {
+        return;
+      }
+      const text = this.ctx.deferredWaitResponseText;
+      this.ctx.deferredWaitResponseText = null;
+      this.clearDeferredWaitRetry();
+      this.deliverWaitResponse(text);
+    }, 700);
+  }
+
+  private clearDeferredWaitRetry(): void {
+    if (this.deferredWaitRetryTimer) {
+      clearInterval(this.deferredWaitRetryTimer);
+      this.deferredWaitRetryTimer = null;
+    }
+    this.ctx.deferredWaitResponseText = null;
+  }
+
+  private setGateGrace(ms: number): void {
+    this.ctx.gateGraceUntil = Date.now() + ms;
+    this.scheduleGraceExpiry();
+  }
+
+  private setPromptGrace(ms: number): void {
+    this.ctx.promptGraceUntil = Date.now() + ms;
+    this.scheduleGraceExpiry();
+  }
+
+  private scheduleGraceExpiry(): void {
+    if (this.graceExpiryTimer) {
+      clearTimeout(this.graceExpiryTimer);
+      this.graceExpiryTimer = null;
+    }
+    if (!getVoiceSettings().gated) return;
+    const latestGrace = Math.max(this.ctx.gateGraceUntil, this.ctx.promptGraceUntil);
+    const remaining = latestGrace - Date.now();
+    if (remaining <= 0) return;
+    this.graceExpiryTimer = setTimeout(() => {
+      this.graceExpiryTimer = null;
+      this.onGraceExpired();
+    }, remaining);
+  }
+
+  private clearGraceTimer(): void {
+    if (this.graceExpiryTimer) {
+      clearTimeout(this.graceExpiryTimer);
+      this.graceExpiryTimer = null;
+    }
+  }
+
+  private onGraceExpired(): void {
+    if (!getVoiceSettings().gated) return;
+    if (this.ctx.pendingWaitCallback) return;
+    if (this.isBusy() || this.player.isPlaying()) return;
+    if (this.receiver.hasActiveSpeech()) {
+      console.log(`${this.stamp()} Grace period expired during active speech — suppressing gate-closed cue`);
+      return;
+    }
+    console.log(`${this.stamp()} Grace period expired — gate closed`);
+    void this.playFastCue('gate-closed');
   }
 
   private async handleWaitMode(userId: string, transcript: string): Promise<void> {
     const channelName = this.router?.getActiveChannel().name;
 
+    // Non-blocking path: dispatch fire-and-forget with a wait callback
+    if (this.router && this.queueState) {
+      const activeChannel = this.router.getActiveChannel();
+      const displayName = (activeChannel as any).displayName || activeChannel.name;
+      const sessionKey = this.router.getActiveSessionKey();
+
+      this.log(`**You:** ${transcript}`, channelName);
+      this.session.appendUserMessage(userId, transcript, channelName);
+
+      const item = this.queueState.enqueue({
+        channel: activeChannel.name,
+        displayName,
+        sessionKey,
+        userMessage: transcript,
+      });
+
+      // Register wait callback — will be invoked when LLM finishes
+      this.ctx.activeWaitQueueItemId = item.id;
+      this.ctx.quietPendingWait = false;
+      this.ctx.pendingWaitCallback = (responseText: string) => {
+        this.deliverWaitResponse(responseText);
+      };
+
+      this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+        channelName: activeChannel.name,
+        displayName,
+        sessionKey,
+        systemPrompt: this.router.getSystemPrompt(),
+      });
+
+      // Return immediately — waiting loop keeps running, pipeline goes to IDLE via finally block
+      // OpenClaw sync happens in the dispatch completion handler to avoid gateway conflicts
+      return;
+    }
+
+    // Synchronous fallback when queueState is not available
     this.log(`**You:** ${transcript}`, channelName);
     this.session.appendUserMessage(userId, transcript, channelName);
 
-    let responseText: string;
-    if (this.router) {
-      const activeChannel = this.router.getActiveChannel();
-      const systemPrompt = this.router.getSystemPrompt();
-      await this.router.refreshHistory();
-      const history = this.router.getHistory();
-      const scopedUserId = `${userId}:${activeChannel.name}`;
-      const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
-        systemPrompt,
-        history,
-      });
-      this.router.setHistory(updatedHistory);
-      responseText = response;
-    } else {
-      const { response } = await getResponse(userId, transcript);
-      responseText = response;
-    }
+    const sessionScopedUser = this.router?.getActiveSessionKey() ?? userId;
+    const { response } = await getResponse(sessionScopedUser, transcript);
+    const responseText = response;
 
     this.log(`**${config.botName}:** ${responseText}`, channelName);
     this.session.appendAssistantMessage(responseText, channelName);
 
     void this.syncToOpenClaw(transcript, responseText);
 
-    this.lastSpokenText = responseText;
-    const ttsStream = await textToSpeechStream(responseText);
     this.stopWaitingLoop();
-    this.player.stopPlayback();
-    this.stateMachine.transition({ type: 'SPEAKING_STARTED' });
-    await this.player.playStream(ttsStream);
-    this.stateMachine.transition({ type: 'SPEAKING_COMPLETE' });
-    this.gateGraceUntil = Date.now() + 5_000;
+    this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
+    await this.speakResponse(responseText, { allowSummary: true, forceFull: false });
+    this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
     await this.playReadyEarcon();
   }
 
@@ -993,22 +1792,67 @@ Use channel names (the part before the colon). Do not explain.`,
       userMessage: transcript,
     });
 
-    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+      channelName,
+      displayName,
+      sessionKey,
+      systemPrompt: this.router.getSystemPrompt(),
+    });
 
-    // Brief confirmation with acknowledged earcon, then speak
+    // Brief confirmation, then immediate inbox status so the user has
+    // deterministic post-queue context before the ready handoff.
     await this.player.playEarcon('acknowledged');
     await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
+    await this.speakInboxQueueStatus();
+    await this.playReadyEarcon();
   }
 
   private async handleAskMode(userId: string, transcript: string): Promise<void> {
-    // Enter choice state before the ready cue so quick responses are captured reliably.
-    this.stateMachine.transition({
+    if (!this.router || !this.queueState) {
+      // Fall back to old behavior if no queue state
+      this.transitionAndResetWatchdog({
+        type: 'ENTER_QUEUE_CHOICE',
+        userId,
+        transcript,
+      });
+      await this.speakResponse('Send to inbox, or wait here?', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const activeChannel = this.router.getActiveChannel();
+    const channelName = activeChannel.name;
+    const displayName = (activeChannel as any).displayName || channelName;
+    const sessionKey = this.router.getActiveSessionKey();
+
+    this.log(`**You:** ${transcript}`, channelName);
+    this.session.appendUserMessage(userId, transcript, channelName);
+
+    // Enqueue and dispatch speculatively — LLM starts immediately
+    const item = this.queueState.enqueue({
+      channel: channelName,
+      displayName,
+      sessionKey,
+      userMessage: transcript,
+    });
+
+    this.ctx.speculativeQueueItemId = item.id;
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+      channelName,
+      displayName,
+      sessionKey,
+      systemPrompt: this.router.getSystemPrompt(),
+    });
+
+    // Enter choice state and prompt user — LLM works in parallel
+    // OpenClaw sync happens in the dispatch completion handler to avoid gateway conflicts
+    this.transitionAndResetWatchdog({
       type: 'ENTER_QUEUE_CHOICE',
       userId,
       transcript,
     });
 
-    // Speak the prompt, then play ready earcon when done.
+    this.stopWaitingLoop();
     await this.speakResponse('Send to inbox, or wait here?', { inbox: true });
     await this.playReadyEarcon();
   }
@@ -1018,40 +1862,91 @@ Use channel names (the part before the colon). Do not explain.`,
     if (!choiceState) return;
 
     const { userId, transcript: originalTranscript } = choiceState;
+    const specId = this.ctx.speculativeQueueItemId;
 
     const choice = matchQueueChoice(transcript);
     if (choice === 'queue') {
-      this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
-      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-      await this.handleQueueMode(userId, originalTranscript);
-      // Auto-check inbox after dispatch in ask mode
-      if (this.inboxTracker?.isActive()) {
-        await this.handleInboxCheck();
+      // Already dispatched speculatively — just confirm
+      this.ctx.ignoreProcessingUtterancesUntil = Date.now() + 2500;
+      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+      this.ctx.speculativeQueueItemId = null;
+
+      if (specId) {
+        // Already dispatched — play confirmation
+        const activeChannel = this.router?.getActiveChannel();
+        const displayName = activeChannel ? ((activeChannel as any).displayName || activeChannel.name) : 'inbox';
+        await this.player.playEarcon('acknowledged');
+        await this.speakResponse(`Queued to ${displayName}.`, { inbox: true });
+        await this.speakInboxQueueStatus();
+        await this.playReadyEarcon();
+      } else {
+        // No speculative dispatch (fallback) — dispatch now
+        await this.handleQueueMode(userId, originalTranscript);
       }
     } else if (choice === 'silent') {
-      this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
-      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-      this.silentWait = true;
-      await this.handleSilentQueue(userId, originalTranscript);
+      // Already dispatched — set silentWait for auto-read
+      this.ctx.ignoreProcessingUtterancesUntil = Date.now() + 2500;
+      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+      this.ctx.silentWait = true;
+      this.ctx.speculativeQueueItemId = null;
+
+      if (specId) {
+        await this.player.playEarcon('acknowledged');
+      } else {
+        await this.handleSilentQueue(userId, originalTranscript);
+      }
     } else if (choice === 'wait') {
-      this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
-      this.stateMachine.transition({ type: 'PROCESSING_STARTED' });
-      await this.sleep(150);
-      this.startWaitingLoop();
-      await this.handleWaitMode(userId, originalTranscript);
+      this.ctx.ignoreProcessingUtterancesUntil = Date.now() + 2500;
+      this.ctx.speculativeQueueItemId = null;
+
+      if (specId && this.queueState) {
+        // Check if speculative response is already ready
+        const readyItem = this.queueState.getReadyItems().find((i) => i.id === specId);
+        if (readyItem) {
+          // Instant response — already done
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+          this.queueState.markHeard(specId);
+          this.responsePoller?.check();
+          this.stopWaitingLoop();
+          this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
+          await this.speakResponse(readyItem.responseText, { allowSummary: true, forceFull: false });
+          this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
+          await this.playReadyEarcon();
+        } else {
+          // Not ready yet — register callback and start waiting loop
+          this.transitionAndResetWatchdog({ type: 'PROCESSING_STARTED' });
+          this.ctx.activeWaitQueueItemId = specId;
+          this.ctx.pendingWaitCallback = (responseText: string) => {
+            this.deliverWaitResponse(responseText);
+          };
+          await this.sleep(150);
+          this.startWaitingLoop();
+          // Return — callback will deliver response when ready
+        }
+      } else {
+        // No speculative dispatch — fall back to synchronous wait
+        this.transitionAndResetWatchdog({ type: 'PROCESSING_STARTED' });
+        await this.sleep(150);
+        this.startWaitingLoop();
+        await this.handleWaitMode(userId, originalTranscript);
+      }
     } else {
       // Try navigation commands — with or without wake word
-      // Queue the original prompt first, then navigate
       const navCommand = parseVoiceCommand(transcript, config.botName)
         ?? this.matchBareQueueCommand(transcript);
-      if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default')) {
-        this.ignoreProcessingUtterancesUntil = Date.now() + 2500;
-        console.log(`Queue choice: navigation (${navCommand.type}), queuing original prompt first`);
-        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-        await this.handleSilentQueue(userId, originalTranscript);
-        await this.handleVoiceCommand(navCommand);
+      if (navCommand && (navCommand.type === 'switch' || navCommand.type === 'list' || navCommand.type === 'default' || navCommand.type === 'dispatch')) {
+        this.ctx.ignoreProcessingUtterancesUntil = Date.now() + 2500;
+        console.log(`Queue choice: navigation (${navCommand.type}), already dispatched speculatively`);
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        this.ctx.speculativeQueueItemId = null;
+
+        if (!specId) {
+          // No speculative dispatch — dispatch now before navigating
+          await this.handleSilentQueue(userId, originalTranscript);
+        }
+        await this.handleVoiceCommand(navCommand, userId);
       } else {
-        // Unrecognized — reprompt with error earcon
+        // Unrecognized — reprompt with error earcon (LLM continues in background)
         await this.repromptAwaiting();
         await this.playReadyEarcon();
       }
@@ -1079,12 +1974,47 @@ Use channel names (the part before the colon). Do not explain.`,
       userMessage: transcript,
     });
 
-    this.dispatchToLLMFireAndForget(userId, transcript, item.id, sessionKey);
+    this.dispatchToLLMFireAndForget(userId, transcript, item.id, {
+      channelName,
+      displayName,
+      sessionKey,
+      systemPrompt: this.router.getSystemPrompt(),
+    });
 
     // One confirmation tone, then silence
     console.log('Silent queue: dispatched, playing single tone');
     this.stopWaitingLoop();
     void this.playFastCue('acknowledged');
+  }
+
+  private async speakInboxQueueStatus(): Promise<void> {
+    if (!this.queueState) return;
+
+    const ready = this.queueState.getReadyItems();
+    const pending = this.queueState.getPendingItems();
+
+    const readyByChannel = new Map<string, number>();
+    for (const item of ready) {
+      const label = item.displayName || item.channel;
+      readyByChannel.set(label, (readyByChannel.get(label) ?? 0) + 1);
+    }
+
+    const readyParts: string[] = [];
+    for (const [name, count] of readyByChannel.entries()) {
+      readyParts.push(count > 1 ? `${count} in ${name}` : name);
+    }
+
+    const parts: string[] = [];
+    if (ready.length > 0) {
+      parts.push(`Ready now: ${readyParts.join(', ')}`);
+    } else {
+      parts.push('Zero ready');
+    }
+    if (pending.length > 0) {
+      parts.push(`${pending.length} processing`);
+    }
+
+    await this.speakResponse(parts.join('. ') + '.', { inbox: true });
   }
 
   private async handleSwitchChoiceResponse(transcript: string): Promise<void> {
@@ -1095,36 +2025,67 @@ Use channel names (the part before the colon). Do not explain.`,
 
     const choice = matchSwitchChoice(transcript);
     if (choice === 'read') {
-      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
       await this.acknowledgeAwaitingChoice();
       // Read the full last message
       await this.speakResponse(lastMessage, { inbox: true });
       await this.playReadyEarcon();
     } else if (choice === 'prompt') {
-      this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
       // Confirm with a ready earcon so user knows Watson is ready
       console.log('Switch choice: prompt');
       this.stopWaitingLoop();
-      this.promptGraceUntil = Date.now() + 15_000;
+      this.setPromptGrace(15_000);
       this.playReadyEarconSync();
     } else if (choice === 'cancel') {
-      const effects = this.stateMachine.transition({ type: 'CANCEL_FLOW' });
+      const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
       await this.applyEffects(effects);
       console.log('Switch choice: cancel');
       this.stopWaitingLoop();
     } else {
+      // Allow navigation commands from switch-choice, with or without wake word.
+      const navCommand = parseVoiceCommand(transcript, config.botName)
+        ?? this.matchBareQueueCommand(transcript);
+      if (
+        navCommand &&
+        (
+          navCommand.type === 'switch' ||
+          navCommand.type === 'list' ||
+          navCommand.type === 'default' ||
+          navCommand.type === 'inbox-check' ||
+          navCommand.type === 'dispatch'
+        )
+      ) {
+        console.log(`Switch choice: navigation (${navCommand.type})`);
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        await this.handleVoiceCommand(navCommand);
+        return;
+      }
+
       // Unrecognized — reprompt with error earcon
       await this.repromptAwaiting();
       await this.playReadyEarcon();
     }
   }
 
-  private dispatchToLLMFireAndForget(userId: string, transcript: string, queueItemId: string, sessionKey: string): void {
+  private dispatchToLLMFireAndForget(
+    userId: string,
+    transcript: string,
+    queueItemId: string,
+    target: {
+      channelName: string;
+      displayName: string;
+      sessionKey: string;
+      systemPrompt: string;
+    },
+  ): void {
     if (!this.router || !this.queueState) return;
+    this.counters.llmDispatches++;
 
-    const activeChannel = this.router.getActiveChannel();
-    const systemPrompt = this.router.getSystemPrompt();
-    const channelName = activeChannel.name;
+    const channelName = target.channelName;
+    const displayName = target.displayName;
+    const sessionKey = target.sessionKey;
+    const systemPrompt = target.systemPrompt;
 
     // Capture state we need before the async work
     const routerRef = this.router;
@@ -1135,14 +2096,17 @@ Use channel names (the part before the colon). Do not explain.`,
 
     void (async () => {
       try {
-        await routerRef.refreshHistory();
-        const history = routerRef.getHistory();
-        const scopedUserId = `${userId}:${activeChannel.name}`;
-        const { response, history: updatedHistory } = await getResponse(scopedUserId, transcript, {
+        // Use the originating channel snapshot for history so switches that
+        // happen while this item is processing do not cross-contaminate context.
+        await routerRef.refreshHistory(channelName);
+        const history = routerRef.getHistory(channelName);
+        // Use sessionKey as LLM user identity so gateway chat session and
+        // websocket sync injects target the same session namespace.
+        const { response, history: updatedHistory } = await getResponse(sessionKey, transcript, {
           systemPrompt,
           history,
         });
-        routerRef.setHistory(updatedHistory);
+        routerRef.setHistory(updatedHistory, channelName);
 
         // Generate summary (first sentence or first 100 chars)
         const summary = response.length > 100
@@ -1152,14 +2116,82 @@ Use channel names (the part before the colon). Do not explain.`,
         queueRef.markReady(queueItemId, summary, response);
         console.log(`Queue item ${queueItemId} ready (channel: ${channelName})`);
 
+        // Check for pending wait callback — deliver response directly
+        if (this.ctx.pendingWaitCallback && this.ctx.activeWaitQueueItemId === queueItemId) {
+          const cb = this.ctx.pendingWaitCallback;
+          this.ctx.pendingWaitCallback = null;
+          this.ctx.activeWaitQueueItemId = null;
+          this.ctx.quietPendingWait = false;
+          queueRef.markHeard(queueItemId);
+          pollerRef?.check();
+
+          // Log + session transcript
+          this.log(`**${config.botName}:** ${response}`, channelName);
+          session.appendAssistantMessage(response, channelName);
+
+          // Sync to OpenClaw
+          if (gatewaySync?.isConnected()) {
+            try {
+              console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+              const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+              if (ok) {
+                console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+              } else {
+                console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+              }
+            } catch (err: any) {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=${err.message}`);
+            }
+            try {
+              console.log(`Gateway inject start queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+              const ok = await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+              if (ok) {
+                console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+              } else {
+                console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+              }
+            } catch (err: any) {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
+            }
+
+            if (this.inboxTracker?.isActive()) {
+              const count = await this.getCurrentMessageCount(sessionKey);
+              this.inboxTracker.markSeen(sessionKey, count);
+            }
+          }
+
+          cb(response);
+          return;
+        }
+
         // Log + session transcript
         this.log(`**${config.botName}:** ${response}`, channelName);
         session.appendAssistantMessage(response, channelName);
 
         // Sync to OpenClaw
         if (gatewaySync?.isConnected()) {
-          await gatewaySync.inject(sessionKey, transcript, 'voice-user');
-          await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+          try {
+            console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+            const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
+            if (ok) {
+              console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
+            } else {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+            }
+          } catch (err: any) {
+            console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=${err.message}`);
+          }
+          try {
+            console.log(`Gateway inject start queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+            const ok = await gatewaySync.inject(sessionKey, response, 'voice-assistant');
+            if (ok) {
+              console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
+            } else {
+              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=inject-returned-false`);
+            }
+          } catch (err: any) {
+            console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
+          }
 
           // Update inbox snapshot so our own messages don't appear as "new"
           if (this.inboxTracker?.isActive()) {
@@ -1171,18 +2203,21 @@ Use channel names (the part before the colon). Do not explain.`,
         pollerRef?.check();
 
         // Silent wait: auto-read the full response instead of a brief notification
-        if (this.silentWait) {
-          this.silentWait = false;
+        if (this.ctx.silentWait) {
+          this.ctx.silentWait = false;
           queueRef.markHeard(queueItemId);
           pollerRef?.check();
           this.notifyIfIdle(response);
         } else {
           // Notify user if idle
-          const displayName = (activeChannel as any).displayName || channelName;
           this.notifyIfIdle(`Response ready from ${displayName}.`);
         }
       } catch (err: any) {
         console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
+        const failureText = 'I could not complete that request because the gateway connection failed. Please try again.';
+        queueRef.markReady(queueItemId, 'Dispatch failed: gateway connection error.', failureText);
+        pollerRef?.check();
+        this.notifyIfIdle(`Dispatch failed for ${displayName}.`);
       }
     })();
 
@@ -1195,23 +2230,21 @@ Use channel names (the part before the colon). Do not explain.`,
       return;
     }
 
+    this.cancelPendingWait(`mode switch to ${mode}`);
     this.queueState.setMode(mode);
 
-    // Activate/deactivate inbox based on mode
-    if (mode === 'queue' || mode === 'ask') {
-      if (this.inboxTracker && this.router) {
-        const channels = this.router.getAllChannelSessionKeys();
+    // Keep inbox tracking active across modes so text-originated updates are
+    // still discoverable via inbox-check in wait mode.
+    if (this.inboxTracker && this.router) {
+      const channels = this.router.getAllChannelSessionKeys();
+      if (!this.inboxTracker.isActive()) {
         await this.inboxTracker.activate(channels);
       }
-    } else {
-      // wait mode — deactivate inbox
-      if (this.inboxTracker) {
-        this.inboxTracker.deactivate();
-      }
-      // Clear inbox flow if active
-      if (this.stateMachine.getInboxFlowState()) {
-        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-      }
+    }
+
+    // Clear inbox flow if active when mode changes.
+    if (this.stateMachine.getInboxFlowState()) {
+      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
     }
 
     const labels: Record<VoiceMode, string> = {
@@ -1232,19 +2265,40 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private async handleWakeCheck(): Promise<void> {
+    // Simple "I'm here" handshake:
+    // listening (already played upstream) -> ready, then allow one
+    // immediate no-wake follow-up utterance.
+    this.stopWaitingLoop();
+    this.setPromptGrace(15_000);
+    this.playReadyEarconSync();
+  }
+
   private handlePause(): void {
     console.log('Pause command: stopping playback');
-    this.player.stopPlayback();
+    this.player.stopPlayback('pause-command');
   }
 
   private async handleReplay(): Promise<void> {
-    if (!this.lastSpokenText) {
+    if (!this.ctx.lastSpokenText) {
       await this.speakResponse("I haven't said anything yet.");
       await this.playReadyEarcon();
       return;
     }
-    console.log(`Replay: "${this.lastSpokenText.slice(0, 60)}..."`);
-    await this.speakResponse(this.lastSpokenText, { isReplay: true });
+    console.log(`Replay: "${this.ctx.lastSpokenText.slice(0, 60)}..."`);
+    await this.speakResponse(this.ctx.lastSpokenText, { isReplay: true });
+    await this.playReadyEarcon();
+  }
+
+  private async handleHearFullMessage(): Promise<void> {
+    const full = this.ctx.lastSpokenFullText || this.ctx.lastSpokenText;
+    if (!full) {
+      await this.speakResponse("I don't have a full message to read yet.");
+      await this.playReadyEarcon();
+      return;
+    }
+    console.log(`Hear full message: "${full.slice(0, 60)}..."`);
+    await this.speakResponse(full, { isReplay: true, forceFull: true });
     await this.playReadyEarcon();
   }
 
@@ -1257,6 +2311,7 @@ Use channel names (the part before the colon). Do not explain.`,
       { name: 'cancelled', label: 'cancelled' },
       { name: 'ready', label: 'ready' },
       { name: 'busy', label: 'busy' },
+      { name: 'gate-closed', label: 'gate closed' },
     ];
 
     await this.speakResponse('Starting earcon tour.', { inbox: true });
@@ -1286,18 +2341,19 @@ Use channel names (the part before the colon). Do not explain.`,
         // Also check pending queue items
         const pending = this.queueState.getPendingItems();
         if (pending.length > 0) {
-          await this.speakResponse(`Nothing new yet. ${pending.length} still processing.`, { inbox: true });
+          await this.speakResponse(`Zero ready. ${pending.length} processing.`, { inbox: true });
         } else {
-          await this.speakResponse('Nothing new.', { inbox: true });
+          await this.speakResponse('Zero ready.', { inbox: true });
         }
         await this.playReadyEarcon();
         return;
       }
 
       // Store as inbox flow for "next" traversal via state machine
-      this.stateMachine.transition({
+      this.transitionAndResetWatchdog({
         type: 'ENTER_INBOX_FLOW',
         items: activities,
+        returnChannel: this.router.getActiveChannel().name,
       });
 
       const channelNames = activities.map((a) => a.displayName);
@@ -1337,7 +2393,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private async handleInboxNext(): Promise<void> {
     if (!this.queueState) {
-      await this.speakResponse('Queue mode is not available.');
+      await this.speakResponse('Queue mode is not available.', { inbox: true });
       return;
     }
 
@@ -1347,7 +2403,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
     if (flowState && flowState.index < flowState.items.length) {
       activity = flowState.items[flowState.index] as ChannelActivity;
-      this.stateMachine.transition({ type: 'INBOX_ADVANCE' });
+      this.transitionAndResetWatchdog({ type: 'INBOX_ADVANCE' });
     } else if (this.inboxTracker?.isActive() && this.router) {
       // Mark current channel as seen BEFORE fresh check so it doesn't re-appear
       const currentSessionKey = this.router.getActiveSessionKey();
@@ -1358,11 +2414,12 @@ Use channel names (the part before the colon). Do not explain.`,
       const channels = this.router.getAllChannelSessionKeys();
       const activities = await this.inboxTracker.checkInbox(channels);
       if (activities.length > 0) {
-        this.stateMachine.transition({
+        this.transitionAndResetWatchdog({
           type: 'ENTER_INBOX_FLOW',
           items: activities,
+          returnChannel: this.router.getActiveChannel().name,
         });
-        this.stateMachine.transition({ type: 'INBOX_ADVANCE' });
+        this.transitionAndResetWatchdog({ type: 'INBOX_ADVANCE' });
         activity = activities[0];
       }
     }
@@ -1379,17 +2436,15 @@ Use channel names (the part before the colon). Do not explain.`,
       if (remaining > 0) {
         parts.push(`${remaining} more. Say next or done.`);
       } else {
-        this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
-        parts.push(await this.switchHomeWithMessage("That's everything."));
+        const returnChannel = updatedFlow?.returnChannel;
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+        // Restore the channel the user was on before the inbox flow started
+        await this.restoreChannel(returnChannel);
+        parts.push("That's everything.");
       }
 
       const fullText = this.toSpokenText(parts.join(' '), 'Nothing new in the inbox.');
-      this.lastSpokenText = fullText;
-      const ttsStream = await textToSpeechStream(fullText);
-      this.stopWaitingLoop();
-      this.player.stopPlayback();
-      await this.player.playStream(ttsStream);
-      this.gateGraceUntil = Date.now() + 5_000;
+      await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false });
       await this.playReadyEarcon();
       return;
     }
@@ -1424,13 +2479,59 @@ Use channel names (the part before the colon). Do not explain.`,
     const suffix = remaining > 0 ? ` ${remaining} more in queue.` : '';
 
     const fullText = this.toSpokenText(prefix + item.responseText + suffix, 'A response is ready.');
-    this.lastSpokenText = fullText;
-    const ttsStream = await textToSpeechStream(fullText);
-    this.stopWaitingLoop();
-    this.player.stopPlayback();
-    await this.player.playStream(ttsStream);
-    this.gateGraceUntil = Date.now() + 5_000;
+    await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false });
     await this.playReadyEarcon();
+  }
+
+  private async handleInboxClear(): Promise<void> {
+    if (!this.queueState) {
+      await this.speakResponse('Queue mode is not available.');
+      return;
+    }
+
+    const flowState = this.stateMachine.getInboxFlowState();
+    if (!flowState || flowState.index >= flowState.items.length) {
+      await this.speakResponse('Nothing to clear in the inbox.', { inbox: true });
+      await this.playReadyEarcon();
+      return;
+    }
+
+    const remaining = flowState.items.slice(flowState.index) as ChannelActivity[];
+    const sessionKeys = new Set(remaining.map((a) => a.sessionKey));
+
+    // Mark queued ready items from remaining channels as heard.
+    for (const item of this.queueState.getReadyItems()) {
+      if (sessionKeys.has(item.sessionKey)) {
+        this.queueState.markHeard(item.id);
+      }
+    }
+    this.responsePoller?.check();
+
+    // Mark text activity as seen for remaining channels.
+    if (this.inboxTracker) {
+      for (const activity of remaining) {
+        const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
+        this.inboxTracker.markSeen(activity.sessionKey, currentCount);
+      }
+    }
+
+    const returnChannel = flowState.returnChannel;
+    this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+    await this.restoreChannel(returnChannel);
+    const channelWord = remaining.length === 1 ? 'channel' : 'channels';
+    await this.speakResponse(`Cleared ${remaining.length} ${channelWord} from the inbox.`, { inbox: true });
+    await this.playReadyEarcon();
+  }
+
+  private async restoreChannel(channelName: string | null | undefined): Promise<void> {
+    if (!channelName || !this.router) return;
+    const active = this.router.getActiveChannel();
+    if (active.name === channelName) return; // already there
+    const result = await this.router.switchTo(channelName);
+    if (result.success) {
+      await this.onChannelSwitch();
+      console.log(`Inbox flow: restored to ${result.displayName || channelName}`);
+    }
   }
 
   private async switchHomeWithMessage(prefix: string): Promise<string> {
@@ -1447,7 +2548,7 @@ Use channel names (the part before the colon). Do not explain.`,
   private clearInboxFlowIfActive(reason: string): void {
     if (this.stateMachine.getStateType() !== 'INBOX_FLOW') return;
     console.log(`Clearing inbox flow (${reason})`);
-    this.stateMachine.transition({ type: 'RETURN_TO_IDLE' });
+    this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
   }
 
   private async readInboxItem(activity: ChannelActivity): Promise<string[]> {
@@ -1462,9 +2563,7 @@ Use channel names (the part before the colon). Do not explain.`,
     }
 
     // Check for queued responses — read in full if present
-    const readyItems = this.queueState?.getReadyItems().filter(
-      (i) => i.sessionKey === activity.sessionKey,
-    ) ?? [];
+    const readyItems = this.getReadyItemsForSession(activity.sessionKey, activity.channelName);
 
     if (readyItems.length > 0) {
       parts.push(`Switched to ${activity.displayName}.`);
@@ -1490,39 +2589,88 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private async getCurrentMessageCount(sessionKey: string): Promise<number> {
     if (!this.gatewaySync?.isConnected()) return 0;
-    const result = await this.gatewaySync.getHistory(sessionKey, 40);
-    return result?.messages?.length ?? 0;
+    const result = await this.gatewaySync.getHistory(sessionKey, 80);
+    const messages = result?.messages ?? [];
+    if (messages.length === 0) return 0;
+    const last = messages[messages.length - 1] as any;
+    return typeof last?.timestamp === 'number' && Number.isFinite(last.timestamp)
+      ? last.timestamp
+      : messages.length;
   }
 
   private matchBareQueueCommand(transcript: string): VoiceCommand | null {
     const input = transcript.trim().toLowerCase().replace(/[.!?,]+$/, '');
-    const normalized = input.replace(/[,.!?;:]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const normalized = input
+      .replace(/[,.!?;:]+/g, ' ')
+      .replace(/\bin-?box\b/g, 'inbox')
+      .replace(/\bin\s+box\b/g, 'inbox')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const politeStripped = normalized
+      .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/, '')
+      .replace(/^please\s+/, '')
+      .trim();
+    const navInput = politeStripped || normalized;
 
-    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on", "skip"
-    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:this(?:\s+(?:one|message))?|it))?)$/.test(normalized)) {
+    // "next", "next one", "next response", "next message", "next channel", "done", "I'm done", "move on"
+    if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(normalized)) {
       return { type: 'inbox-next' };
     }
 
-    // "switch channels", "change channels", "list channels", "show channels"
-    if (/^(?:change|switch|list|show)\s+channels?$/.test(normalized)) {
-      return { type: 'list' };
+    // "clear inbox", "clear the inbox", "mark inbox read", "clear all"
+    if (/^(?:clear\s+(?:the\s+)?inbox|mark\s+(?:the\s+)?inbox\s+(?:as\s+)?read|mark\s+all\s+read|clear\s+all)$/.test(normalized)) {
+      return { type: 'inbox-clear' };
     }
 
-    // "go to X", "switch to X"
-    const switchMatch = normalized.match(/^(?:go|switch|change|move)\s+to\s+(.+)$/);
+    // "read last message", "read the last message", "last message"
+    if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(normalized)) {
+      return { type: 'read-last-message' };
+    }
+
+    // "hear full message", "read full message", "full message"
+    if (/^(?:hear|read|play)\s+(?:the\s+)?full\s+message$|^full\s+message$/.test(normalized)) {
+      return { type: 'hear-full-message' };
+    }
+
+    // "dispatch to <channel> <payload>"
+    const dispatchMatch = navInput.match(
+      /^(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
+    );
+    if (dispatchMatch) {
+      const body = dispatchMatch[1].trim();
+      if (body) return { type: 'dispatch', body };
+    }
+
+    // "switch channels", "change channels", "list channels", "show channels"
+    // Voice UX: map to inbox status instead of channel enumeration.
+    if (/^(?:change|switch|list|show)\s+channels?$/.test(navInput)) {
+      return { type: 'inbox-check' };
+    }
+
+    // "go to X", "switch to X", "switch channel to X", "move channels X"
+    const switchMatch = navInput.match(/^(?:go|switch|change|move)(?:\s+channels?)?(?:\s+to)?\s+(.+)$/);
     if (switchMatch) {
-      return { type: 'switch', channel: switchMatch[1].trim() };
+      const target = switchMatch[1].trim().replace(/\s+channel$/, '').trim();
+      if (/^(?:inbox|the\s+inbox|my\s+inbox)$/.test(target)) {
+        return { type: 'inbox-check' };
+      }
+      if (/^(?:default|home|back)$/.test(target)) {
+        return { type: 'default' };
+      }
+      if (!/^(?:inbox|queue|wait|ask)\s+mode$/.test(target)) {
+        return { type: 'switch', channel: target };
+      }
     }
 
     // "go back", "go home", "default", "back to inbox"
-    if (/^(?:go\s+back|go\s+home|default|back\s+to\s+inbox|go\s+to\s+inbox)$/.test(normalized)) {
+    if (/^(?:go\s+back|go\s+home|default|back\s+to\s+inbox|go\s+to\s+inbox)$/.test(navInput)) {
       return { type: 'default' };
     }
 
     // "inbox list", "inbox", "what do I have", "check inbox", "what's new", etc.
     if (
-      /^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(normalized) ||
-      /\binbox\s+list\b/.test(normalized)
+      /^(?:inbox(?:\s+list)?|what\s+do\s+(?:i|you)\s+have(?:\s+for\s+me)?|check\s+(?:the\s+)?(?:queue|inbox)|what'?s\s+(?:waiting|ready|new)|queue\s+status)$/.test(navInput) ||
+      /\binbox\s+list\b/.test(navInput)
     ) {
       return { type: 'inbox-check' };
     }
@@ -1546,20 +2694,78 @@ Use channel names (the part before the colon). Do not explain.`,
     return text;
   }
 
-  private async speakResponse(text: string, options?: { inbox?: boolean; isReplay?: boolean }): Promise<void> {
+  private async speakResponse(
+    text: string,
+    options?: { inbox?: boolean; isReplay?: boolean; allowSummary?: boolean; forceFull?: boolean },
+  ): Promise<void> {
+    const fullText = this.toSpokenText(text, '');
+    const shouldSummarize = !!options?.allowSummary && !options?.forceFull;
+    const spokenText = shouldSummarize
+      ? await this.buildSummarySpeechText(fullText)
+      : fullText;
+
+    // Keep spoken summaries/prompts out of channel transcripts to avoid
+    // duplicating content and to keep "read last message" aligned to real
+    // channel messages.
     if (options?.inbox) {
-      this.logToInbox(`**${config.botName}:** ${text}`);
-    } else {
-      this.log(`**${config.botName}:** ${text}`);
+      this.logToInbox(`**${config.botName}:** ${spokenText}`);
     }
     if (!options?.isReplay) {
-      this.lastSpokenText = text;
+      this.ctx.lastSpokenText = spokenText;
+      this.ctx.lastSpokenFullText = fullText;
+      this.ctx.lastSpokenWasSummary = spokenText !== fullText;
     }
-    const ttsStream = await textToSpeechStream(text);
+    const ttsStream = await textToSpeechStream(spokenText);
     this.stopWaitingLoop();
-    this.player.stopPlayback();
+    this.player.stopPlayback('speak-response-preempt');
     await this.player.playStream(ttsStream);
-    this.gateGraceUntil = Date.now() + 5_000;
+    this.ctx.lastPlaybackText = spokenText;
+    this.ctx.lastPlaybackCompletedAt = Date.now();
+    this.setGateGrace(5_000);
+  }
+
+  private shouldSummarizeForVoice(text: string): boolean {
+    if (!text) return false;
+    const normalized = text.trim();
+    if (normalized.length < 450) return false;
+
+    const lineCount = normalized.split('\n').filter((l) => l.trim().length > 0).length;
+    const toolChatterHits = (normalized.match(
+      /\b(?:let me|i(?:'m| am)\s+(?:going to|checking|looking|opening|searching|trying)|opening up the browser|found (?:the|an) item|adding it now|working on it)\b/gi,
+    ) ?? []).length;
+
+    return normalized.length >= 1100 || lineCount >= 10 || toolChatterHits >= 2;
+  }
+
+  private async summarizeForVoice(fullText: string): Promise<string | null> {
+    const clipped = fullText.slice(0, 7000);
+    const system = [
+      'You summarize assistant output for spoken voice UX.',
+      'Return plain text only, 2 to 4 short sentences.',
+      'Include outcome first, key facts second, and any required next action.',
+      'Exclude tool narration, thinking steps, and process chatter.',
+      'Do not use markdown or bullets.',
+    ].join(' ');
+
+    try {
+      const out = await quickCompletion(system, `Original response:\n${clipped}`, 140);
+      const text = this.toSpokenText(out, '').replace(/\s+/g, ' ').trim();
+      if (!text) return null;
+      return text;
+    } catch (err: any) {
+      console.warn(`Voice summary failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  private async buildSummarySpeechText(fullText: string): Promise<string> {
+    if (!this.shouldSummarizeForVoice(fullText)) return fullText;
+    const summary = await this.summarizeForVoice(fullText);
+    if (!summary) {
+      const fallback = fullText.length > 360 ? `${fullText.slice(0, 360)}...` : fullText;
+      return `Summary. ${fallback} Say "hear full message" for full details.`;
+    }
+    return `Summary. ${summary} Say "hear full message" for full details.`;
   }
 
   private logToInbox(message: string): void {
@@ -1570,34 +2776,327 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   notifyIfIdle(message: string): void {
-    if (this.silentWait) {
+    if (this.ctx.silentWait) {
       console.log(`Idle notify skipped (silent wait): "${message.slice(0, 60)}..."`);
       return;
     }
-    if (Date.now() < this.promptGraceUntil || Date.now() < this.gateGraceUntil) {
+    if (Date.now() < this.ctx.promptGraceUntil || Date.now() < this.ctx.gateGraceUntil) {
       console.log(`Idle notify skipped (grace window): "${message}"`);
+      const until = Math.max(this.ctx.promptGraceUntil, this.ctx.gateGraceUntil);
+      const delayMs = Math.max(120, until - Date.now() + 120);
+      this.scheduleDeferredIdleNotify(message, delayMs);
       return;
     }
-    if (this.isBusy() || this.player.isPlaying()) {
+    // INBOX_FLOW is an "awaiting user" context; treat it as idle enough for
+    // queue-ready notifications so responses don't get silently suppressed.
+    const stateType = this.stateMachine.getStateType();
+    const blockOnBusy = stateType !== 'IDLE' && stateType !== 'INBOX_FLOW';
+    if (blockOnBusy || this.player.isPlaying()) {
       console.log(`Idle notify skipped (busy): "${message}"`);
+      this.scheduleDeferredIdleNotify(message, 900);
+      return;
+    }
+    if (this.ctx.idleNotifyInFlight) {
+      console.log(`Idle notify deferred (in-flight): "${message}"`);
+      this.scheduleDeferredIdleNotify(message, 900);
+      return;
+    }
+
+    const existing = this.deferredIdleNotifyTimers.get(message);
+    if (existing) {
+      clearTimeout(existing);
+      this.deferredIdleNotifyTimers.delete(message);
+    }
+
+    // If a ready item belongs to the currently active channel and we're idle,
+    // read it directly instead of announcing "Response ready from <same channel>".
+    if (this.shouldAutoReadReadyForActiveChannel(message)) {
+      void this.readReadyForActiveChannel();
       return;
     }
 
     console.log(`Idle notify: "${message}"`);
     this.logToInbox(`**${config.botName}:** ${message}`);
+    this.ctx.idleNotifyInFlight = true;
 
     textToSpeechStream(message)
       .then((stream) => {
         // Re-check idle — user may have started speaking while TTS was generating
         if (!this.isBusy() && !this.player.isPlaying()) {
-          this.player.playStream(stream).then(() => {
-            this.gateGraceUntil = Date.now() + 5_000;
-          });
+          // Any fresh playback closes old grace windows. This prevents stale
+          // ready-grace from allowing no-wake interruptions mid-notification.
+          this.ctx.gateGraceUntil = 0;
+          this.ctx.promptGraceUntil = 0;
+          this.clearGraceTimer();
+          this.player.playStream(stream)
+            .then(async () => {
+              this.ctx.lastPlaybackText = message;
+              this.ctx.lastPlaybackCompletedAt = Date.now();
+              // Make post-notification handoff explicit so "next" feels expected.
+              await this.playReadyEarcon();
+              this.ctx.idleNotifyInFlight = false;
+            })
+            .catch((err: any) => {
+              console.warn(`Idle notify playback failed: ${err?.message ?? err}`);
+              this.ctx.idleNotifyInFlight = false;
+            });
+        } else {
+          this.ctx.idleNotifyInFlight = false;
+          this.scheduleDeferredIdleNotify(message, 900);
         }
       })
       .catch((err) => {
         console.warn(`Idle notify TTS failed: ${err.message}`);
+        this.ctx.idleNotifyInFlight = false;
+        this.scheduleDeferredIdleNotify(message, 1200);
       });
+  }
+
+  private scheduleDeferredIdleNotify(message: string, delayMs: number): void {
+    const existing = this.deferredIdleNotifyTimers.get(message);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.deferredIdleNotifyTimers.delete(message);
+      this.notifyIfIdle(message);
+    }, Math.max(120, delayMs));
+    this.deferredIdleNotifyTimers.set(message, timer);
+  }
+
+  notifyDependencyIssue(type: 'stt' | 'tts', message: string): void {
+    const now = Date.now();
+    if (now < this.ctx.dependencyAlertCooldownUntil[type]) return;
+    this.ctx.dependencyAlertCooldownUntil[type] = now + 10_000;
+    console.warn(`Dependency issue [${type}]: ${message}`);
+    this.logToInbox(`**${config.botName}:** ${message}`);
+    void this.playFastCue('error');
+  }
+
+  private shouldAutoReadReadyForActiveChannel(message: string): boolean {
+    if (!this.router || !this.queueState) return false;
+    // Auto-read is a wait-mode behavior. In ask/queue (inbox) flows,
+    // ready items should remain in inbox until the user explicitly pulls them.
+    const modeGetter = (this.queueState as any)?.getMode;
+    if (typeof modeGetter === 'function' && modeGetter.call(this.queueState) !== 'wait') return false;
+    const m = message.match(/^Response ready from (.+)\.$/i);
+    if (!m) return false;
+
+    const announced = this.normalizeChannelLabel(m[1] || '');
+    const active = this.router.getActiveChannel();
+    const activeDisplay = this.normalizeChannelLabel((active as any).displayName || active.name);
+
+    if (announced !== activeDisplay) return false;
+
+    return this.queueState.getReadyByChannel(active.name) != null;
+  }
+
+  private async readReadyForActiveChannel(): Promise<void> {
+    if (!this.router || !this.queueState) return;
+    const active = this.router.getActiveChannel();
+    const item = this.queueState.getReadyByChannel(active.name);
+    if (!item) return;
+
+    console.log(`Idle auto-read: consuming ready item from active channel ${item.displayName}`);
+    this.queueState.markHeard(item.id);
+    this.responsePoller?.check();
+
+    try {
+      if (this.isBusy() || this.player.isPlaying()) {
+        console.log('Idle auto-read aborted (became busy before playback)');
+        return;
+      }
+      this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
+      await this.speakResponse(item.responseText, { allowSummary: true, forceFull: false });
+      this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
+      await this.playReadyEarcon();
+    } catch (err: any) {
+      console.warn(`Idle auto-read failed: ${err.message}`);
+    }
+  }
+
+  private normalizeChannelLabel(value: string): string {
+    return value.trim().toLowerCase().replace(/^#/, '').replace(/\s+/g, ' ');
+  }
+
+  private classifyDependencyIssue(error: any): { type: 'stt' | 'tts'; message: string } | null {
+    const full = `${error?.message ?? ''} ${error?.cause?.message ?? ''}`.toLowerCase();
+    if (!full.trim()) return null;
+
+    if (full.includes('whisper local error') || full.includes('/inference') || full.includes('stt')) {
+      return { type: 'stt', message: 'Speech recognition is unavailable right now.' };
+    }
+    if (full.includes('kokoro') || full.includes('tts') || full.includes('text-to-speech') || full.includes(':8880')) {
+      return { type: 'tts', message: 'Voice output is unavailable right now.' };
+    }
+    if (full.includes('econnrefused') && config.whisperUrl) {
+      return { type: 'stt', message: 'Speech recognition is unavailable right now.' };
+    }
+    return null;
+  }
+
+  private async inferVoiceCommandLLM(
+    transcript: string,
+    mode: VoiceMode,
+    inGracePeriod: boolean,
+  ): Promise<VoiceCommand | null> {
+    const clipped = transcript.trim().slice(0, VoicePipeline.COMMAND_CLASSIFIER_MAX_CHARS);
+    if (!clipped) return null;
+
+    const system = [
+      'Classify spoken assistant input as either a voice command or normal prompt.',
+      'Return ONLY minified JSON with keys: intent, confidence, and optional fields channel, body, mode, enabled.',
+      'intent must be one of:',
+      'prompt,switch,dispatch,list,default,noise,delay,delay-adjust,settings,new-post,mode,inbox-check,inbox-next,inbox-clear,read-last-message,voice-status,voice-channel,gated-mode,wake-check,silent-wait,hear-full-message,pause,replay,earcon-tour',
+      'confidence must be 0 to 1.',
+      'Use prompt if uncertain.',
+      'No markdown, no prose.',
+    ].join(' ');
+
+    const user = JSON.stringify({
+      transcript: clipped,
+      context: {
+        mode,
+        inGracePeriod,
+        gated: getVoiceSettings().gated,
+      },
+      hints: [
+        '"in box" means "inbox"',
+        '"here full message" means "hear full message"',
+      ],
+    });
+
+    let raw = '';
+    try {
+      raw = await Promise.race<string>([
+        quickCompletion(system, user, 120),
+        new Promise<string>((_, reject) =>
+          setTimeout(() => reject(new Error('LLM command classifier timeout')), 1400),
+        ),
+      ]);
+    } catch (err: any) {
+      console.warn(`LLM command classifier failed: ${err.message}`);
+      return null;
+    }
+
+    const parsed = this.extractJsonObject(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+
+    const intentRaw = String((parsed as any).intent || '').trim().toLowerCase().replace(/[_\s]+/g, '-');
+    const confidence = Number((parsed as any).confidence);
+    if (!Number.isFinite(confidence)) return null;
+
+    const wordCount = clipped.split(/\s+/).filter(Boolean).length;
+    const threshold = wordCount <= 8 ? 0.72 : 0.88;
+    if (confidence < threshold) return null;
+    if (intentRaw === 'prompt' || intentRaw === '') return null;
+
+    const channel = String((parsed as any).channel ?? (parsed as any).target ?? '').trim();
+    const body = String((parsed as any).body ?? (parsed as any).message ?? (parsed as any).text ?? '').trim();
+    const level = String((parsed as any).level ?? '').trim();
+    const modeValue = String((parsed as any).mode ?? '').trim().toLowerCase();
+    const enabledValue = (parsed as any).enabled;
+
+    switch (intentRaw) {
+      case 'switch':
+        return channel ? { type: 'switch', channel } : null;
+      case 'dispatch':
+        return body ? { type: 'dispatch', body } : null;
+      case 'list':
+        // Voice UX: deprecate channel-list intent; treat as inbox status.
+        return { type: 'inbox-check' };
+      case 'default':
+        return { type: 'default' };
+      case 'noise':
+        return (level || body) ? { type: 'noise', level: (level || body) } : null;
+      case 'delay': {
+        const digits = body.match(/\d+/)?.[0];
+        if (!digits) return null;
+        return { type: 'delay', value: parseInt(digits, 10) };
+      }
+      case 'delay-adjust':
+        // Classifier may emit delay-adjust with a numeric body for phrases like
+        // "set delay 500 milliseconds". Treat that as absolute delay.
+        if (/\d/.test(body)) {
+          const digits = body.match(/\d+/)?.[0];
+          if (!digits) return null;
+          return { type: 'delay', value: parseInt(digits, 10) };
+        }
+        if (/\blonger\b/.test(body)) return { type: 'delay-adjust', direction: 'longer' };
+        if (/\bshorter\b/.test(body)) return { type: 'delay-adjust', direction: 'shorter' };
+        return null;
+      case 'settings':
+        return { type: 'settings' };
+      case 'new-post':
+        return { type: 'new-post' };
+      case 'mode': {
+        const normalized = modeValue === 'inbox' ? 'queue' : modeValue;
+        if (normalized === 'wait' || normalized === 'queue' || normalized === 'ask') {
+          return { type: 'mode', mode: normalized };
+        }
+        return null;
+      }
+      case 'inbox-check':
+        return { type: 'inbox-check' };
+      case 'inbox-next':
+        return { type: 'inbox-next' };
+      case 'inbox-clear':
+        return { type: 'inbox-clear' };
+      case 'read-last-message':
+        return { type: 'read-last-message' };
+      case 'voice-status':
+        return { type: 'voice-status' };
+      case 'voice-channel':
+        return { type: 'voice-channel' };
+      case 'gated-mode': {
+        if (typeof enabledValue === 'boolean') return { type: 'gated-mode', enabled: enabledValue };
+        if (modeValue === 'on' || modeValue === 'enabled' || modeValue === 'gated') {
+          return { type: 'gated-mode', enabled: true };
+        }
+        if (modeValue === 'off' || modeValue === 'disabled' || modeValue === 'open' || modeValue === 'ungated') {
+          return { type: 'gated-mode', enabled: false };
+        }
+        return null;
+      }
+      case 'wake-check':
+        return { type: 'wake-check' };
+      case 'silent-wait':
+        // Guard against noise/garbage transcripts being misclassified as silent-wait.
+        if (!/\b(?:silent|quiet|silence|quietly|no tones?|stop tones?|wait quietly)\b/i.test(clipped)) {
+          return null;
+        }
+        return { type: 'silent-wait' };
+      case 'hear-full-message':
+        return { type: 'hear-full-message' };
+      case 'pause':
+        return { type: 'pause' };
+      case 'replay':
+        return { type: 'replay' };
+      case 'earcon-tour':
+        return { type: 'earcon-tour' };
+      default:
+        return null;
+    }
+  }
+
+  private extractJsonObject(raw: string): any | null {
+    const text = raw.trim();
+    if (!text) return null;
+    const tryParse = (s: string): any | null => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return null;
+      }
+    };
+
+    const direct = tryParse(text);
+    if (direct) return direct;
+
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return tryParse(text.slice(start, end + 1));
+    }
+    return null;
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {
@@ -1626,18 +3125,19 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private async playReadyEarcon(): Promise<void> {
-    console.log('Ready cue emitted (async) — opening grace window');
-    this.gateGraceUntil = Date.now() + VoicePipeline.READY_GRACE_MS;
+    console.log(`${this.stamp()} Ready cue emitted (async) — opening grace window`);
+    this.setGateGrace(VoicePipeline.READY_GRACE_MS);
     await this.playFastCue('ready');
   }
 
   private playReadyEarconSync(): void {
-    console.log('Ready cue emitted (sync) — opening grace window');
-    this.gateGraceUntil = Date.now() + VoicePipeline.READY_GRACE_MS;
+    console.log(`${this.stamp()} Ready cue emitted (sync) — opening grace window`);
+    this.setGateGrace(VoicePipeline.READY_GRACE_MS);
     void this.playFastCue('ready');
   }
 
   private startWaitingLoop(delayMs = 0): void {
+    if (this.player.isWaiting() && delayMs <= 0) return;
     if (this.waitingLoopTimer) {
       clearTimeout(this.waitingLoopTimer);
       this.waitingLoopTimer = null;
@@ -1665,7 +3165,7 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private async repromptAwaiting(): Promise<void> {
-    const effects = this.stateMachine.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
+    const effects = this.transitionAndResetWatchdog({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
     await this.applyEffects(effects);
   }
 

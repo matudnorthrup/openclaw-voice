@@ -76,12 +76,27 @@ export class ChannelRouter {
     return history[history.length - 1];
   }
 
+  async getLastMessageFresh(channelName?: string): Promise<{ role: string; content: string } | null> {
+    const name = channelName ?? this.activeChannelName;
+    const fromDiscord = await this.getLastMessageFromDiscord(name);
+    if (fromDiscord) return fromDiscord;
+    return this.getLastMessage(name);
+  }
+
   getSystemPrompt(): string {
     const active = this.getActiveChannel();
     if (!active.topicPrompt) {
       return WATSON_SYSTEM_PROMPT;
     }
     return `${WATSON_SYSTEM_PROMPT}\n\n---\n\nTopic context for this channel:\n${active.topicPrompt}`;
+  }
+
+  getSystemPromptFor(channelName: string): string {
+    const def = channels[channelName];
+    if (!def?.topicPrompt) {
+      return WATSON_SYSTEM_PROMPT;
+    }
+    return `${WATSON_SYSTEM_PROMPT}\n\n---\n\nTopic context for this channel:\n${def.topicPrompt}`;
   }
 
   async getLogChannel(): Promise<TextChannel | null> {
@@ -145,19 +160,22 @@ export class ChannelRouter {
     return null;
   }
 
-  async refreshHistory(): Promise<void> {
-    const seeded = await this.seedHistory(this.activeChannelName);
+  async refreshHistory(channelName?: string): Promise<void> {
+    const name = channelName ?? this.activeChannelName;
+    const seeded = await this.seedHistory(name);
     if (seeded.length > 0) {
-      this.historyMap.set(this.activeChannelName, seeded);
+      this.historyMap.set(name, seeded);
     }
   }
 
-  getHistory(): Message[] {
-    return this.historyMap.get(this.activeChannelName) || [];
+  getHistory(channelName?: string): Message[] {
+    const name = channelName ?? this.activeChannelName;
+    return this.historyMap.get(name) || [];
   }
 
-  setHistory(history: Message[]): void {
-    this.historyMap.set(this.activeChannelName, history);
+  setHistory(history: Message[], channelName?: string): void {
+    const name = channelName ?? this.activeChannelName;
+    this.historyMap.set(name, history);
   }
 
   async switchTo(name: string): Promise<{ success: boolean; error?: string; historyCount: number; displayName?: string }> {
@@ -175,10 +193,11 @@ export class ChannelRouter {
       return { success: true, historyCount, displayName: channels[name].displayName };
     }
 
-    // Try as a raw channel ID or <#id> mention
+    // Try as a raw channel ID, spoken numeric ID (with commas/spaces), or <#id> mention
     const channelId = name.replace(/^<#(\d+)>$/, '$1');
-    if (/^\d+$/.test(channelId)) {
-      return this.switchToAdhoc(channelId);
+    const normalizedChannelId = channelId.replace(/[,\s]/g, '');
+    if (/^\d+$/.test(normalizedChannelId)) {
+      return this.switchToAdhoc(normalizedChannelId);
     }
 
     return { success: false, error: `Unknown channel: \`${name}\`. Use \`!channels\` to see available channels, or pass a channel ID.`, historyCount: 0 };
@@ -228,11 +247,31 @@ export class ChannelRouter {
 
   findForumChannel(query: string): { name: string; id: string } | null {
     const forums = this.listForumChannels();
-    const lower = query.toLowerCase();
-    return forums.find((f) => f.name.toLowerCase() === lower)
+    const lower = query.toLowerCase().trim();
+    const normalizedQuery = this.normalizeForumMatch(lower);
+
+    const direct = forums.find((f) => f.name.toLowerCase() === lower)
       ?? forums.find((f) => f.name.toLowerCase().includes(lower))
-      ?? forums.find((f) => lower.includes(f.name.toLowerCase()))
-      ?? null;
+      ?? forums.find((f) => lower.includes(f.name.toLowerCase()));
+    if (direct) return direct;
+
+    // Normalize separators and filler terms so "open claw forum" can match
+    // names like "openclaw-forum" or "openclaw".
+    return forums.find((f) => {
+      const candidate = this.normalizeForumMatch(f.name);
+      return candidate === normalizedQuery
+        || candidate.includes(normalizedQuery)
+        || normalizedQuery.includes(candidate);
+    }) ?? null;
+  }
+
+  private normalizeForumMatch(input: string): string {
+    return input
+      .toLowerCase()
+      .replace(/\b(?:forum|forums|channel|topic|thread|post|the|my)\b/g, ' ')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, '');
   }
 
   async createForumPost(forumId: string, title: string, body: string): Promise<{ success: boolean; error?: string; threadId?: string; forumName?: string }> {
@@ -317,6 +356,13 @@ export class ChannelRouter {
     return GatewaySync.defaultSessionKey;
   }
 
+  getSessionKeyFor(channelName: string): string {
+    const def = channels[channelName];
+    if (def?.sessionKey) return def.sessionKey;
+    if (def?.channelId) return GatewaySync.sessionKeyForChannel(def.channelId);
+    return GatewaySync.defaultSessionKey;
+  }
+
   private async seedHistory(name: string): Promise<Message[]> {
     const def = channels[name];
 
@@ -343,7 +389,7 @@ export class ChannelRouter {
       // Skip system messages
       if (msg.role === 'system') continue;
 
-      const content = this.extractTextContent(msg.content);
+      const content = this.normalizeDiscordMessageContent(this.extractTextContent(msg.content));
       if (!content) continue;
 
       // Messages injected from voice with label 'voice-user' are user messages
@@ -390,10 +436,7 @@ export class ChannelRouter {
       const sorted = [...fetched.values()].reverse();
 
       for (const msg of sorted) {
-        const content = msg.content
-          .replace(/^\*\*You:\*\*\s*/i, '')
-          .replace(new RegExp(`^\\*\\*${config.botName}:\\*\\*\\s*`, 'i'), '');
-
+        const content = this.normalizeDiscordMessageContent(msg.content);
         if (!content.trim()) continue;
 
         if (msg.author.bot) {
@@ -409,5 +452,38 @@ export class ChannelRouter {
       console.error(`Failed to seed history from #${name}:`, err.message);
       return [];
     }
+  }
+
+  private async getLastMessageFromDiscord(name: string): Promise<Message | null> {
+    const def = channels[name];
+    if (!def?.channelId) return null;
+
+    const textChannel = await this.resolveChannel(def.channelId);
+    if (!textChannel) return null;
+
+    this.resolvedChannels.set(def.channelId, textChannel);
+
+    try {
+      const fetched = await textChannel.messages.fetch({ limit: 10 });
+      for (const msg of fetched.values()) {
+        const content = this.normalizeDiscordMessageContent(msg.content);
+        if (!content.trim()) continue;
+        return {
+          role: msg.author.bot ? 'assistant' : 'user',
+          content,
+        };
+      }
+      return null;
+    } catch (err: any) {
+      console.error(`Failed to fetch last Discord message from #${name}:`, err.message);
+      return null;
+    }
+  }
+
+  private normalizeDiscordMessageContent(content: string): string {
+    return content
+      .replace(/^\[(?:discord-user|discord-assistant)\]\s*/i, '')
+      .replace(/^\*\*You:\*\*\s*/i, '')
+      .replace(new RegExp(`^\\*\\*${config.botName}:\\*\\*\\s*`, 'i'), '');
   }
 }

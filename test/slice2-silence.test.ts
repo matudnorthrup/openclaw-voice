@@ -68,7 +68,7 @@ describe('isLikelySpeech', () => {
   });
 
   it('should accept loud audio of sufficient length', () => {
-    const speech = generateSineWave(440, 500, 20000); // 500ms, loud
+    const speech = generateSineWave(440, 700, 20000); // 700ms, loud (must exceed minSpeechDurationMs=600)
     expect(isLikelySpeech(speech)).toBe(true);
   });
 

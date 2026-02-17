@@ -4,7 +4,7 @@
   "main": "dist/index.js",
   "scripts": {
     "start": "tsx src/index.ts",
-    "build": "tsc",
+    "build": "tsc && cp src/channels.json dist/channels.json",
     "dev": "tsx watch src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -12,7 +12,15 @@
     "test:slice3": "vitest run test/slice3-whisper.test.ts",
     "test:slice4": "vitest run test/slice4-claude.test.ts",
     "test:slice5": "vitest run test/slice5-elevenlabs.test.ts",
-    "test:slice6": "vitest run test/slice6-pipeline.test.ts"
+    "test:slice6": "vitest run test/slice6-pipeline.test.ts",
+    "test:flows": "vitest run test/interaction-flow-harness.test.ts",
+    "test:intents": "vitest run test/intent-robustness-matrix.test.ts",
+    "flows:report": "npm run build --silent && node dist/testing/flow-report.js",
+    "flows:stress": "npm run build --silent && node dist/testing/stress-flow-report.js",
+    "flows:stress:inbox": "npm run build --silent && node dist/testing/stress-inbox-report.js",
+    "flows:stress:all": "npm run flows:stress && npm run flows:stress:inbox",
+    "e2e:live": "npm run build --silent && node dist/testing/e2e-live-report.js",
+    "e2e:voice-loop": "npm run build --silent && node dist/testing/e2e-voice-loop-report.js"
   },
   "keywords": [],
   "author": "",

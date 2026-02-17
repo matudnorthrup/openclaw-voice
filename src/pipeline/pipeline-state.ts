@@ -71,6 +71,7 @@ export interface InboxFlowState {
   type: 'INBOX_FLOW';
   items: any[]; // ChannelActivity[]
   index: number;
+  returnChannel: string | null; // channel name to restore when flow ends
 }
 
 export type PipelineState =
@@ -107,7 +108,7 @@ export type PipelineEvent =
   | { type: 'ENTER_SWITCH_CHOICE'; lastMessage: string; timeoutMs?: number }
   | { type: 'ENTER_NEW_POST_FLOW'; step: 'forum' | 'title' | 'body'; forumId?: string; forumName?: string; title?: string; timeoutMs?: number }
   | { type: 'NEW_POST_ADVANCE'; step: 'forum' | 'title' | 'body'; forumId?: string; forumName?: string; title?: string; timeoutMs?: number }
-  | { type: 'ENTER_INBOX_FLOW'; items: any[] }
+  | { type: 'ENTER_INBOX_FLOW'; items: any[]; returnChannel?: string | null }
   | { type: 'INBOX_ADVANCE' }
   | { type: 'AWAITING_INPUT_RECEIVED'; recognized: boolean }
   | { type: 'TIMEOUT_CHECK' }
@@ -134,6 +135,10 @@ export class PipelineStateMachine {
 
   getStateType(): PipelineStateType {
     return this.state.type;
+  }
+
+  hasActiveTimers(): boolean {
+    return this.timeoutTimer !== null || this.warningTimer !== null;
   }
 
   /**
@@ -177,6 +182,8 @@ export class PipelineStateMachine {
         // Only transition from TRANSCRIBING — don't overwrite AWAITING states
         if (this.state.type === 'TRANSCRIBING') {
           this.state = { type: 'PROCESSING' };
+        } else {
+          console.warn(`TRANSCRIPT_READY arrived in non-TRANSCRIBING state: ${this.state.type}`);
         }
         return effects;
 
@@ -289,6 +296,7 @@ export class PipelineStateMachine {
           type: 'INBOX_FLOW',
           items: event.items,
           index: 0,
+          returnChannel: event.returnChannel ?? null,
         };
         return effects;
 
@@ -298,6 +306,8 @@ export class PipelineStateMachine {
             ...this.state,
             index: this.state.index + 1,
           };
+        } else {
+          console.warn(`INBOX_ADVANCE arrived in non-INBOX_FLOW state: ${this.state.type}`);
         }
         return effects;
 
@@ -406,9 +416,9 @@ export class PipelineStateMachine {
   /**
    * Get inbox flow state for the pipeline to use.
    */
-  getInboxFlowState(): { items: any[]; index: number } | null {
+  getInboxFlowState(): { items: any[]; index: number; returnChannel: string | null } | null {
     if (this.state.type !== 'INBOX_FLOW') return null;
-    return { items: this.state.items, index: this.state.index };
+    return { items: this.state.items, index: this.state.index, returnChannel: this.state.returnChannel };
   }
 
   /**

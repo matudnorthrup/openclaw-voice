@@ -365,7 +365,7 @@ describe('PipelineStateMachine', () => {
         type: 'ENTER_NEW_POST_FLOW',
         step: 'body',
       });
-      expect(sm.getNewPostFlowState()?.timeoutMs).toBe(60000);
+      expect(sm.getNewPostFlowState()?.timeoutMs).toBe(180000);
     });
   });
 
@@ -457,6 +457,89 @@ describe('PipelineStateMachine', () => {
       sm.transition({ type: 'PROCESSING_STARTED' });
       const effects = sm.transition({ type: 'AWAITING_INPUT_RECEIVED', recognized: false });
       expect(effects).toEqual([]);
+    });
+  });
+
+  describe('hasActiveTimers', () => {
+    it('returns false in IDLE', () => {
+      expect(sm.hasActiveTimers()).toBe(false);
+    });
+
+    it('returns true after entering an AWAITING state', () => {
+      sm.transition({ type: 'ENTER_CHANNEL_SELECTION', options: [], timeoutMs: 15000 });
+      expect(sm.hasActiveTimers()).toBe(true);
+    });
+
+    it('returns true after entering queue choice', () => {
+      sm.transition({ type: 'ENTER_QUEUE_CHOICE', userId: 'u1', transcript: 'hi', timeoutMs: 20000 });
+      expect(sm.hasActiveTimers()).toBe(true);
+    });
+
+    it('returns true after entering new-post flow', () => {
+      sm.transition({ type: 'ENTER_NEW_POST_FLOW', step: 'forum', timeoutMs: 30000 });
+      expect(sm.hasActiveTimers()).toBe(true);
+    });
+
+    it('returns false after CANCEL_FLOW clears timers', () => {
+      sm.transition({ type: 'ENTER_CHANNEL_SELECTION', options: [], timeoutMs: 15000 });
+      sm.transition({ type: 'CANCEL_FLOW' });
+      expect(sm.hasActiveTimers()).toBe(false);
+    });
+
+    it('returns false after destroy', () => {
+      sm.transition({ type: 'ENTER_SWITCH_CHOICE', lastMessage: 'msg', timeoutMs: 30000 });
+      expect(sm.hasActiveTimers()).toBe(true);
+      sm.destroy();
+      expect(sm.hasActiveTimers()).toBe(false);
+    });
+
+    it('returns false in PROCESSING (no timeout timers)', () => {
+      sm.transition({ type: 'PROCESSING_STARTED' });
+      expect(sm.hasActiveTimers()).toBe(false);
+    });
+
+    it('clears timers when UTTERANCE_RECEIVED pauses an awaiting state', () => {
+      sm.transition({ type: 'ENTER_SWITCH_CHOICE', lastMessage: 'msg', timeoutMs: 30000 });
+      expect(sm.hasActiveTimers()).toBe(true);
+      sm.transition({ type: 'UTTERANCE_RECEIVED' });
+      expect(sm.hasActiveTimers()).toBe(false);
+    });
+  });
+
+  describe('invalid transition warnings', () => {
+    it('warns when TRANSCRIPT_READY arrives in non-TRANSCRIBING state', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      sm.transition({ type: 'TRANSCRIPT_READY', transcript: 'hello' });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('TRANSCRIPT_READY arrived in non-TRANSCRIBING state'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn when TRANSCRIPT_READY arrives in TRANSCRIBING state', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      sm.transition({ type: 'UTTERANCE_RECEIVED' });
+      expect(sm.getStateType()).toBe('TRANSCRIBING');
+      sm.transition({ type: 'TRANSCRIPT_READY', transcript: 'hello' });
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('warns when INBOX_ADVANCE arrives in non-INBOX_FLOW state', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      sm.transition({ type: 'INBOX_ADVANCE' });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('INBOX_ADVANCE arrived in non-INBOX_FLOW state'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('does not warn when INBOX_ADVANCE arrives in INBOX_FLOW state', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      sm.transition({ type: 'ENTER_INBOX_FLOW', items: [{ channelName: 'ch1' }] });
+      sm.transition({ type: 'INBOX_ADVANCE' });
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
     });
   });
 
