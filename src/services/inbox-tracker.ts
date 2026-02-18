@@ -14,6 +14,8 @@ export interface ChannelActivity {
   newMessageCount: number;
   queuedReadyCount: number;
   newMessages: ChatMessage[];
+  /** Earliest timestamp across new messages and queued ready items — used for oldest-first ordering. */
+  earliestTimestamp: number;
 }
 
 export class InboxTracker {
@@ -95,6 +97,17 @@ export class InboxTracker {
       console.log(`InboxTracker: check ${ch.name} — snapshotStamp=${baselineStamp} latestStamp=${latestStamp} new=${newMessageCount} ready=${readyItems.length}`);
 
       if (newMessageCount > 0 || readyItems.length > 0) {
+        // Compute earliest timestamp for oldest-first ordering.
+        const timestamps: number[] = [];
+        for (const m of newMessages) {
+          const ts = this.getMessageStamp(m as ChatMessage & { timestamp?: number }, 0);
+          if (ts > 0) timestamps.push(ts);
+        }
+        for (const item of readyItems) {
+          if (item.timestamp > 0) timestamps.push(item.timestamp);
+        }
+        const earliestTimestamp = timestamps.length > 0 ? Math.min(...timestamps) : Infinity;
+
         activities.push({
           channelName: ch.name,
           displayName: ch.displayName,
@@ -102,6 +115,7 @@ export class InboxTracker {
           newMessageCount,
           queuedReadyCount: readyItems.length,
           newMessages,
+          earliestTimestamp,
         });
       }
     }
@@ -109,6 +123,9 @@ export class InboxTracker {
     if (snapshotsChanged) {
       this.queueState.setSnapshots(snapshots);
     }
+
+    // Sort oldest-first so "next" reads the earliest activity first.
+    activities.sort((a, b) => a.earliestTimestamp - b.earliestTimestamp);
 
     return activities;
   }

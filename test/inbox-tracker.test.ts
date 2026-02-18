@@ -35,18 +35,23 @@ const testChannels: ChannelInfo[] = [
 
 describe('InboxTracker', () => {
   describe('activate / deactivate / isActive', () => {
-    it('activates and snapshots all channels at zero', async () => {
+    it('activates and snapshots all channels at current time', async () => {
       const qs = createMockQueueState();
       const gs = createMockGatewaySync();
       const tracker = new InboxTracker(qs as any, gs as any);
 
+      const before = Date.now();
       await tracker.activate(testChannels);
+      const after = Date.now();
 
       expect(tracker.isActive()).toBe(true);
       const snapshots = qs.getSnapshots();
-      expect(snapshots['session:health']).toBe(0);
-      expect(snapshots['session:finance']).toBe(0);
-      expect(snapshots['session:planning']).toBe(0);
+      // Snapshots are initialized to Date.now() so only messages arriving
+      // AFTER activation trigger notifications.
+      for (const key of ['session:health', 'session:finance', 'session:planning']) {
+        expect(snapshots[key]).toBeGreaterThanOrEqual(before);
+        expect(snapshots[key]).toBeLessThanOrEqual(after);
+      }
     });
 
     it('deactivates and clears snapshots', async () => {
@@ -77,13 +82,13 @@ describe('InboxTracker', () => {
       // Health now has 4 messages (2 new since T+2000), finance still at baseline
       const historyMap: Record<string, ChatMessage[]> = {
         'session:health': [
-          { role: 'user', content: 'hi', timestamp: T + 1000 },
+          { role: 'user', content: 'hi', timestamp: T + 1000, label: 'discord-user' },
           { role: 'assistant', content: 'hello', timestamp: T + 2000 },
-          { role: 'user', content: 'new msg 1', timestamp: T + 3000 },
-          { role: 'assistant', content: 'new msg 2', timestamp: T + 4000 },
+          { role: 'user', content: 'new msg 1', timestamp: T + 3000, label: 'discord-user' },
+          { role: 'user', content: 'new msg 2', timestamp: T + 4000, label: 'discord-user' },
         ],
         'session:finance': [
-          { role: 'user', content: 'budget', timestamp: T + 1000 },
+          { role: 'user', content: 'budget', timestamp: T + 1000, label: 'discord-user' },
         ],
         'session:planning': [],
       } as any;
@@ -131,6 +136,40 @@ describe('InboxTracker', () => {
       expect(activities[0].channelName).toBe('finance');
       expect(activities[0].queuedReadyCount).toBe(1);
       expect(activities[0].newMessageCount).toBe(0);
+    });
+
+    it('sorts activities oldest-first by earliest timestamp', async () => {
+      const qs = createMockQueueState();
+      const T = 1_700_000_000_000;
+      qs.setSnapshots({
+        'session:health': T + 1000,
+        'session:finance': T + 1000,
+        'session:planning': T + 1000,
+      });
+
+      // Planning has activity at T+2000, health at T+5000 — planning should come first
+      const historyMap: Record<string, ChatMessage[]> = {
+        'session:health': [
+          { role: 'user', content: 'old', timestamp: T + 1000, label: 'discord-user' },
+          { role: 'user', content: 'health new', timestamp: T + 5000, label: 'discord-user' },
+        ],
+        'session:finance': [],
+        'session:planning': [
+          { role: 'user', content: 'plan new', timestamp: T + 2000, label: 'discord-user' },
+        ],
+      } as any;
+
+      const gs = createMockGatewaySync(historyMap as any);
+      const tracker = new InboxTracker(qs as any, gs as any);
+
+      const activities = await tracker.checkInbox(testChannels);
+
+      expect(activities).toHaveLength(2);
+      // Planning (T+2000) should come before Health (T+5000)
+      expect(activities[0].channelName).toBe('planning');
+      expect(activities[0].earliestTimestamp).toBe(T + 2000);
+      expect(activities[1].channelName).toBe('health');
+      expect(activities[1].earliestTimestamp).toBe(T + 5000);
     });
 
     it('returns empty when no new activity', async () => {
