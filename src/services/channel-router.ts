@@ -373,18 +373,16 @@ export class ChannelRouter {
 
   getAllChannelSessionKeys(): { name: string; displayName: string; sessionKey: string }[] {
     const result: { name: string; displayName: string; sessionKey: string }[] = [];
-    let hasDefaultMain = false;
+    let hasDefault = false;
     for (const [name, def] of Object.entries(channels)) {
       if (!def.channelId && !def.sessionKey) continue;
       if (def.inboxExclude) continue;
+      if (name === 'default') hasDefault = true;
       const sessionKey = def.sessionKey
         || (def.channelId ? GatewaySync.sessionKeyForChannel(def.channelId) : GatewaySync.defaultSessionKey);
-      if (sessionKey === GatewaySync.defaultSessionKey) {
-        hasDefaultMain = true;
-      }
       result.push({ name, displayName: def.displayName, sessionKey });
     }
-    if (!hasDefaultMain) {
+    if (!hasDefault) {
       result.push({
         name: 'default',
         displayName: channels['default']?.displayName || 'General',

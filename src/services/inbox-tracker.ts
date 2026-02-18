@@ -84,7 +84,7 @@ export class InboxTracker {
       // system messages — none of which should trigger inbox notifications.
       const newMessages = allMessages.filter((m, idx) =>
         this.getMessageStamp(m, idx) > baselineStamp
-          && (m as any).label === 'discord-user',
+          && this.extractMessageLabel(m) === 'discord-user',
       );
       const newMessageCount = newMessages.length;
 
@@ -237,6 +237,21 @@ export class InboxTracker {
       if (typeof c.content === 'string') return this.cleanSpeechText(c.content);
     }
     return '';
+  }
+
+  /**
+   * Extract the label from a gateway message.  The gateway stores labels as a
+   * text prefix `[label]\n\n` inside the message content rather than a separate
+   * field.  Check the `label` property first (future-proofing) then fall back
+   * to parsing the prefix.
+   */
+  private extractMessageLabel(message: ChatMessage): string | undefined {
+    // Check for an explicit label property first (future-proof)
+    if ((message as any).label) return (message as any).label;
+
+    const text = this.extractSpeechText(message.content);
+    const match = text.match(/^\[([a-z][\w-]*)\]/i);
+    return match ? match[1] : undefined;
   }
 
   private cleanSpeechText(text: string): string {
