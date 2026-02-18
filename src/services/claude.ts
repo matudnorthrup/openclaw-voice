@@ -21,13 +21,17 @@ const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1500;
 const conversations = new Map<string, Message[]>();
 
-async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+async function fetchWithRetry(url: string, init: RequestInit, label: string, signal?: AbortSignal): Promise<Response> {
   let lastError: Error | null = null;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (signal?.aborted) break;
     try {
-      return await fetch(url, init);
+      const fetchInit = signal ? { ...init, signal } : init;
+      return await fetch(url, fetchInit);
     } catch (err: any) {
       lastError = err;
+      // Don't retry if the caller's abort signal fired — budget is exhausted.
+      if (signal?.aborted) break;
       if (attempt < MAX_RETRIES) {
         console.warn(`${label} fetch failed (attempt ${attempt + 1}/${MAX_RETRIES + 1}): ${err.message} — retrying in ${RETRY_DELAY_MS}ms`);
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -95,7 +99,7 @@ export async function getResponse(
   return { response: assistantText, history };
 }
 
-export async function quickCompletion(systemPrompt: string, userMessage: string, maxTokens = 50): Promise<string> {
+export async function quickCompletion(systemPrompt: string, userMessage: string, maxTokens = 50, signal?: AbortSignal): Promise<string> {
   const start = Date.now();
 
   const messages: Message[] = [
@@ -117,7 +121,7 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
       messages,
       user: sessionKey,
     }),
-  }, 'Quick completion');
+  }, 'Quick completion', signal);
 
   if (!apiResponse.ok) {
     const body = await apiResponse.text();

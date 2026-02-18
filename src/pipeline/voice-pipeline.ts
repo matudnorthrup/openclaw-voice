@@ -3159,15 +3159,15 @@ Use channel names (the part before the colon). Do not explain.`,
 
     let raw = '';
     try {
-      raw = await Promise.race<string>([
-        quickCompletion(system, user, 120),
-        new Promise<string>((_, reject) =>
-          setTimeout(() => reject(new Error('LLM command classifier timeout')), 1400),
-        ),
-      ]);
+      // AbortSignal.timeout cancels the actual HTTP fetch after 1400ms instead
+      // of leaving an orphaned connection hanging (the old Promise.race approach).
+      const signal = AbortSignal.timeout(1400);
+      raw = await quickCompletion(system, user, 120, signal);
     } catch (err: any) {
-      console.warn(`LLM command classifier failed: ${err.message}`);
-      if (err.message?.includes('timeout')) {
+      const msg = err.message ?? '';
+      const isTimeout = msg.includes('timeout') || msg.includes('aborted') || err.name === 'TimeoutError';
+      console.warn(`LLM command classifier failed: ${msg}`);
+      if (isTimeout) {
         this.lastClassifierTimedOut = true;
       }
       return null;

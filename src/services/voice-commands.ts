@@ -95,8 +95,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
 
   // "switch to X", "go to X", "change to X", "move to X"
+  // "which to X" — common Whisper mishearing of "switch to"
   // Exclude "inbox" — handled below as inbox-check
-  const switchMatch = rest.match(/^(?:switch|go|change|move)\s+to\s+(.+)$/);
+  const switchMatch = rest.match(/^(?:switch|which|go|change|move)\s+to\s+(.+)$/);
   if (switchMatch) {
     const target = switchMatch[1].trim();
     if (/^(?:inbox|the\s+inbox|my\s+inbox)$/.test(target)) {
