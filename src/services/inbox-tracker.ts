@@ -52,13 +52,18 @@ export class InboxTracker {
   }
 
   async checkInbox(channels: ChannelInfo[]): Promise<ChannelActivity[]> {
-    const snapshots = this.queueState.getSnapshots();
-    let snapshotsChanged = false;
     const activities: ChannelActivity[] = [];
 
     for (const ch of channels) {
-      const rawBaseline = snapshots[ch.sessionKey] ?? 0;
+      // Re-read the snapshot for each channel inside the loop to avoid
+      // clobbering concurrent markSeen() calls that may run during awaits.
+      const rawBaseline = this.queueState.getSnapshots()[ch.sessionKey] ?? 0;
       const result = await this.gatewaySync.getHistory(ch.sessionKey, 80);
+      // Re-read baseline AFTER the await — markSeen may have advanced it
+      // while we were waiting for the network response.
+      const freshBaseline = this.queueState.getSnapshots()[ch.sessionKey] ?? 0;
+      const effectiveRaw = Math.max(rawBaseline, freshBaseline);
+
       const allMessages = result?.messages ?? [];
       const latestStamp = allMessages.length > 0
         ? this.getMessageStamp(allMessages[allMessages.length - 1], allMessages.length - 1)
@@ -66,12 +71,11 @@ export class InboxTracker {
       // Migration: snapshots that are 0 (never visited) or legacy capped message
       // counts (e.g. 40) aren't real timestamps — reset to the latest so we only
       // track genuinely new messages going forward.
-      const baselineStamp = rawBaseline < 1_000_000_000_000
+      const baselineStamp = effectiveRaw < 1_000_000_000_000
         ? latestStamp
-        : rawBaseline;
-      if (baselineStamp !== rawBaseline) {
-        snapshots[ch.sessionKey] = baselineStamp;
-        snapshotsChanged = true;
+        : effectiveRaw;
+      if (baselineStamp !== effectiveRaw) {
+        this.advanceSnapshot(ch.sessionKey, baselineStamp);
       }
       // Only count messages labeled 'discord-user' as "new".  These represent
       // genuine human activity in Discord text channels.  Everything else is
@@ -87,8 +91,7 @@ export class InboxTracker {
       // Auto-advance baseline past voice-only activity so the snapshot doesn't
       // fall behind and re-scan the same filtered-out messages every poll cycle.
       if (newMessageCount === 0 && latestStamp > baselineStamp) {
-        snapshots[ch.sessionKey] = latestStamp;
-        snapshotsChanged = true;
+        this.advanceSnapshot(ch.sessionKey, latestStamp);
       }
 
       // Get queued ready items for this channel
@@ -120,10 +123,6 @@ export class InboxTracker {
       }
     }
 
-    if (snapshotsChanged) {
-      this.queueState.setSnapshots(snapshots);
-    }
-
     // Sort oldest-first so "next" reads the earliest activity first.
     activities.sort((a, b) => a.earliestTimestamp - b.earliestTimestamp);
 
@@ -131,9 +130,21 @@ export class InboxTracker {
   }
 
   markSeen(sessionKey: string, count: number): void {
+    this.advanceSnapshot(sessionKey, count);
+  }
+
+  /**
+   * Advance a single channel's snapshot forward (never backwards).
+   * Uses read-modify-write on the full snapshots object but only moves
+   * the value forward, so concurrent calls cannot regress each other.
+   */
+  private advanceSnapshot(sessionKey: string, stamp: number): void {
     const snapshots = this.queueState.getSnapshots();
-    snapshots[sessionKey] = count;
-    this.queueState.setSnapshots(snapshots);
+    const current = snapshots[sessionKey] ?? 0;
+    if (stamp > current) {
+      snapshots[sessionKey] = stamp;
+      this.queueState.setSnapshots(snapshots);
+    }
   }
 
   formatForTTS(newMessages: ChatMessage[]): string {

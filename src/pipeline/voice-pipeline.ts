@@ -1103,9 +1103,21 @@ export class VoicePipeline {
 
       // Try to find the channel by fuzzy matching against known channels
       const allChannels = this.router.listChannels();
-      let match = allChannels.find((c) => this.channelNamesMatch(channelName, c.name, c.displayName));
+      const fuzzyMatches = allChannels.filter((c) => this.channelNamesMatch(channelName, c.name, c.displayName));
 
-      // LLM fallback: if string matching failed, ask the utility model (include forum threads)
+      // If multiple fuzzy matches, prefer an exact name match
+      let match: typeof allChannels[number] | undefined;
+      if (fuzzyMatches.length === 1) {
+        match = fuzzyMatches[0];
+      } else if (fuzzyMatches.length > 1) {
+        const inputNorm = channelName.trim().toLowerCase();
+        match = fuzzyMatches.find(
+          (c) => c.name.toLowerCase() === inputNorm || c.displayName.toLowerCase() === inputNorm,
+        );
+        // No exact match among multiple fuzzy hits → fall through to LLM disambiguation
+      }
+
+      // LLM fallback: if string matching failed or was ambiguous, ask the utility model (include forum threads)
       if (!match) {
         const forumThreads = await this.router.getForumThreads();
         const allCandidates = [
@@ -1585,7 +1597,15 @@ Use channel names (the part before the colon). Do not explain.`,
   private resolveDispatchTarget(channelQuery: string): { name: string; displayName: string } | null {
     if (!this.router) return null;
     const all = this.router.listChannels();
-    return all.find((c) => this.channelNamesMatch(channelQuery, c.name, c.displayName)) ?? null;
+    const matches = all.filter((c) => this.channelNamesMatch(channelQuery, c.name, c.displayName));
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      const inputNorm = channelQuery.trim().toLowerCase();
+      return matches.find(
+        (c) => c.name.toLowerCase() === inputNorm || c.displayName.toLowerCase() === inputNorm,
+      ) ?? matches[0]; // For dispatch, prefer exact match but fall back to first if none
+    }
+    return null;
   }
 
   private tokenizeWithPositions(text: string): Array<{ token: string; start: number }> {
