@@ -26,6 +26,9 @@
   "author": "",
   "license": "ISC",
   "description": "OpenClaw Voice — hands-free Discord voice bot for conversational AI",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.74.0",
     "@discordjs/opus": "^0.10.0",
