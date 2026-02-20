@@ -891,7 +891,19 @@ export class VoicePipeline {
     // leading to confusing error + reprompt sequences before the user has a chance to speak.
     const now = Date.now();
     if (now < this.ctx.gateGraceUntil || now < this.ctx.promptGraceUntil) {
-      console.log(`Rejected audio ignored during grace window from ${userId} (${durationMs}ms)`);
+      console.log(`Rejected audio ignored during grace window from ${userId} (${durationMs}ms) [gateGrace=${this.ctx.gateGraceUntil - now}ms promptGrace=${this.ctx.promptGraceUntil - now}ms]`);
+      return;
+    }
+    // Secondary guard: suppress noise that arrives shortly after any playback
+    // finishes. Earcon echo and ambient noise from TTS can trigger false
+    // rejections before the user has had time to speak. The grace window
+    // above handles the normal case, but edge-case timing (noise captured
+    // during TTS when grace was cleared, callback arriving just after grace
+    // is re-set) can slip through. A 2-second post-playback cooldown
+    // catches these stragglers.
+    const POST_PLAYBACK_REJECT_COOLDOWN_MS = 2_000;
+    if (this.ctx.lastPlaybackCompletedAt > 0 && now - this.ctx.lastPlaybackCompletedAt < POST_PLAYBACK_REJECT_COOLDOWN_MS) {
+      console.log(`Rejected audio ignored (post-playback cooldown, ${now - this.ctx.lastPlaybackCompletedAt}ms since playback) from ${userId} (${durationMs}ms)`);
       return;
     }
     if (durationMs > VoicePipeline.MAX_REJECTED_REPROMPT_MS) {
