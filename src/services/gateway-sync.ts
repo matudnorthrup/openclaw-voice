@@ -193,12 +193,15 @@ export class GatewaySync {
       const result = await this.rpc('chat.inject', params);
       return result;
     } catch (err: any) {
-      // If session not found, try to discover the right session key
-      if (err.message?.includes('session not found') && resolvedKey === sessionKey) {
+      // If session not found, invalidate cache and re-discover
+      if (err.message?.includes('session not found')) {
+        // Always clear stale cache entry and re-discover
+        this.sessionKeyCache.delete(sessionKey);
+        this.sessionDiscoveryAttempted.delete(sessionKey);
         const channelId = this.extractChannelId(sessionKey);
         if (channelId) {
           const discovered = await this.discoverSessionForChannel(channelId);
-          if (discovered && discovered !== sessionKey) {
+          if (discovered && discovered !== sessionKey && discovered !== resolvedKey) {
             console.log(`Gateway session fallback: ${sessionKey} → ${discovered}`);
             this.sessionKeyCache.set(sessionKey, discovered);
             // Retry with discovered key
@@ -229,13 +232,18 @@ export class GatewaySync {
       const sessions = await this.listSessions();
       if (!sessions) return null;
 
-      // Look for sessions whose key or channel field contains the channel ID
+      // Collect all sessions that reference this channel ID, prefer shortest key
+      // (prevents progressive nesting like agent:main:openai-user:agent:main:openai-user:...)
+      const candidates: string[] = [];
       for (const session of sessions) {
-        if (session.key.includes(channelId)) return session.key;
-        if (session.channel && session.channel.includes(channelId)) return session.key;
+        if (session.key.includes(channelId)) candidates.push(session.key);
+        else if (session.channel && session.channel.includes(channelId)) candidates.push(session.key);
       }
 
-      return null;
+      if (candidates.length === 0) return null;
+      // Return the shortest key — the most canonical form
+      candidates.sort((a, b) => a.length - b.length);
+      return candidates[0];
     } catch (err: any) {
       console.warn(`GatewaySync discoverSessionForChannel failed: ${err.message}`);
       return null;
@@ -285,12 +293,14 @@ export class GatewaySync {
       const result = await this.rpc('chat.history', params);
       return result;
     } catch (err: any) {
-      // If session not found, try to discover the right session key
-      if (err.message?.includes('session not found') && resolvedKey === sessionKey) {
+      // If session not found, invalidate cache and re-discover
+      if (err.message?.includes('session not found')) {
+        this.sessionKeyCache.delete(sessionKey);
+        this.sessionDiscoveryAttempted.delete(sessionKey);
         const channelId = this.extractChannelId(sessionKey);
         if (channelId) {
           const discovered = await this.discoverSessionForChannel(channelId);
-          if (discovered && discovered !== sessionKey) {
+          if (discovered && discovered !== sessionKey && discovered !== resolvedKey) {
             console.log(`Gateway history fallback: ${sessionKey} → ${discovered}`);
             this.sessionKeyCache.set(sessionKey, discovered);
             try {

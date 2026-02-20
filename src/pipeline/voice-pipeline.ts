@@ -886,6 +886,14 @@ export class VoicePipeline {
       console.log(`Rejected audio ignored during active playback/processing from ${userId} (${durationMs}ms)`);
       return;
     }
+    // Suppress noise-triggered reprompts during the grace window after a ready cue.
+    // The earcon itself can cause echo/noise that gets picked up as a short utterance,
+    // leading to confusing error + reprompt sequences before the user has a chance to speak.
+    const now = Date.now();
+    if (now < this.ctx.gateGraceUntil || now < this.ctx.promptGraceUntil) {
+      console.log(`Rejected audio ignored during grace window from ${userId} (${durationMs}ms)`);
+      return;
+    }
     if (durationMs > VoicePipeline.MAX_REJECTED_REPROMPT_MS) {
       console.log(`Rejected audio ignored (too long for reprompt) from ${userId} (${durationMs}ms)`);
       return;
