@@ -7,7 +7,7 @@ import { getResponse, quickCompletion } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
-import { parseVoiceCommand, matchesWakeWord, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
+import { parseVoiceCommand, matchesWakeWord, extractFromWakeWord, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
 import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from '../services/voice-settings.js';
 import { PipelineStateMachine, type TransitionEffect, type PipelineEvent } from './pipeline-state.js';
 import { checkPipelineInvariants, type InvariantContext } from './pipeline-invariants.js';
@@ -704,6 +704,15 @@ export class VoicePipeline {
           this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         }
         return;
+      }
+
+      // Strip preamble when wake word was found mid-transcript (Whisper artifact)
+      if (hasWakeWord) {
+        const extracted = extractFromWakeWord(transcript, config.botName);
+        if (extracted && extracted.length < transcript.trim().length) {
+          console.log(`Wake word found mid-transcript, stripped preamble: "${extracted.slice(0, 100)}${extracted.length > 100 ? '...' : ''}"`);
+          transcript = extracted;
+        }
       }
 
       const preParsedCommand = parseVoiceCommand(transcript, config.botName);

@@ -32,13 +32,71 @@ export interface ChannelOption {
   displayName: string;
 }
 
+/**
+ * Extracts the portion of a transcript starting from a valid wake word position.
+ * Handles common Whisper STT artifacts:
+ * - Filler words prepended before wake word ("And hello Watson")
+ * - Wake word appearing after sentence boundaries ("Bad luck. Hello Watson, do X")
+ * Returns null if no valid wake word position is found.
+ */
+export function extractFromWakeWord(transcript: string, botName: string): string | null {
+  const trimmed = transcript.trim();
+  if (!trimmed) return null;
+  const escaped = escapeRegex(botName);
+
+  // Core wake pattern: optional "hey/hello" + bot name
+  const wakeCore = `(?:(?:hey|hello),?\\s+)?${escaped}\\b`;
+
+  // 1. Direct match at start (existing behavior)
+  if (new RegExp(`^${wakeCore}`, 'i').test(trimmed)) {
+    return trimmed;
+  }
+
+  // 2. Match at start with filler prefix (common Whisper artifact)
+  const fillerWords = '(?:and|so|okay|oh|um|uh|well|like|but|now)';
+  if (new RegExp(`^${fillerWords}[,.]?\\s+${wakeCore}`, 'i').test(trimmed)) {
+    const wakeMatch = trimmed.match(new RegExp(wakeCore, 'i'));
+    if (wakeMatch?.index !== undefined) {
+      return trimmed.slice(wakeMatch.index);
+    }
+  }
+
+  // 3. Scan sentence boundaries — find first segment starting with wake word
+  const segments = trimmed.split(/(?<=[.!?\n])\s+/);
+  if (segments.length > 1) {
+    for (let i = 0; i < segments.length; i++) {
+      const seg = segments[i].replace(/^[.!?\s]+/, '').trim();
+      if (!seg) continue;
+
+      if (new RegExp(`^${wakeCore}`, 'i').test(seg)) {
+        return segments.slice(i).join(' ').replace(/^[.!?\s]+/, '').trim();
+      }
+
+      // Filler + wake at segment start
+      if (new RegExp(`^${fillerWords}[,.]?\\s+${wakeCore}`, 'i').test(seg)) {
+        const wakeMatch = seg.match(new RegExp(wakeCore, 'i'));
+        if (wakeMatch?.index !== undefined) {
+          const rest = seg.slice(wakeMatch.index);
+          const remaining = segments.slice(i + 1).join(' ');
+          return (rest + (remaining ? ' ' + remaining : '')).trim();
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 export function matchesWakeWord(transcript: string, botName: string): boolean {
-  const pattern = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}\\b`, 'i');
-  return pattern.test(transcript.trim());
+  return extractFromWakeWord(transcript, botName) !== null;
 }
 
 export function parseVoiceCommand(transcript: string, botName: string): VoiceCommand | null {
-  const trimmed = transcript.trim();
+  // Extract the effective transcript starting from the wake word
+  const effective = extractFromWakeWord(transcript, botName);
+  if (!effective) return null;
+
+  const trimmed = effective.trim();
   const trigger = new RegExp(`^(?:(?:hey|hello),?\\s+)?${escapeRegex(botName)}[,.]?\\s*`, 'i');
   const match = trimmed.match(trigger);
   if (!match) return null;

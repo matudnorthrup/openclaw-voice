@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseVoiceCommand, matchesWakeWord, matchQueueChoice, matchSwitchChoice } from '../src/services/voice-commands.js';
+import { parseVoiceCommand, matchesWakeWord, extractFromWakeWord, matchQueueChoice, matchSwitchChoice } from '../src/services/voice-commands.js';
 
 const BOT = 'Watson';
 
@@ -742,6 +742,101 @@ describe('matchesWakeWord', () => {
 
   it('handles leading whitespace', () => {
     expect(matchesWakeWord('  Watson, hello', BOT)).toBe(true);
+  });
+
+  it('matches wake word after filler "And hello Watson"', () => {
+    expect(matchesWakeWord('And hello Watson, voice status', BOT)).toBe(true);
+  });
+
+  it('matches wake word after filler "So hello Watson"', () => {
+    expect(matchesWakeWord('So hello Watson, do something', BOT)).toBe(true);
+  });
+
+  it('matches wake word after sentence boundary', () => {
+    expect(matchesWakeWord("I'm having bad luck. Hello Watson, voice status.", BOT)).toBe(true);
+  });
+
+  it('matches wake word after sentence boundary with filler', () => {
+    expect(matchesWakeWord("Bad luck. And hello Watson, do something.", BOT)).toBe(true);
+  });
+
+  it('does not match Watson mentioned mid-sentence casually', () => {
+    expect(matchesWakeWord('I was talking to Watson about it', BOT)).toBe(false);
+  });
+});
+
+describe('extractFromWakeWord', () => {
+  it('returns full text when wake word is at start', () => {
+    expect(extractFromWakeWord('Watson, voice status', BOT)).toBe('Watson, voice status');
+  });
+
+  it('returns full text for "Hello Watson, inbox"', () => {
+    expect(extractFromWakeWord('Hello Watson, inbox', BOT)).toBe('Hello Watson, inbox');
+  });
+
+  it('strips filler "And" before wake word', () => {
+    expect(extractFromWakeWord('And hello Watson, voice status', BOT)).toBe('hello Watson, voice status');
+  });
+
+  it('strips filler "So" before wake word', () => {
+    expect(extractFromWakeWord('So Watson, do something', BOT)).toBe('Watson, do something');
+  });
+
+  it('strips filler "Oh" before wake word', () => {
+    expect(extractFromWakeWord('Oh hello Watson, help me', BOT)).toBe('hello Watson, help me');
+  });
+
+  it('extracts from sentence boundary', () => {
+    const transcript = "I don't know why. Hello Watson, voice status.";
+    expect(extractFromWakeWord(transcript, BOT)).toBe('Hello Watson, voice status.');
+  });
+
+  it('extracts from sentence boundary with preceding text', () => {
+    const transcript = "I'm having bad luck. Hello Watson. Yes I am doing a demo.";
+    expect(extractFromWakeWord(transcript, BOT)).toBe('Hello Watson. Yes I am doing a demo.');
+  });
+
+  it('extracts from sentence boundary with filler', () => {
+    const transcript = "Not working. And hello Watson, voice status.";
+    expect(extractFromWakeWord(transcript, BOT)).toBe('hello Watson, voice status.');
+  });
+
+  it('returns null for text without wake word', () => {
+    expect(extractFromWakeWord("what's on the agenda today", BOT)).toBeNull();
+  });
+
+  it('returns null for empty string', () => {
+    expect(extractFromWakeWord('', BOT)).toBeNull();
+  });
+
+  it('handles Whisper leading whitespace', () => {
+    expect(extractFromWakeWord(' And hello Watson, voice status.\n', BOT)).toBe('hello Watson, voice status.');
+  });
+
+  it('does not extract Watson mentioned casually mid-sentence', () => {
+    expect(extractFromWakeWord('I was talking to Watson about it', BOT)).toBeNull();
+  });
+});
+
+describe('parseVoiceCommand — mid-transcript wake word', () => {
+  it('parses command after filler: "And hello Watson, voice status"', () => {
+    expect(parseVoiceCommand('And hello Watson, voice status', BOT)).toEqual({ type: 'voice-status' });
+  });
+
+  it('parses command after sentence boundary: "Bad luck. Hello Watson, inbox"', () => {
+    expect(parseVoiceCommand("Bad luck. Hello Watson, inbox", BOT)).toEqual({ type: 'inbox-check' });
+  });
+
+  it('parses command after filler "So Watson, switch to general"', () => {
+    expect(parseVoiceCommand('So Watson, switch to general', BOT)).toEqual({ type: 'switch', channel: 'general' });
+  });
+
+  it('parses wake-check after filler "And hello Watson"', () => {
+    expect(parseVoiceCommand('And hello Watson', BOT)).toEqual({ type: 'wake-check' });
+  });
+
+  it('still returns null for text without wake word', () => {
+    expect(parseVoiceCommand('do something please', BOT)).toBeNull();
   });
 });
 
