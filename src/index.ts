@@ -307,6 +307,9 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     pipeline.setRouter(router);
     if (gatewaySync) {
       pipeline.setGatewaySync(gatewaySync);
+      // Start proactive session key cache refresh (handles OpenClaw session restarts)
+      const channelKeys = router.getAllChannelSessionKeys();
+      gatewaySync.startCacheRefresh(channelKeys);
     }
 
     // Wire queue state + poller

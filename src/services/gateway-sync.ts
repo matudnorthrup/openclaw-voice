@@ -143,6 +143,7 @@ export class GatewaySync {
   destroy(): void {
     this.destroyed = true;
     this.stopPing();
+    this.stopCacheRefresh();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -174,6 +175,9 @@ export class GatewaySync {
   private sessionKeyCache = new Map<string, string>();
   // Track which session keys we've already attempted discovery for (avoid repeating)
   private sessionDiscoveryAttempted = new Set<string>();
+  // Periodic cache refresh interval
+  private cacheRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  private static CACHE_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
   /**
    * Return the resolved session key for a given key (from discovery cache).
@@ -181,6 +185,72 @@ export class GatewaySync {
    */
   getResolvedSessionKey(sessionKey: string): string {
     return this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+  }
+
+  /**
+   * Proactively discover session keys for all known channel IDs.
+   * Call once after connect, then runs periodically to handle session restarts.
+   */
+  async refreshSessionKeyCache(channelSessionKeys: { name: string; sessionKey: string }[]): Promise<void> {
+    try {
+      const sessions = await this.listSessions();
+      if (!sessions || sessions.length === 0) return;
+
+      let updated = 0;
+      for (const { name, sessionKey } of channelSessionKeys) {
+        const channelId = this.extractChannelId(sessionKey);
+        if (!channelId) continue;
+
+        // Find shortest matching session key (most canonical)
+        const candidates: string[] = [];
+        for (const session of sessions) {
+          if (session.key.includes(channelId)) candidates.push(session.key);
+        }
+        if (candidates.length === 0) continue;
+
+        candidates.sort((a, b) => a.length - b.length);
+        const best = candidates[0];
+        const current = this.sessionKeyCache.get(sessionKey);
+
+        if (best !== sessionKey && best !== current) {
+          console.log(`Session cache refresh: ${name} → ${best}`);
+          this.sessionKeyCache.set(sessionKey, best);
+          this.sessionDiscoveryAttempted.add(sessionKey);
+          updated++;
+        } else if (best !== sessionKey && !current) {
+          this.sessionKeyCache.set(sessionKey, best);
+          this.sessionDiscoveryAttempted.add(sessionKey);
+          updated++;
+        }
+      }
+
+      if (updated > 0) {
+        console.log(`Session cache refresh: updated ${updated} key(s)`);
+      }
+    } catch (err: any) {
+      console.warn(`Session cache refresh failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Start periodic cache refresh for known channels.
+   */
+  startCacheRefresh(channelSessionKeys: { name: string; sessionKey: string }[]): void {
+    // Initial warm-up (delayed to allow WS connect)
+    setTimeout(() => this.refreshSessionKeyCache(channelSessionKeys), 5000);
+
+    // Periodic refresh
+    this.cacheRefreshTimer = setInterval(
+      () => this.refreshSessionKeyCache(channelSessionKeys),
+      GatewaySync.CACHE_REFRESH_INTERVAL_MS,
+    );
+  }
+
+  stopCacheRefresh(): void {
+    if (this.cacheRefreshTimer) {
+      clearInterval(this.cacheRefreshTimer);
+      this.cacheRefreshTimer = null;
+    }
   }
 
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
