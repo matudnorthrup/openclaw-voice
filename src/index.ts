@@ -198,11 +198,12 @@ async function syncDiscordMessageToGateway(message: any): Promise<void> {
 
   const sessionKey = GatewaySync.sessionKeyForChannel(message.channelId);
   const label = message.author.bot ? 'discord-assistant' : 'discord-user';
+  const snippet = message.content.trim().slice(0, 80);
   const ok = await gatewaySync.inject(sessionKey, message.content.trim(), label);
   if (!ok) {
-    console.warn(`Gateway text sync failed channel=${message.channelId} label=${label}`);
+    console.warn(`Gateway text sync failed channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id}`);
   } else {
-    console.log(`Gateway text sync ok channel=${message.channelId} label=${label}`);
+    console.log(`Gateway text sync ok channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id} "${snippet}"`);
   }
 }
 
