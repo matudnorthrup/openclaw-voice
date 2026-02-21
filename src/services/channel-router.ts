@@ -508,15 +508,28 @@ export class ChannelRouter {
 
     try {
       const fetched = await textChannel.messages.fetch({ limit: 10 });
+      // Collect consecutive messages from the same author (newest first)
+      // to reassemble responses split across multiple Discord messages.
+      let firstRole: 'user' | 'assistant' | null = null;
+      let firstAuthorId: string | null = null;
+      const parts: string[] = [];
       for (const msg of fetched.values()) {
         const content = this.normalizeDiscordMessageContent(msg.content);
         if (!content.trim()) continue;
-        return {
-          role: msg.author.bot ? 'assistant' : 'user',
-          content,
-        };
+        const role = msg.author.bot ? 'assistant' : 'user';
+        if (firstRole === null) {
+          firstRole = role;
+          firstAuthorId = msg.author.id;
+          parts.push(content);
+        } else if (msg.author.id === firstAuthorId) {
+          // Same author continuation — collect (these are older, so prepend)
+          parts.unshift(content);
+        } else {
+          break;
+        }
       }
-      return null;
+      if (parts.length === 0 || !firstRole) return null;
+      return { role: firstRole, content: parts.join('\n\n') };
     } catch (err: any) {
       console.error(`Failed to fetch last Discord message from #${name}:`, err.message);
       return null;
