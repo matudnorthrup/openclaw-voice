@@ -385,6 +385,11 @@ describe('parseVoiceCommand — hear full message', () => {
     const result = parseVoiceCommand('Watson, full message', BOT);
     expect(result).toEqual({ type: 'hear-full-message' });
   });
+
+  it('parses "Here, full message." with STT comma and period', () => {
+    const result = parseVoiceCommand('Hello Watson, Here, full message.', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
 });
 
 describe('parseVoiceCommand — Hello Watson trigger', () => {

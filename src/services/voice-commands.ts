@@ -121,7 +121,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     .trim()
     .replace(/\s+/g, ' ')
     .toLowerCase()
-    .replace(/[.!?,]+$/, '')
+    .replace(/[.!?,]+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
     .replace(/\bin-?box\b/g, 'inbox')
     .replace(/\bin\s+box\b/g, 'inbox')
     .replace(/\b(?:wheat|weight|wade|weigh)\b/g, 'wait');

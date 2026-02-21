@@ -2833,8 +2833,8 @@ Use channel names (the part before the colon). Do not explain.`,
       return { type: 'read-last-message' };
     }
 
-    // "hear full message", "read full message", "full message"
-    if (/^(?:hear|read|play)\s+(?:the\s+)?full\s+message$|^full\s+message$/.test(normalized)) {
+    // "hear full message", "here full message" (STT homophone), "read full message", "full message"
+    if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full\s+message$|^full\s+message$/.test(normalized)) {
       return { type: 'hear-full-message' };
     }
 
