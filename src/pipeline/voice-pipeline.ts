@@ -2833,7 +2833,8 @@ Use channel names (the part before the colon). Do not explain.`,
     }
 
     // "hear full message", "here full message" (STT homophone), "read full message", "full message"
-    if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full\s+message$|^full\s+message$/.test(normalized)) {
+    // "hear full message", "here full message" (STT homophone), "hear fullness" (STT misheard), "read full message", "full message"
+    if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full(?:ness|\s+message)$|^full\s+message$/.test(normalized)) {
       return { type: 'hear-full-message' };
     }
 
@@ -3201,7 +3202,7 @@ Use channel names (the part before the colon). Do not explain.`,
       },
       hints: [
         '"in box" means "inbox"',
-        '"here full message" means "hear full message"',
+        '"here full message" or "hear fullness" means "hear full message"',
       ],
     });
 

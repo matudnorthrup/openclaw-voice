@@ -390,6 +390,11 @@ describe('parseVoiceCommand — hear full message', () => {
     const result = parseVoiceCommand('Hello Watson, Here, full message.', BOT);
     expect(result).toEqual({ type: 'hear-full-message' });
   });
+
+  it('parses "hear fullness" STT misheard variant', () => {
+    const result = parseVoiceCommand('Watson, hear fullness', BOT);
+    expect(result).toEqual({ type: 'hear-full-message' });
+  });
 });
 
 describe('parseVoiceCommand — Hello Watson trigger', () => {

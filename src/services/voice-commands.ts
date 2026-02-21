@@ -254,8 +254,9 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'read-last-message' };
   }
 
-  // "hear full message", "hear a full message", "here full message" (STT homophone), "read full message", "full message"
-  if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full\s+message$|^full\s+message$/.test(rest)) {
+  // "hear full message", "hear a full message", "here full message" (STT homophone),
+  // "hear fullness" (STT misheard), "read full message", "full message"
+  if (/^(?:hear|here|read|play)\s+(?:(?:the|a|an)\s+)?full(?:ness|\s+message)$|^full\s+message$/.test(rest)) {
     return { type: 'hear-full-message' };
   }
 
