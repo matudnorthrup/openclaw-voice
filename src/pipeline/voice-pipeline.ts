@@ -1523,7 +1523,7 @@ Use channel names (the part before the colon). Do not explain.`,
           ? `The last message is short. ${normalized}`
           : this.toSpokenText(lastMsg.content, 'Message available.')
       );
-    await this.speakResponse(raw, { inbox: true, allowSummary: true });
+    await this.speakResponse(raw, { inbox: true, allowSummary: true, isChannelMessage: true });
     await this.playReadyEarcon();
   }
 
@@ -1722,7 +1722,7 @@ Use channel names (the part before the colon). Do not explain.`,
         this.player.stopPlayback('wait-response-delivery');
         if (!this.isBusy() || this.player.isWaiting()) {
           this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
-          await this.speakResponse(responseText, { allowSummary: true, forceFull: false });
+          await this.speakResponse(responseText, { allowSummary: true, forceFull: false, isChannelMessage: true });
           this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
           await this.playReadyEarcon();
         } else {
@@ -1861,7 +1861,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
     this.stopWaitingLoop();
     this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
-    await this.speakResponse(responseText, { allowSummary: true, forceFull: false });
+    await this.speakResponse(responseText, { allowSummary: true, forceFull: false, isChannelMessage: true });
     this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
     await this.playReadyEarcon();
   }
@@ -2006,7 +2006,7 @@ Use channel names (the part before the colon). Do not explain.`,
           this.responsePoller?.check();
           this.stopWaitingLoop();
           this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
-          await this.speakResponse(readyItem.responseText, { allowSummary: true, forceFull: false });
+          await this.speakResponse(readyItem.responseText, { allowSummary: true, forceFull: false, isChannelMessage: true });
           this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
           await this.playReadyEarcon();
         } else {
@@ -2489,14 +2489,33 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private async handleHearFullMessage(): Promise<void> {
-    const full = this.ctx.lastSpokenFullText || this.ctx.lastSpokenText;
-    if (!full) {
-      await this.speakResponse("I don't have a full message to read yet.");
-      await this.playReadyEarcon();
-      return;
+    // If we have a stored channel message, read its full version
+    if (this.ctx.lastSpokenIsChannelMessage) {
+      const full = this.ctx.lastSpokenFullText || this.ctx.lastSpokenText;
+      if (full) {
+        console.log(`Hear full message (stored): "${full.slice(0, 60)}..."`);
+        await this.speakResponse(full, { isReplay: true, forceFull: true });
+        await this.playReadyEarcon();
+        return;
+      }
     }
-    console.log(`Hear full message: "${full.slice(0, 60)}..."`);
-    await this.speakResponse(full, { isReplay: true, forceFull: true });
+
+    // No channel message stored (e.g. after a channel switch) — fetch the last
+    // message from the active channel and read it in full.
+    if (this.router) {
+      const lastMsg = await this.router.getLastMessageFresh();
+      if (lastMsg) {
+        const content = lastMsg.role === 'user'
+          ? `You last said: ${lastMsg.content}`
+          : this.toSpokenText(lastMsg.content, 'Message available.');
+        console.log(`Hear full message (fetched): "${content.slice(0, 60)}..."`);
+        await this.speakResponse(content, { inbox: true, forceFull: true, isChannelMessage: true });
+        await this.playReadyEarcon();
+        return;
+      }
+    }
+
+    await this.speakResponse("I don't have a full message to read yet.");
     await this.playReadyEarcon();
   }
 
@@ -2642,7 +2661,7 @@ Use channel names (the part before the colon). Do not explain.`,
       }
 
       const fullText = this.toSpokenText(parts.join(' '), 'Nothing new in the inbox.');
-      await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false });
+      await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false, isChannelMessage: true });
       await this.playReadyEarcon();
       return;
     }
@@ -2677,7 +2696,7 @@ Use channel names (the part before the colon). Do not explain.`,
     const suffix = remaining > 0 ? ` ${remaining} more in queue.` : '';
 
     const fullText = this.toSpokenText(prefix + item.responseText + suffix, 'A response is ready.');
-    await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false });
+    await this.speakResponse(fullText, { inbox: true, allowSummary: true, forceFull: false, isChannelMessage: true });
     await this.playReadyEarcon();
   }
 
@@ -2904,7 +2923,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
   private async speakResponse(
     text: string,
-    options?: { inbox?: boolean; isReplay?: boolean; allowSummary?: boolean; forceFull?: boolean },
+    options?: { inbox?: boolean; isReplay?: boolean; allowSummary?: boolean; forceFull?: boolean; isChannelMessage?: boolean },
   ): Promise<void> {
     const fullText = this.toSpokenText(text, '');
     const shouldSummarize = !!options?.allowSummary && !options?.forceFull;
@@ -2922,6 +2941,7 @@ Use channel names (the part before the colon). Do not explain.`,
       this.ctx.lastSpokenText = spokenText;
       this.ctx.lastSpokenFullText = fullText;
       this.ctx.lastSpokenWasSummary = spokenText !== fullText;
+      this.ctx.lastSpokenIsChannelMessage = !!options?.isChannelMessage;
     }
     const ttsStream = await textToSpeechStream(spokenText);
     this.stopWaitingLoop();
@@ -3147,7 +3167,7 @@ Use channel names (the part before the colon). Do not explain.`,
         return;
       }
       this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
-      await this.speakResponse(item.responseText, { allowSummary: true, forceFull: false });
+      await this.speakResponse(item.responseText, { allowSummary: true, forceFull: false, isChannelMessage: true });
       this.transitionAndResetWatchdog({ type: 'SPEAKING_COMPLETE' });
       await this.playReadyEarcon();
     } catch (err: any) {

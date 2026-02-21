@@ -12,6 +12,7 @@ export interface TransientContext {
   lastSpokenText: string;
   lastSpokenFullText: string;
   lastSpokenWasSummary: boolean;
+  lastSpokenIsChannelMessage: boolean;
   lastPlaybackText: string;
   lastPlaybackCompletedAt: number;
 
@@ -43,6 +44,7 @@ export function createTransientContext(): TransientContext {
     lastSpokenText: '',
     lastSpokenFullText: '',
     lastSpokenWasSummary: false,
+    lastSpokenIsChannelMessage: false,
     lastPlaybackText: '',
     lastPlaybackCompletedAt: 0,
     silentWait: false,
@@ -68,6 +70,7 @@ export function resetTransientContext(ctx: TransientContext): void {
   ctx.lastSpokenText = '';
   ctx.lastSpokenFullText = '';
   ctx.lastSpokenWasSummary = false;
+  ctx.lastSpokenIsChannelMessage = false;
   ctx.lastPlaybackText = '';
   ctx.lastPlaybackCompletedAt = 0;
   ctx.silentWait = false;
