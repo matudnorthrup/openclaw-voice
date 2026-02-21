@@ -1523,8 +1523,7 @@ Use channel names (the part before the colon). Do not explain.`,
           ? `The last message is short. ${normalized}`
           : this.toSpokenText(lastMsg.content, 'Message available.')
       );
-    const spoken = raw.length > 900 ? `${raw.slice(0, 900)}...` : raw;
-    await this.speakResponse(spoken, { inbox: true });
+    await this.speakResponse(raw, { inbox: true, allowSummary: true });
     await this.playReadyEarcon();
   }
 
