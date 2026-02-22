@@ -85,7 +85,13 @@ export async function getResponse(
   }
 
   const data = await apiResponse.json() as any;
-  const assistantText = data.choices?.[0]?.message?.content || '';
+  const rawText = data.choices?.[0]?.message?.content || '';
+
+  // Strip phantom user messages that the gateway's prompt formatting can induce.
+  // The gateway wraps the latest user turn with "[Current message - respond to this]"
+  // and Claude sometimes hallucinates a continuation containing a fabricated user
+  // turn after its actual response.  Truncate at the marker boundary.
+  const assistantText = stripPhantomUserTurn(rawText);
 
   history.push({ role: 'assistant', content: assistantText });
 
@@ -140,4 +146,25 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
 export function clearConversation(userId: string): void {
   conversations.delete(userId);
   console.log(`Cleared conversation for ${userId}`);
+}
+
+/**
+ * Strip phantom user turns that appear at the tail of a gateway response.
+ *
+ * The OpenClaw gateway wraps the latest user message with a
+ * "[Current message - respond to this]" marker.  Claude occasionally
+ * hallucinates past its actual answer and generates a fake next user
+ * turn following that marker.  This function truncates the response at
+ * the marker boundary so the fabricated content never reaches TTS,
+ * Discord logging, or conversation history.
+ */
+function stripPhantomUserTurn(text: string): string {
+  // Match the gateway's injected marker (case-insensitive, flexible punctuation)
+  const idx = text.search(/\[Current message[\s\S]{0,30}respond to this\]/i);
+  if (idx > 0) {
+    const cleaned = text.slice(0, idx).trimEnd();
+    console.warn(`Stripped phantom user turn from response (removed ${text.length - cleaned.length} chars)`);
+    return cleaned;
+  }
+  return text;
 }

@@ -483,7 +483,11 @@ export class ChannelRouter {
         if (!content.trim()) continue;
 
         if (msg.author.bot) {
-          messages.push({ role: 'assistant', content });
+          // Bot-posted messages with **You:** prefix are user transcripts
+          // logged by the voice pipeline — attribute them to the user role
+          // so the LLM sees the correct conversation structure.
+          const isUserTranscript = /^\*\*You:\*\*/i.test(msg.content);
+          messages.push({ role: isUserTranscript ? 'user' : 'assistant', content });
         } else {
           messages.push({ role: 'user', content });
         }
@@ -516,7 +520,8 @@ export class ChannelRouter {
       for (const msg of fetched.values()) {
         const content = this.normalizeDiscordMessageContent(msg.content);
         if (!content.trim()) continue;
-        const role = msg.author.bot ? 'assistant' : 'user';
+        const isUserTranscript = msg.author.bot && /^\*\*You:\*\*/i.test(msg.content);
+        const role = (msg.author.bot && !isUserTranscript) ? 'assistant' : 'user';
         if (firstRole === null) {
           firstRole = role;
           firstAuthorId = msg.author.id;
