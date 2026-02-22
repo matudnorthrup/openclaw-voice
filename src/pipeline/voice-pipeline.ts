@@ -370,6 +370,7 @@ export class VoicePipeline {
       queueReady: this.queueState?.getReadyItems().length ?? 0,
       queuePending: this.queueState?.getPendingItems().length ?? 0,
       gatewayConnected: this.gatewaySync?.isConnected() ?? false,
+      gatewayQueueDepth: this.gatewaySync?.getQueueDepth() ?? 0,
       dependencies: { whisper: 'unknown', tts: 'unknown' },
       counters: { ...this.counters },
     };
@@ -2234,7 +2235,7 @@ Use channel names (the part before the colon). Do not explain.`,
           session.appendAssistantMessage(response, channelName);
 
           // Sync to OpenClaw
-          if (gatewaySync?.isConnected()) {
+          if (gatewaySync) {
             try {
               console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
               const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
@@ -2258,7 +2259,7 @@ Use channel names (the part before the colon). Do not explain.`,
               console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
             }
 
-            if (this.inboxTracker?.isActive()) {
+            if (this.inboxTracker?.isActive() && gatewaySync.isConnected()) {
               const count = await this.getCurrentMessageCount(sessionKey);
               this.inboxTracker.markSeen(sessionKey, count);
             }
@@ -2275,7 +2276,7 @@ Use channel names (the part before the colon). Do not explain.`,
         session.appendAssistantMessage(response, channelName);
 
         // Sync to OpenClaw
-        if (gatewaySync?.isConnected()) {
+        if (gatewaySync) {
           try {
             console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
             const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
@@ -2300,7 +2301,7 @@ Use channel names (the part before the colon). Do not explain.`,
           }
 
           // Update inbox snapshot so our own messages don't appear as "new"
-          if (this.inboxTracker?.isActive()) {
+          if (this.inboxTracker?.isActive() && gatewaySync.isConnected()) {
             const count = await this.getCurrentMessageCount(sessionKey);
             this.inboxTracker.markSeen(sessionKey, count);
           }
@@ -2327,7 +2328,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
         // Best-effort: inject the user message into the gateway so the text
         // agent at least sees what was said, even though the LLM call failed.
-        if (gatewaySync?.isConnected()) {
+        if (gatewaySync) {
           try {
             await gatewaySync.inject(sessionKey, transcript, 'voice-user');
             console.log(`Gateway inject (failed dispatch recovery) voice-user ok for ${queueItemId}`);
@@ -3365,7 +3366,7 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {
-    if (!this.gatewaySync?.isConnected() || !this.router) return;
+    if (!this.gatewaySync || !this.router) return;
 
     try {
       const sessionKey = this.router.getActiveSessionKey();
@@ -3373,7 +3374,7 @@ Use channel names (the part before the colon). Do not explain.`,
       await this.gatewaySync.inject(sessionKey, assistantText, 'voice-assistant');
 
       // Update inbox snapshot so our own messages don't appear as "new"
-      if (this.inboxTracker?.isActive()) {
+      if (this.inboxTracker?.isActive() && this.gatewaySync.isConnected()) {
         const count = await this.getCurrentMessageCount(sessionKey);
         this.inboxTracker.markSeen(sessionKey, count);
       }

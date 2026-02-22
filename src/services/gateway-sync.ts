@@ -33,6 +33,13 @@ export interface ChatMessage {
   label?: string;
 }
 
+interface QueuedInject {
+  sessionKey: string;
+  message: string;
+  label?: string;
+  enqueuedAt: number;
+}
+
 interface DeviceIdentity {
   deviceId: string;
   publicKeyPem: string;
@@ -42,7 +49,8 @@ interface DeviceIdentity {
 const RPC_TIMEOUT_MS = 10_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
-const MAX_RECONNECT_ATTEMPTS = 10;
+const INJECT_QUEUE_MAX = 200;
+const INJECT_QUEUE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 const OPENCLAW_STATE_DIR = join(homedir(), '.openclaw');
 const DEVICE_IDENTITY_PATH = join(OPENCLAW_STATE_DIR, 'identity', 'device.json');
@@ -114,6 +122,8 @@ export class GatewaySync {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private wsUrl: string;
   private deviceIdentity: DeviceIdentity | null;
+  private injectQueue: QueuedInject[] = [];
+  private reconnectCallbacks: Array<() => void | Promise<void>> = [];
 
   static get defaultSessionKey(): string {
     return `agent:${config.gatewayAgentId}:main`;
@@ -159,6 +169,8 @@ export class GatewaySync {
       this.ws = null;
     }
     this.connected = false;
+    this.injectQueue = [];
+    this.reconnectCallbacks = [];
   }
 
   isConnected(): boolean {
@@ -253,7 +265,60 @@ export class GatewaySync {
     }
   }
 
+  getQueueDepth(): number {
+    return this.injectQueue.length;
+  }
+
+  onReconnect(cb: () => void | Promise<void>): void {
+    this.reconnectCallbacks.push(cb);
+  }
+
+  clearReconnectCallbacks(): void {
+    this.reconnectCallbacks = [];
+  }
+
+  private enqueueInject(sessionKey: string, message: string, label?: string): void {
+    if (this.injectQueue.length >= INJECT_QUEUE_MAX) {
+      this.injectQueue.shift(); // FIFO evict oldest
+    }
+    this.injectQueue.push({ sessionKey, message, label, enqueuedAt: Date.now() });
+    console.log(`Gateway inject queued (depth=${this.injectQueue.length})`);
+  }
+
+  private async flushInjectQueue(): Promise<void> {
+    const now = Date.now();
+    this.injectQueue = this.injectQueue.filter(item => now - item.enqueuedAt < INJECT_QUEUE_TTL_MS);
+
+    const toFlush = [...this.injectQueue];
+    this.injectQueue = [];
+
+    if (toFlush.length === 0) return;
+    console.log(`Flushing ${toFlush.length} queued inject(s)`);
+
+    for (const item of toFlush) {
+      // inject() will re-queue if connection drops mid-flush
+      await this.inject(item.sessionKey, item.message, item.label);
+    }
+  }
+
+  private async onConnectEstablished(): Promise<void> {
+    for (const cb of this.reconnectCallbacks) {
+      try {
+        await cb();
+      } catch (err: any) {
+        console.warn(`Reconnect callback failed: ${err.message}`);
+      }
+    }
+    await this.flushInjectQueue();
+  }
+
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
+    // If not connected, queue for later delivery
+    if (!this.connected) {
+      this.enqueueInject(sessionKey, message, label);
+      return null;
+    }
+
     // Check if we have a cached alternate session key for this channel
     const resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
 
@@ -441,10 +506,16 @@ export class GatewaySync {
             if (connectId && msg.id === connectId) {
               connectId = null;
               if (msg.ok && msg.payload?.type === 'hello-ok') {
+                const isReconnect = this.reconnectAttempt > 0;
                 this.connected = true;
                 this.reconnectAttempt = 0;
                 this.startPing();
                 console.log('Connected to OpenClaw gateway');
+                if (isReconnect) {
+                  this.onConnectEstablished().catch(err => {
+                    console.warn(`onConnectEstablished failed: ${err.message}`);
+                  });
+                }
                 if (!settled) { settled = true; resolve(); }
               } else {
                 const errMsg = msg.error?.message || 'connect rejected';
@@ -548,13 +619,17 @@ export class GatewaySync {
     if (this.destroyed || this.reconnectTimer) return;
 
     this.reconnectAttempt++;
-    if (this.reconnectAttempt > MAX_RECONNECT_ATTEMPTS) {
-      console.error(`GatewaySync: giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
-      return;
-    }
 
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt - 1), RECONNECT_CAP_MS);
-    console.log(`GatewaySync: reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`);
+    const baseDelay = Math.min(RECONNECT_BASE_MS * Math.pow(2, this.reconnectAttempt - 1), RECONNECT_CAP_MS);
+    // Add jitter: ±25%
+    const jitter = baseDelay * 0.25 * (Math.random() * 2 - 1);
+    const delay = Math.round(baseDelay + jitter);
+
+    if (this.reconnectAttempt <= 10) {
+      console.log(`GatewaySync: reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
+    } else if (this.reconnectAttempt % 10 === 0) {
+      console.log(`GatewaySync: still reconnecting (attempt ${this.reconnectAttempt}, queue=${this.injectQueue.length})`);
+    }
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

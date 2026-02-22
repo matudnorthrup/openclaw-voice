@@ -162,7 +162,9 @@ client.on('messageCreate', async (message) => {
       lines.push(`**Mode:** ${snap.mode === 'queue' ? 'inbox' : snap.mode}`);
       if (snap.activeChannel) lines.push(`**Channel:** ${snap.activeChannel}`);
       lines.push(`**Queue:** ${snap.queueReady} ready, ${snap.queuePending} pending`);
-      lines.push(`**Gateway:** ${snap.gatewayConnected ? 'connected' : 'disconnected'}`);
+      const gwStatus = snap.gatewayConnected ? 'connected' : 'disconnected';
+      const gwQueue = snap.gatewayQueueDepth > 0 ? ` (queue: ${snap.gatewayQueueDepth})` : '';
+      lines.push(`**Gateway:** ${gwStatus}${gwQueue}`);
     }
 
     lines.push(`**STT (Whisper):** ${status.whisperUp ? 'up' : 'down'}`);
@@ -183,7 +185,7 @@ client.on('messageCreate', async (message) => {
 });
 
 async function syncDiscordMessageToGateway(message: any): Promise<void> {
-  if (!gatewaySync || !gatewaySync.isConnected()) return;
+  if (!gatewaySync) return;
   if (!message.guildId) return;
   if (message.content.startsWith('~')) return;
   if (message.content.startsWith('/')) return;
@@ -311,6 +313,8 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       // Start proactive session key cache refresh (handles OpenClaw session restarts)
       const channelKeys = router.getAllChannelSessionKeys();
       gatewaySync.startCacheRefresh(channelKeys);
+      // Refresh session key cache on reconnect so stale keys are updated
+      gatewaySync.onReconnect(() => gatewaySync!.refreshSessionKeyCache(channelKeys));
     }
 
     // Wire queue state + poller

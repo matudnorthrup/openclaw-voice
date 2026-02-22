@@ -18,6 +18,7 @@ export interface HealthSnapshot {
   queueReady: number;
   queuePending: number;
   gatewayConnected: boolean;
+  gatewayQueueDepth: number;
   dependencies: {
     whisper: 'up' | 'down' | 'unknown';
     tts: 'up' | 'down' | 'unknown';
