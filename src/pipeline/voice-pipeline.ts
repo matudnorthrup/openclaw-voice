@@ -1098,7 +1098,6 @@ export class VoicePipeline {
       }
 
       const { forumId, forumName } = flowState;
-      this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
 
       // Use a generic activation body that invites the agent to respond
       // quickly, bootstrapping the gateway session. The natural latency of
@@ -1109,13 +1108,17 @@ export class VoicePipeline {
       if (result.success) {
         await this.onChannelSwitch();
         console.log(`Created forum post "${input}" in ${result.forumName}, switched to thread ${result.threadId}`);
+        // Suppress notifications BEFORE any playback so the activation
+        // body response can't slip through during the TTS await gap.
+        this.setPromptGrace(15_000);
         await this.player.playEarcon('acknowledged');
         await this.speakResponse(`Created ${input} in ${forumName}. Go ahead.`);
-        // Suppress notifications for a generous window so the user can
-        // dictate their first message without being interrupted.
-        this.setPromptGrace(15_000);
+        // Return to IDLE only after all confirmation audio is queued so
+        // deferred notifications can't sneak in during post creation.
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         await this.playReadyEarcon();
       } else {
+        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
         console.warn(`Forum post creation failed: ${result.error}`);
         await this.speakResponse(`Sorry, I couldn't create the post. ${result.error}`);
       }
