@@ -1030,13 +1030,12 @@ export class VoicePipeline {
       return;
     }
 
-    const names = forums.map((f) => f.name).join(', ');
     this.transitionAndResetWatchdog({
       type: 'ENTER_NEW_POST_FLOW',
       step: 'forum',
     });
 
-    await this.speakResponse(`Which forum? Available: ${names}.`);
+    await this.speakResponse('Which forum?');
     await this.playReadyEarcon();
   }
 
@@ -1054,6 +1053,16 @@ export class VoicePipeline {
         const effects = this.transitionAndResetWatchdog({ type: 'CANCEL_FLOW' });
         await this.applyEffects(effects);
         await this.speakResponse('Cancelled.');
+        return;
+      }
+
+      // Check for list channels request
+      if (/\b(?:list|show|what are|which)\b.*\b(?:channel|channels|forum|forums|options)\b/.test(input) || /\b(?:list)\b/.test(input)) {
+        const forums = this.router.listForumChannels();
+        const names = forums.map((f) => f.name).join(', ');
+        await this.repromptAwaiting();
+        await this.speakResponse(`Available forums: ${names}. Which one?`);
+        await this.playReadyEarcon();
         return;
       }
 
@@ -1102,6 +1111,9 @@ export class VoicePipeline {
         console.log(`Created forum post "${input}" in ${result.forumName}, switched to thread ${result.threadId}`);
         await this.player.playEarcon('acknowledged');
         await this.speakResponse(`Created ${input} in ${forumName}. Go ahead.`);
+        // Suppress notifications for a generous window so the user can
+        // dictate their first message without being interrupted.
+        this.setPromptGrace(15_000);
         await this.playReadyEarcon();
       } else {
         console.warn(`Forum post creation failed: ${result.error}`);

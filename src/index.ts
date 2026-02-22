@@ -275,6 +275,14 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
       guild.voiceAdapterCreator,
     );
 
+    // Catch voice connection errors to prevent unhandled 'error' events from crashing the process.
+    // Common cause: transient Discord voice server errors (e.g. 521 from Cloudflare).
+    // After logging, the connection will typically transition to Disconnected status,
+    // which the handler below will pick up for reconnection.
+    connection.on('error', (err: Error) => {
+      console.error(`Voice connection error: ${err.message}`);
+    });
+
     // Set up reconnection handling
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
@@ -285,9 +293,15 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
         ]);
         // Seems to be reconnecting
       } catch {
-        // Disconnected for real
-        console.log('Voice connection lost, cleaning up');
+        // Disconnected for real — attempt auto-rejoin
+        console.log('Voice connection lost, attempting auto-rejoin...');
         handleLeave();
+        try {
+          await handleJoin(guildId);
+          console.log('Auto-rejoin succeeded');
+        } catch (rejoinErr: any) {
+          console.error(`Auto-rejoin failed: ${rejoinErr.message}`);
+        }
       }
     });
 
@@ -718,6 +732,17 @@ function shutdown(): void {
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
+
+// Safety net: log uncaught errors instead of crashing.
+// This prevents transient issues (e.g. Discord WebSocket errors) from killing the process.
+process.on('uncaughtException', (err) => {
+  console.error(`Uncaught exception: ${err.message}`);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection:', reason);
+});
 
 // --- Start ---
 
