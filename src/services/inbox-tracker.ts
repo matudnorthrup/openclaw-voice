@@ -82,10 +82,13 @@ export class InboxTracker {
       // either voice-originated (voice-user, voice-assistant), bot/text-agent
       // responses (discord-assistant, unlabeled gateway chat API messages), or
       // system messages — none of which should trigger inbox notifications.
-      const newMessages = allMessages.filter((m, idx) =>
-        this.getMessageStamp(m, idx) > baselineStamp
-          && this.extractMessageLabel(m) === 'discord-user',
-      );
+      const newMessages = allMessages.filter((m, idx) => {
+        if (this.getMessageStamp(m, idx) <= baselineStamp) return false;
+        if (this.extractMessageLabel(m) !== 'discord-user') return false;
+        // Ignore metadata-only stubs (e.g. "[discord-user]" with no body) that
+        // would otherwise trigger false "new message" notifications.
+        return this.extractSpeechText(m.content).length > 0;
+      });
       const newMessageCount = newMessages.length;
 
       // Auto-advance baseline past voice-only activity so the snapshot doesn't

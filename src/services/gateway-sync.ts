@@ -301,12 +301,14 @@ export class GatewaySync {
     }
   }
 
-  private async onConnectEstablished(): Promise<void> {
-    for (const cb of this.reconnectCallbacks) {
-      try {
-        await cb();
-      } catch (err: any) {
-        console.warn(`Reconnect callback failed: ${err.message}`);
+  private async onConnectEstablished(runReconnectCallbacks: boolean): Promise<void> {
+    if (runReconnectCallbacks) {
+      for (const cb of this.reconnectCallbacks) {
+        try {
+          await cb();
+        } catch (err: any) {
+          console.warn(`Reconnect callback failed: ${err.message}`);
+        }
       }
     }
     await this.flushInjectQueue();
@@ -511,11 +513,9 @@ export class GatewaySync {
                 this.reconnectAttempt = 0;
                 this.startPing();
                 console.log('Connected to OpenClaw gateway');
-                if (isReconnect) {
-                  this.onConnectEstablished().catch(err => {
-                    console.warn(`onConnectEstablished failed: ${err.message}`);
-                  });
-                }
+                this.onConnectEstablished(isReconnect).catch(err => {
+                  console.warn(`onConnectEstablished failed: ${err.message}`);
+                });
                 if (!settled) { settled = true; resolve(); }
               } else {
                 const errMsg = msg.error?.message || 'connect rejected';

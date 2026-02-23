@@ -33,9 +33,13 @@ let responsePoller: ResponsePoller | null = null;
 let dependencyMonitor: DependencyMonitor | null = null;
 let healthMonitor: HealthMonitor | null = null;
 const syncedDiscordMessageIds = new Map<string, number>();
+const nativeGatewayDiscordSessions = new Set<string>();
 
 const SYNCED_MESSAGE_ID_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const SYNC_PREFIX_RE = /^\[(?:discord-user|discord-assistant|voice-user|voice-assistant)\]/i;
+const GATEWAY_TEXT_SYNC_CHECK_DELAY_MS = 1500;
+const GATEWAY_TEXT_SYNC_HISTORY_LIMIT = 25;
+const GATEWAY_TEXT_SYNC_RECENT_WINDOW_MS = 120_000;
 
 // --- Text command handlers ---
 
@@ -160,6 +164,7 @@ client.on('messageCreate', async (message) => {
     // Pipeline snapshot
     if (pipeline) {
       const snap = pipeline.getHealthSnapshot();
+      const notify = pipeline.getIdleNotificationDiagnostics(3);
       const uptimeMin = Math.floor(snap.uptime / 60_000);
       lines.push(`**Pipeline:** ${snap.pipelineState} (${Math.round(snap.pipelineStateAge / 1000)}s)`);
       lines.push(`**Uptime:** ${uptimeMin}m`);
@@ -169,6 +174,19 @@ client.on('messageCreate', async (message) => {
       const gwStatus = snap.gatewayConnected ? 'connected' : 'disconnected';
       const gwQueue = snap.gatewayQueueDepth > 0 ? ` (queue: ${snap.gatewayQueueDepth})` : '';
       lines.push(`**Gateway:** ${gwStatus}${gwQueue}`);
+      lines.push(
+        `**Notifications:** queue=${snap.idleNotificationQueueDepth}, processing=${snap.idleNotificationProcessing ? 'yes' : 'no'}, in-flight=${snap.idleNotificationInFlight ? 'yes' : 'no'}`,
+      );
+      if (notify.recentEvents.length > 0) {
+        const eventSummary = notify.recentEvents
+          .map((event) => {
+            const ageSec = Math.max(0, Math.round((Date.now() - event.at) / 1000));
+            const reason = event.reason ? ` (${event.reason})` : '';
+            return `${event.stage}:${event.kind}${reason} ${ageSec}s ago`;
+          })
+          .join(' | ');
+        lines.push(`**Notification events:** ${eventSummary}`);
+      }
     }
 
     lines.push(`**STT (Whisper):** ${status.whisperUp ? 'up' : 'down'}`);
@@ -182,6 +200,9 @@ client.on('messageCreate', async (message) => {
       lines.push(`  Utterances: ${c.utterancesProcessed} | Commands: ${c.commandsRecognized} | LLM: ${c.llmDispatches}`);
       lines.push(`  Errors: ${c.errors} | STT fail: ${c.sttFailures} | TTS fail: ${c.ttsFailures}`);
       lines.push(`  Invariant violations: ${c.invariantViolations} | Stall watchdog: ${c.stallWatchdogFires}`);
+      lines.push(
+        `  Notify lifecycle: enqueued=${c.idleNotificationsEnqueued} | deduped=${c.idleNotificationsDeduped} | deferred=${c.idleNotificationsDeferred} | dropped=${c.idleNotificationsDropped} | delivered=${c.idleNotificationsDelivered}`,
+      );
     }
 
     await message.reply(lines.join('\n'));
@@ -208,6 +229,11 @@ async function syncDiscordMessageToGateway(message: any): Promise<void> {
 
   const sessionKey = GatewaySync.sessionKeyForChannel(message.channelId);
   const label = 'discord-user';
+  const skipReason = await getGatewayTextSyncSkipReason(sessionKey, content);
+  if (skipReason) {
+    console.log(`Gateway text sync skipped channel=${message.channelId} label=${label} msgId=${message.id} reason=${skipReason}`);
+    return;
+  }
   const snippet = content.slice(0, 80);
   const ok = await gatewaySync.inject(sessionKey, content, label);
   if (!ok) {
@@ -231,6 +257,97 @@ function rememberAndCheckMessageId(messageId: string): boolean {
   }
   syncedDiscordMessageIds.set(messageId, now);
   return true;
+}
+
+async function getGatewayTextSyncSkipReason(sessionKey: string, content: string): Promise<string | null> {
+  if (!gatewaySync?.isConnected()) return null;
+  if (nativeGatewayDiscordSessions.has(sessionKey)) return 'native-session-cache';
+
+  // Give any native Discord→gateway bridge a brief chance to ingest first.
+  await new Promise((resolve) => setTimeout(resolve, GATEWAY_TEXT_SYNC_CHECK_DELAY_MS));
+
+  try {
+    const history = await gatewaySync.getHistory(sessionKey, GATEWAY_TEXT_SYNC_HISTORY_LIMIT);
+    const messages = history?.messages ?? [];
+    if (messages.length === 0) return null;
+
+    const hasNativeDiscordMetadata = messages.some((msg: any) => {
+      const text = extractGatewayMessageText(msg?.content);
+      return isNativeDiscordGatewayMessage(text);
+    });
+    if (hasNativeDiscordMetadata) {
+      nativeGatewayDiscordSessions.add(sessionKey);
+      return 'native-discord-session';
+    }
+
+    if (hasRecentEquivalentGatewayMessage(messages, content)) {
+      return 'recent-duplicate';
+    }
+  } catch (err: any) {
+    console.warn(`Gateway text sync preflight failed session=${sessionKey}: ${err?.message ?? err}`);
+  }
+
+  return null;
+}
+
+function extractGatewayMessageText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((block: any) => {
+        if (typeof block === 'string') return block;
+        if (block && typeof block.text === 'string') return block.text;
+        return '';
+      })
+      .filter((part: string) => part.length > 0)
+      .join('\n');
+  }
+  if (content == null) return '';
+  return String(content);
+}
+
+function normalizeSyncText(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function stripSyncLabelPrefix(text: string): string {
+  return text.replace(/^(?:\[(?:discord-user|discord-assistant|voice-user|voice-assistant)\]\s*)+/i, '').trim();
+}
+
+function isNativeDiscordGatewayMessage(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (!lower) return false;
+  if (lower.includes('conversation info (untrusted metadata):')) return true;
+  if (lower.includes('"conversation_label"') && lower.includes('"group_channel"')) return true;
+  if (lower.includes('[current message - respond to this]')) return true;
+  return false;
+}
+
+function hasRecentEquivalentGatewayMessage(messages: any[], content: string): boolean {
+  const target = normalizeSyncText(content);
+  if (!target) return false;
+  const now = Date.now();
+
+  return messages.some((msg: any) => {
+    const ts = msg?.timestamp;
+    if (typeof ts === 'number' && Number.isFinite(ts) && now - ts > GATEWAY_TEXT_SYNC_RECENT_WINDOW_MS) {
+      return false;
+    }
+
+    const raw = extractGatewayMessageText(msg?.content);
+    if (!raw.trim()) return false;
+
+    const normalizedRaw = normalizeSyncText(stripSyncLabelPrefix(raw));
+    if (normalizedRaw === target) return true;
+
+    // Native session metadata wraps the real user message in a larger payload.
+    // Allow substring matching in that specific case.
+    if (isNativeDiscordGatewayMessage(raw) && normalizeSyncText(raw).includes(target)) {
+      return true;
+    }
+
+    return false;
+  });
 }
 
 // --- Voice state update: auto-join/leave ---
@@ -362,8 +479,11 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     pipeline.setQueueState(queueState);
     if (gatewaySync) {
       responsePoller = new ResponsePoller(queueState, gatewaySync);
-      responsePoller.setOnReady((displayName) => {
-        pipeline?.notifyIfIdle(`Response ready from ${displayName}.`);
+      responsePoller.setOnReady((displayName, sessionKey) => {
+        pipeline?.notifyIfIdle(`Response ready from ${displayName}.`, {
+          kind: 'response-ready',
+          sessionKey,
+        });
       });
       pipeline.setResponsePoller(responsePoller);
       responsePoller.start(); // starts only if pending items exist from previous session
@@ -390,7 +510,14 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
             const snapshots: Record<string, number> = {};
             for (const ch of channels) {
               const result = await gatewaySync.getHistory(ch.sessionKey, 40);
-              snapshots[ch.sessionKey] = result?.messages?.length ?? 0;
+              const messages = result?.messages ?? [];
+              const last = messages[messages.length - 1] as any;
+              const tailStamp = messages.length === 0
+                ? Date.now()
+                : (typeof last?.timestamp === 'number' && Number.isFinite(last.timestamp)
+                    ? last.timestamp
+                    : messages.length);
+              snapshots[ch.sessionKey] = tailStamp;
             }
             queueState.setSnapshots(snapshots);
             console.log(`InboxTracker: startup snapshot — ${Object.entries(snapshots).map(([k, v]) => `${k.split(':').pop()}=${v}`).join(', ')}`);

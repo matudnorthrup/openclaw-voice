@@ -21,6 +21,45 @@ import type { ResponsePoller } from '../services/response-poller.js';
 import type { VoiceMode } from '../services/queue-state.js';
 import type { InboxTracker, ChannelActivity } from '../services/inbox-tracker.js';
 
+type IdleNotificationKind = 'generic' | 'response-ready' | 'text-activity';
+
+interface IdleNotificationOptions {
+  kind?: IdleNotificationKind;
+  sessionKey?: string;
+  stamp?: number;
+  dedupeKey?: string;
+}
+
+interface QueuedIdleNotification {
+  key: string;
+  message: string;
+  kind: IdleNotificationKind;
+  sessionKey: string | null;
+  stamp: number | null;
+  retries: number;
+}
+
+type IdleNotificationStage = 'enqueued' | 'deduped' | 'deferred' | 'dropped' | 'delivered';
+
+export interface IdleNotificationEvent {
+  at: number;
+  stage: IdleNotificationStage;
+  kind: IdleNotificationKind;
+  key: string;
+  sessionKey: string | null;
+  reason: string | null;
+  retries: number;
+  message: string;
+  queueDepth: number;
+}
+
+export interface IdleNotificationDiagnostics {
+  queueDepth: number;
+  processing: boolean;
+  inFlight: boolean;
+  recentEvents: IdleNotificationEvent[];
+}
+
 export class VoicePipeline {
   private static readonly READY_GRACE_MS = 5_000;
   // Absorb Discord/VAD timing jitter at the ready->speak handoff.
@@ -55,8 +94,12 @@ export class VoicePipeline {
   private pendingFastCueResolvers: Array<() => void> = [];
   private graceExpiryTimer: NodeJS.Timeout | null = null;
   private deferredWaitRetryTimer: NodeJS.Timeout | null = null;
-  private deferredIdleNotifyTimers = new Map<string, NodeJS.Timeout>();
-  private idleNotifyRetryCount = new Map<string, number>();
+  private idleNotifyTimer: NodeJS.Timeout | null = null;
+  private idleNotifyQueue: QueuedIdleNotification[] = [];
+  private idleNotifyByKey = new Map<string, QueuedIdleNotification>();
+  private idleNotifyProcessing = false;
+  private idleNotifyEvents: IdleNotificationEvent[] = [];
+  private static readonly IDLE_NOTIFY_EVENT_LIMIT = 80;
 
   // Classifier state
   private lastClassifierTimedOut = false;
@@ -64,6 +107,7 @@ export class VoicePipeline {
   // Inbox background poll — detects text-originated messages in inbox mode
   private inboxPollTimer: NodeJS.Timeout | null = null;
   private static readonly INBOX_POLL_INTERVAL_MS = 20_000;
+  private inboxPollInFlight = false;
   // Track last-notified stamp per channel to avoid repeat notifications
   private inboxPollNotifiedStamps = new Map<string, number>();
   // Tracks channels with recent voice dispatches — suppress inbox "new message"
@@ -257,6 +301,11 @@ export class VoicePipeline {
       if (routerLogChannel) {
         this.logChannel = routerLogChannel;
       }
+      const activeSessionKey = this.router.getActiveSessionKey();
+      this.dropIdleNotifications(
+        (item) => item.kind === 'text-activity' && item.sessionKey === activeSessionKey,
+        'channel-switch',
+      );
     }
   }
 
@@ -287,11 +336,7 @@ export class VoicePipeline {
       clearTimeout(this.stallWatchdogTimer);
       this.stallWatchdogTimer = null;
     }
-    for (const timer of this.deferredIdleNotifyTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.deferredIdleNotifyTimers.clear();
-    this.idleNotifyRetryCount.clear();
+    this.clearIdleNotificationQueue();
     this.stopInboxPoll();
   }
 
@@ -371,6 +416,9 @@ export class VoicePipeline {
       queuePending: this.queueState?.getPendingItems().length ?? 0,
       gatewayConnected: this.gatewaySync?.isConnected() ?? false,
       gatewayQueueDepth: this.gatewaySync?.getQueueDepth() ?? 0,
+      idleNotificationQueueDepth: this.idleNotifyQueue.length,
+      idleNotificationProcessing: this.idleNotifyProcessing,
+      idleNotificationInFlight: this.ctx.idleNotifyInFlight,
       dependencies: { whisper: 'unknown', tts: 'unknown' },
       counters: { ...this.counters },
     };
@@ -378,6 +426,17 @@ export class VoicePipeline {
 
   getCounters(): HealthCounters {
     return this.counters;
+  }
+
+  getIdleNotificationDiagnostics(limit = 8): IdleNotificationDiagnostics {
+    const max = Math.max(1, Math.min(limit, VoicePipeline.IDLE_NOTIFY_EVENT_LIMIT));
+    const recentEvents = this.idleNotifyEvents.slice(-max).map((event) => ({ ...event }));
+    return {
+      queueDepth: this.idleNotifyQueue.length,
+      processing: this.idleNotifyProcessing,
+      inFlight: this.ctx.idleNotifyInFlight,
+      recentEvents,
+    };
   }
 
   interrupt(): void {
@@ -1267,7 +1326,7 @@ export class VoicePipeline {
           const sessionKey = this.router.getActiveSessionKey();
           const currentCount = await this.getCurrentMessageCount(sessionKey);
           console.log(`InboxTracker: markSeen ${target} (${sessionKey}) count=${currentCount}`);
-          this.inboxTracker.markSeen(sessionKey, currentCount);
+          this.markInboxSessionSeen(sessionKey, currentCount);
         }
       } else {
         responseText = `I couldn't find a channel called ${channelName}.`;
@@ -1498,6 +1557,18 @@ Use channel names (the part before the colon). Do not explain.`,
         if (pending > 0) qParts.push(`${pending} processing`);
         parts.push(`Queue: ${qParts.join(', ')}.`);
       }
+    }
+
+    // Notification diagnostics
+    const notifyQueue = this.idleNotifyQueue.length;
+    if (
+      notifyQueue > 0
+      || this.counters.idleNotificationsDelivered > 0
+      || this.counters.idleNotificationsDropped > 0
+    ) {
+      parts.push(
+        `Notifications: ${notifyQueue} queued, ${this.counters.idleNotificationsDelivered} delivered, ${this.counters.idleNotificationsDropped} dropped.`,
+      );
     }
 
     // Voice settings
@@ -2298,7 +2369,10 @@ Use channel names (the part before the colon). Do not explain.`,
           this.notifyIfIdle(response);
         } else {
           // Notify user if idle
-          this.notifyIfIdle(`Response ready from ${displayName}.`);
+          this.notifyIfIdle(`Response ready from ${displayName}.`, {
+            kind: 'response-ready',
+            sessionKey,
+          });
         }
       } catch (err: any) {
         console.error(`Fire-and-forget LLM dispatch failed for ${queueItemId}: ${err.message}`);
@@ -2390,16 +2464,22 @@ Use channel names (the part before the colon). Do not explain.`,
   }
 
   private stopInboxPoll(): void {
+    let stopped = false;
     if (this.inboxPollTimer) {
       clearInterval(this.inboxPollTimer);
       this.inboxPollTimer = null;
-      this.inboxPollNotifiedStamps.clear();
-      console.log('Inbox background poll stopped');
+      stopped = true;
     }
+    this.inboxPollInFlight = false;
+    this.inboxPollNotifiedStamps.clear();
+    this.dropIdleNotifications((item) => item.kind === 'text-activity', 'poll-stop');
+    if (stopped) console.log('Inbox background poll stopped');
   }
 
   private async pollInboxForTextActivity(): Promise<void> {
     if (!this.inboxTracker?.isActive() || !this.router) return;
+    if (this.inboxPollInFlight) return;
+    this.inboxPollInFlight = true;
 
     try {
       const channels = this.router.getAllChannelSessionKeys();
@@ -2423,15 +2503,25 @@ Use channel names (the part before the colon). Do not explain.`,
           const rawStamp = activity.newMessages.length > 0
             ? Math.max(...activity.newMessages.map((m: any) => m.timestamp ?? 0))
             : 0;
-          const effectiveStamp = rawStamp > 0 ? rawStamp : now;
+          const snapshotBaseline = this.queueState?.getSnapshots()[activity.sessionKey] ?? 0;
+          const fallbackStamp = snapshotBaseline > 0
+            ? snapshotBaseline + Math.max(1, activity.newMessageCount)
+            : now;
+          const effectiveStamp = rawStamp > 0 ? rawStamp : fallbackStamp;
           if (effectiveStamp <= lastNotified) continue;
 
           this.inboxPollNotifiedStamps.set(activity.sessionKey, effectiveStamp);
-          this.notifyIfIdle(`New message in ${activity.displayName}.`);
+          this.notifyIfIdle(`New message in ${activity.displayName}.`, {
+            kind: 'text-activity',
+            sessionKey: activity.sessionKey,
+            stamp: effectiveStamp,
+          });
         }
       }
     } catch (err: any) {
       console.warn(`Inbox background poll error: ${err.message}`);
+    } finally {
+      this.inboxPollInFlight = false;
     }
   }
 
@@ -2606,7 +2696,7 @@ Use channel names (the part before the colon). Do not explain.`,
       // Mark current channel as seen BEFORE fresh check so it doesn't re-appear
       const currentSessionKey = this.router.getActiveSessionKey();
       const currentCount = await this.getCurrentMessageCount(currentSessionKey);
-      this.inboxTracker.markSeen(currentSessionKey, currentCount);
+      this.markInboxSessionSeen(currentSessionKey, currentCount);
 
       // Fresh check if flow is exhausted or not started
       const channels = this.router.getAllChannelSessionKeys();
@@ -2709,7 +2799,7 @@ Use channel names (the part before the colon). Do not explain.`,
     if (this.inboxTracker) {
       for (const activity of remaining) {
         const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
-        this.inboxTracker.markSeen(activity.sessionKey, currentCount);
+        this.markInboxSessionSeen(activity.sessionKey, currentCount);
       }
     }
 
@@ -2786,7 +2876,7 @@ Use channel names (the part before the colon). Do not explain.`,
     if (this.inboxTracker) {
       const currentCount = await this.getCurrentMessageCount(activity.sessionKey);
       console.log(`InboxTracker: markSeen ${activity.channelName} (${activity.sessionKey}) count=${currentCount}`);
-      this.inboxTracker.markSeen(activity.sessionKey, currentCount);
+      this.markInboxSessionSeen(activity.sessionKey, currentCount);
     }
 
     return parts;
@@ -2801,6 +2891,19 @@ Use channel names (the part before the colon). Do not explain.`,
     return typeof last?.timestamp === 'number' && Number.isFinite(last.timestamp)
       ? last.timestamp
       : messages.length;
+  }
+
+  private markInboxSessionSeen(sessionKey: string, stamp: number): void {
+    if (!this.inboxTracker) return;
+    this.inboxTracker.markSeen(sessionKey, stamp);
+    this.dropIdleNotifications(
+      (item) => item.kind === 'text-activity' && item.sessionKey === sessionKey,
+      'mark-seen',
+    );
+    const lastNotified = this.inboxPollNotifiedStamps.get(sessionKey) ?? 0;
+    if (stamp > lastNotified) {
+      this.inboxPollNotifiedStamps.set(sessionKey, stamp);
+    }
   }
 
   private matchBareQueueCommand(transcript: string): VoiceCommand | null {
@@ -2991,120 +3094,337 @@ Use channel names (the part before the colon). Do not explain.`,
     });
   }
 
-  notifyIfIdle(message: string): void {
-    if (this.ctx.silentWait) {
-      console.log(`Idle notify skipped (silent wait): "${message.slice(0, 60)}..."`);
-      return;
+  private trackIdleNotificationEvent(
+    stage: IdleNotificationStage,
+    item: Pick<QueuedIdleNotification, 'key' | 'kind' | 'sessionKey' | 'retries' | 'message'>,
+    reason?: string,
+  ): void {
+    switch (stage) {
+      case 'enqueued':
+        this.counters.idleNotificationsEnqueued += 1;
+        break;
+      case 'deduped':
+        this.counters.idleNotificationsDeduped += 1;
+        break;
+      case 'deferred':
+        this.counters.idleNotificationsDeferred += 1;
+        break;
+      case 'dropped':
+        this.counters.idleNotificationsDropped += 1;
+        break;
+      case 'delivered':
+        this.counters.idleNotificationsDelivered += 1;
+        break;
+      default:
+        break;
     }
-    if (Date.now() < this.ctx.promptGraceUntil || Date.now() < this.ctx.gateGraceUntil) {
-      console.log(`Idle notify skipped (grace window): "${message}"`);
-      const until = Math.max(this.ctx.promptGraceUntil, this.ctx.gateGraceUntil);
-      const delayMs = Math.max(120, until - Date.now() + 120);
-      this.scheduleDeferredIdleNotify(message, delayMs);
-      return;
+
+    const preview = item.message.replace(/\s+/g, ' ').trim().slice(0, 160);
+    this.idleNotifyEvents.push({
+      at: Date.now(),
+      stage,
+      kind: item.kind,
+      key: item.key,
+      sessionKey: item.sessionKey,
+      reason: reason ?? null,
+      retries: item.retries,
+      message: preview,
+      queueDepth: this.idleNotifyQueue.length,
+    });
+
+    if (this.idleNotifyEvents.length > VoicePipeline.IDLE_NOTIFY_EVENT_LIMIT) {
+      this.idleNotifyEvents.splice(0, this.idleNotifyEvents.length - VoicePipeline.IDLE_NOTIFY_EVENT_LIMIT);
     }
-    // Wait-mode dispatches are fire-and-forget — the state machine goes back
-    // to IDLE while the LLM is still processing.  Treat this as busy so that
-    // notifications don't play on top of the pending response delivery.
-    if (this.ctx.pendingWaitCallback) {
-      const retryNum = (this.idleNotifyRetryCount.get(message) ?? 0) + 1;
-      this.idleNotifyRetryCount.set(message, retryNum);
-      if (retryNum <= 1 || retryNum % 10 === 0) {
-        console.log(`Idle notify skipped (pending wait, attempt ${retryNum}): "${message}"`);
+  }
+
+  notifyIfIdle(message: string, options: IdleNotificationOptions = {}): void {
+    const kind = options.kind ?? 'generic';
+    const key = this.buildIdleNotificationKey(message, kind, options);
+    const existing = this.idleNotifyByKey.get(key);
+
+    if (existing) {
+      existing.message = message;
+      existing.kind = kind;
+      if (options.sessionKey) existing.sessionKey = options.sessionKey;
+      if (typeof options.stamp === 'number' && Number.isFinite(options.stamp)) {
+        existing.stamp = existing.stamp == null ? options.stamp : Math.max(existing.stamp, options.stamp);
       }
-      this.scheduleDeferredIdleNotify(message, 2000);
-      return;
+      this.trackIdleNotificationEvent('deduped', existing, 'merged-with-existing-key');
+    } else {
+      const item: QueuedIdleNotification = {
+        key,
+        message,
+        kind,
+        sessionKey: options.sessionKey ?? null,
+        stamp: typeof options.stamp === 'number' && Number.isFinite(options.stamp) ? options.stamp : null,
+        retries: 0,
+      };
+      this.idleNotifyQueue.push(item);
+      this.idleNotifyByKey.set(key, item);
+      this.trackIdleNotificationEvent('enqueued', item);
     }
-    // INBOX_FLOW is an "awaiting user" context; treat it as idle enough for
-    // queue-ready notifications so responses don't get silently suppressed.
-    const stateType = this.stateMachine.getStateType();
-    const blockOnBusy = stateType !== 'IDLE' && stateType !== 'INBOX_FLOW';
-    if (blockOnBusy || this.player.isPlaying()) {
-      // Use a longer retry when actively playing to avoid log spam during long TTS
-      const retryMs = this.player.isPlaying() ? 5000 : 900;
-      const retryNum = (this.idleNotifyRetryCount.get(message) ?? 0) + 1;
-      this.idleNotifyRetryCount.set(message, retryNum);
-      if (retryNum <= 1 || retryNum % 10 === 0) {
-        console.log(`Idle notify skipped (busy, attempt ${retryNum}): "${message}"`);
+
+    this.scheduleIdleNotificationProcessing(0);
+  }
+
+  private buildIdleNotificationKey(message: string, kind: IdleNotificationKind, options: IdleNotificationOptions): string {
+    if (options.dedupeKey) return options.dedupeKey;
+    if ((kind === 'response-ready' || kind === 'text-activity') && options.sessionKey) {
+      return `${kind}:${options.sessionKey}`;
+    }
+    return `${kind}:${message}`;
+  }
+
+  private clearIdleNotificationQueue(): void {
+    if (this.idleNotifyTimer) {
+      clearTimeout(this.idleNotifyTimer);
+      this.idleNotifyTimer = null;
+    }
+    this.idleNotifyQueue = [];
+    this.idleNotifyByKey.clear();
+  }
+
+  private dropIdleNotifications(predicate: (item: QueuedIdleNotification) => boolean, reason = 'filtered'): void {
+    const headBefore = this.idleNotifyQueue[0]?.key ?? null;
+    const droppedItems: QueuedIdleNotification[] = [];
+    this.idleNotifyQueue = this.idleNotifyQueue.filter((item) => {
+      if (predicate(item)) {
+        droppedItems.push(item);
+        return false;
       }
-      this.scheduleDeferredIdleNotify(message, retryMs);
-      return;
+      return true;
+    });
+    for (const item of droppedItems) {
+      this.idleNotifyByKey.delete(item.key);
+      this.trackIdleNotificationEvent('dropped', item, reason);
     }
-    if (this.ctx.idleNotifyInFlight) {
-      console.log(`Idle notify deferred (in-flight): "${message}"`);
-      this.scheduleDeferredIdleNotify(message, 900);
-      return;
-    }
-    if (this.receiver.hasActiveSpeech()) {
-      console.log(`Idle notify deferred (active speech): "${message}"`);
-      this.scheduleDeferredIdleNotify(message, 1500);
+    if (droppedItems.length === 0) return;
+
+    if (this.idleNotifyQueue.length === 0) {
+      if (this.idleNotifyTimer) {
+        clearTimeout(this.idleNotifyTimer);
+        this.idleNotifyTimer = null;
+      }
       return;
     }
 
-    const existing = this.deferredIdleNotifyTimers.get(message);
-    if (existing) {
-      clearTimeout(existing);
-      this.deferredIdleNotifyTimers.delete(message);
+    // If the queue head changed while a deferred timer was pending, reschedule
+    // immediately so the next item isn't blocked by the old head's backoff.
+    const headAfter = this.idleNotifyQueue[0]?.key ?? null;
+    if (this.idleNotifyTimer && headBefore !== headAfter) {
+      clearTimeout(this.idleNotifyTimer);
+      this.idleNotifyTimer = null;
+      this.scheduleIdleNotificationProcessing(0);
+    }
+  }
+
+  private scheduleIdleNotificationProcessing(delayMs: number): void {
+    if (this.idleNotifyTimer) clearTimeout(this.idleNotifyTimer);
+    this.idleNotifyTimer = setTimeout(() => {
+      this.idleNotifyTimer = null;
+      void this.processIdleNotificationQueue();
+    }, Math.max(120, delayMs));
+  }
+
+  private dequeueIdleNotification(key: string): void {
+    this.idleNotifyByKey.delete(key);
+    this.idleNotifyQueue = this.idleNotifyQueue.filter((item) => item.key !== key);
+  }
+
+  private recordIdleNotificationDeferral(item: QueuedIdleNotification, reason: string): void {
+    this.trackIdleNotificationEvent('deferred', item, reason);
+    if (item.retries <= 1 || item.retries % 10 === 0) {
+      console.log(`Idle notify deferred (${reason}, attempt ${item.retries}): "${item.message}"`);
+    }
+  }
+
+  private async processIdleNotificationQueue(): Promise<void> {
+    if (this.idleNotifyProcessing) return;
+    this.idleNotifyProcessing = true;
+
+    try {
+      while (true) {
+        while (this.idleNotifyQueue.length > 0 && !this.idleNotifyByKey.has(this.idleNotifyQueue[0]!.key)) {
+          this.idleNotifyQueue.shift();
+        }
+        const next = this.idleNotifyQueue[0];
+        if (!next) return;
+
+        if (this.isIdleNotificationStale(next)) {
+          console.log(`Idle notify dropped (stale): "${next.message}"`);
+          this.trackIdleNotificationEvent('dropped', next, 'stale-before-delivery');
+          this.dequeueIdleNotification(next.key);
+          continue;
+        }
+
+        const deferral = this.idleNotificationDeferral();
+        if (deferral) {
+          if ('drop' in deferral) {
+            console.log(`Idle notify skipped (${deferral.reason}): "${next.message.slice(0, 60)}..."`);
+            this.trackIdleNotificationEvent('dropped', next, deferral.reason);
+            this.dequeueIdleNotification(next.key);
+            continue;
+          }
+          next.retries += 1;
+          this.recordIdleNotificationDeferral(next, deferral.reason);
+          this.scheduleIdleNotificationProcessing(deferral.delayMs);
+          return;
+        }
+
+        const result = await this.deliverIdleNotification(next);
+        if (result.status === 'delivered') {
+          this.trackIdleNotificationEvent('delivered', next, result.reason);
+          this.dequeueIdleNotification(next.key);
+          continue;
+        }
+        if (result.status === 'dropped') {
+          this.trackIdleNotificationEvent('dropped', next, result.reason);
+          this.dequeueIdleNotification(next.key);
+          continue;
+        }
+
+        next.retries += 1;
+        this.recordIdleNotificationDeferral(next, result.reason);
+        this.scheduleIdleNotificationProcessing(result.delayMs);
+        return;
+      }
+    } finally {
+      this.idleNotifyProcessing = false;
+    }
+  }
+
+  private idleNotificationDeferral():
+    { delayMs: number; reason: string } | { drop: true; reason: string } | null {
+    if (this.ctx.silentWait) {
+      return { drop: true, reason: 'silent wait' };
+    }
+
+    if (Date.now() < this.ctx.promptGraceUntil || Date.now() < this.ctx.gateGraceUntil) {
+      const until = Math.max(this.ctx.promptGraceUntil, this.ctx.gateGraceUntil);
+      return {
+        delayMs: Math.max(120, until - Date.now() + 120),
+        reason: 'grace window',
+      };
+    }
+
+    // Wait-mode dispatches are fire-and-forget — the state machine goes back
+    // to IDLE while the LLM is still processing. Treat this as busy so
+    // notifications don't play on top of pending response delivery.
+    if (this.ctx.pendingWaitCallback) {
+      return { delayMs: 2000, reason: 'pending wait' };
+    }
+
+    // INBOX_FLOW is user-interactive and should not be interrupted by background notifications.
+    const stateType = this.stateMachine.getStateType();
+    const blockOnBusy = stateType !== 'IDLE';
+    if (blockOnBusy || this.player.isPlaying()) {
+      return {
+        delayMs: this.player.isPlaying() ? 5000 : 900,
+        reason: this.player.isPlaying() ? 'active playback' : `busy state ${stateType}`,
+      };
+    }
+    if (this.ctx.idleNotifyInFlight) {
+      return { delayMs: 900, reason: 'in-flight' };
+    }
+    if (this.receiver.hasActiveSpeech()) {
+      return { delayMs: 1500, reason: 'active speech' };
+    }
+    return null;
+  }
+
+  private isIdleNotificationStale(item: QueuedIdleNotification): boolean {
+    if (item.kind === 'text-activity') {
+      if (!item.sessionKey || item.stamp == null || !this.queueState) return false;
+      const snapshots = this.queueState.getSnapshots();
+      const baseline = snapshots[item.sessionKey] ?? 0;
+      return baseline >= item.stamp;
+    }
+
+    if (item.kind === 'response-ready' && this.queueState) {
+      const ready = this.queueState.getReadyItems();
+      if (item.sessionKey) {
+        return !ready.some((r) => r.sessionKey === item.sessionKey);
+      }
+      const match = item.message.match(/^Response ready from (.+)\.$/i);
+      if (!match) return false;
+      const announced = this.normalizeChannelLabel(match[1] || '');
+      return !ready.some((r) => this.normalizeChannelLabel(r.displayName) === announced);
+    }
+
+    return false;
+  }
+
+  private typeSafeIdleDeliveryResult(
+    status: 'delivered' | 'dropped' | 'deferred',
+    reason: string,
+    delayMs?: number,
+  ): { status: 'delivered'; reason: string } | { status: 'dropped'; reason: string } | { status: 'deferred'; reason: string; delayMs: number } {
+    if (status === 'deferred') {
+      return { status, reason, delayMs: Math.max(120, delayMs ?? 900) };
+    }
+    return { status, reason };
+  }
+
+  private async deliverIdleNotification(item: QueuedIdleNotification):
+    Promise<{ status: 'delivered'; reason: string } | { status: 'dropped'; reason: string } | { status: 'deferred'; reason: string; delayMs: number }> {
+    const message = item.message;
+
+    if (this.isIdleNotificationStale(item)) {
+      return this.typeSafeIdleDeliveryResult('dropped', 'stale-before-delivery');
     }
 
     // If a ready item belongs to the currently active channel and we're idle,
     // read it directly instead of announcing "Response ready from <same channel>".
     if (this.shouldAutoReadReadyForActiveChannel(message)) {
-      void this.readReadyForActiveChannel();
-      return;
+      await this.readReadyForActiveChannel();
+      return this.typeSafeIdleDeliveryResult('delivered', 'auto-read-active-channel');
     }
 
-    const retries = this.idleNotifyRetryCount.get(message) ?? 0;
-    if (retries > 0) {
-      console.log(`Idle notify: "${message}" (after ${retries} retries)`);
+    if (item.retries > 0) {
+      console.log(`Idle notify: "${message}" (after ${item.retries} retries)`);
     } else {
       console.log(`Idle notify: "${message}"`);
     }
-    this.idleNotifyRetryCount.delete(message);
     this.logToInbox(`**${config.botName}:** ${message}`);
     this.ctx.idleNotifyInFlight = true;
 
-    textToSpeechStream(message)
-      .then((stream) => {
-        // Re-check idle — user may have started speaking while TTS was generating
-        if (!this.isBusy() && !this.player.isPlaying() && !this.receiver.hasActiveSpeech()) {
-          // Any fresh playback closes old grace windows. This prevents stale
-          // ready-grace from allowing no-wake interruptions mid-notification.
-          this.ctx.gateGraceUntil = 0;
-          this.ctx.promptGraceUntil = 0;
-          this.clearGraceTimer();
-          this.player.playStream(stream)
-            .then(async () => {
-              this.ctx.lastPlaybackText = message;
-              this.ctx.lastPlaybackCompletedAt = Date.now();
-              // Make post-notification handoff explicit so "next" feels expected.
-              await this.playReadyEarcon();
-              this.ctx.idleNotifyInFlight = false;
-            })
-            .catch((err: any) => {
-              console.warn(`Idle notify playback failed: ${err?.message ?? err}`);
-              this.ctx.idleNotifyInFlight = false;
-            });
-        } else {
-          this.ctx.idleNotifyInFlight = false;
-          this.scheduleDeferredIdleNotify(message, 900);
-        }
-      })
-      .catch((err) => {
+    try {
+      let stream: any;
+      try {
+        stream = await textToSpeechStream(message);
+      } catch (err: any) {
         console.warn(`Idle notify TTS failed: ${err.message}`);
-        this.ctx.idleNotifyInFlight = false;
-        this.scheduleDeferredIdleNotify(message, 1200);
-      });
-  }
+        return this.typeSafeIdleDeliveryResult('deferred', 'tts failure', 1200);
+      }
 
-  private scheduleDeferredIdleNotify(message: string, delayMs: number): void {
-    const existing = this.deferredIdleNotifyTimers.get(message);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      this.deferredIdleNotifyTimers.delete(message);
-      this.notifyIfIdle(message);
-    }, Math.max(120, delayMs));
-    this.deferredIdleNotifyTimers.set(message, timer);
+      // Re-check idle — user may have started speaking while TTS was generating.
+      if (this.isIdleNotificationStale(item)) {
+        return this.typeSafeIdleDeliveryResult('dropped', 'stale-before-playback');
+      }
+      if (this.isBusy() || this.player.isPlaying() || this.receiver.hasActiveSpeech()) {
+        return this.typeSafeIdleDeliveryResult('deferred', 'became busy before playback', 900);
+      }
+
+      // Any fresh playback closes old grace windows. This prevents stale
+      // ready-grace from allowing no-wake interruptions mid-notification.
+      this.ctx.gateGraceUntil = 0;
+      this.ctx.promptGraceUntil = 0;
+      this.clearGraceTimer();
+
+      try {
+        await this.player.playStream(stream);
+      } catch (err: any) {
+        console.warn(`Idle notify playback failed: ${err?.message ?? err}`);
+        return this.typeSafeIdleDeliveryResult('deferred', 'playback failure', 900);
+      }
+
+      this.ctx.lastPlaybackText = message;
+      this.ctx.lastPlaybackCompletedAt = Date.now();
+      await this.playReadyEarcon();
+      return this.typeSafeIdleDeliveryResult('delivered', 'spoken');
+    } finally {
+      this.ctx.idleNotifyInFlight = false;
+    }
   }
 
   notifyDependencyIssue(type: 'stt' | 'tts', message: string): void {
@@ -3386,11 +3706,6 @@ Use channel names (the part before the colon). Do not explain.`,
       console.warn(`Gateway inject failed ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey} error=${err.message}`);
     }
 
-    // Update inbox snapshot so our own messages don't appear as "new"
-    if (this.inboxTracker?.isActive() && gatewaySync.isConnected()) {
-      const count = await this.getCurrentMessageCount(params.sessionKey);
-      this.inboxTracker.markSeen(params.sessionKey, count);
-    }
     // Refresh cool-down so it covers text-agent echo responses.
     this.recentVoiceDispatchChannels.set(params.sessionKey, Date.now());
   }

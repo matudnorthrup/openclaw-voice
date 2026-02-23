@@ -70,6 +70,16 @@ export class HealthMonitor {
         alerts.push(`Error spike: **${newErrors}** errors in last check period`);
       }
 
+      // Idle notification queueing diagnostics
+      const newNotifyDrops = current.counters.idleNotificationsDropped - prev.counters.idleNotificationsDropped;
+      if (newNotifyDrops >= 3) {
+        alerts.push(`Idle notifications dropped **${newNotifyDrops}** time(s)`);
+      }
+
+      if (current.idleNotificationQueueDepth >= 5 && current.idleNotificationQueueDepth >= prev.idleNotificationQueueDepth) {
+        alerts.push(`Idle notification backlog: queue depth **${current.idleNotificationQueueDepth}**`);
+      }
+
       // Pipeline stuck in non-IDLE for >2 minutes
       if (current.pipelineState !== 'IDLE' && current.pipelineStateAge > 120_000) {
         alerts.push(`Pipeline stuck in **${current.pipelineState}** for ${Math.round(current.pipelineStateAge / 1000)}s`);

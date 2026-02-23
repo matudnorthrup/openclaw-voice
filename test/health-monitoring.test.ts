@@ -165,6 +165,10 @@ function makeBaseSnapshot(overrides: Partial<HealthSnapshot> = {}): HealthSnapsh
     queueReady: 0,
     queuePending: 0,
     gatewayConnected: true,
+    gatewayQueueDepth: 0,
+    idleNotificationQueueDepth: 0,
+    idleNotificationProcessing: false,
+    idleNotificationInFlight: false,
     dependencies: { whisper: 'up', tts: 'up' },
     counters: createHealthCounters(),
     ...overrides,
@@ -337,5 +341,68 @@ describe('Layer 10: Health & Monitoring', () => {
     const sentMessage = logChannel.send.mock.calls[0][0];
     expect(sentMessage).toContain('Health Alert');
     expect(sentMessage).toContain('Error spike');
+  });
+
+  // ── 10.6: Idle notification diagnostics alert ───────────────────────
+
+  it('10.6 — health monitor posts alert on idle notification drop spike', async () => {
+    let callCount = 0;
+    const getSnapshot = vi.fn(() => {
+      callCount++;
+      if (callCount <= 1) {
+        return makeBaseSnapshot();
+      }
+      const counters = createHealthCounters();
+      counters.idleNotificationsDropped = 4;
+      return makeBaseSnapshot({ counters });
+    });
+
+    const logChannel = {
+      send: vi.fn(async () => ({})),
+    };
+
+    const monitor = new HealthMonitor({
+      getSnapshot,
+      logChannel: logChannel as any,
+      intervalMs: 50,
+    });
+
+    monitor.start();
+    await new Promise((r) => setTimeout(r, 120));
+    monitor.stop();
+
+    expect(logChannel.send).toHaveBeenCalled();
+    const sentMessage = logChannel.send.mock.calls[0][0];
+    expect(sentMessage).toContain('Health Alert');
+    expect(sentMessage).toContain('Idle notifications dropped');
+  });
+
+  it('10.7 — health monitor does not alert on deferral-only growth', async () => {
+    let callCount = 0;
+    const getSnapshot = vi.fn(() => {
+      callCount++;
+      if (callCount <= 1) {
+        return makeBaseSnapshot();
+      }
+      const counters = createHealthCounters();
+      counters.idleNotificationsDeferred = 40;
+      return makeBaseSnapshot({ counters });
+    });
+
+    const logChannel = {
+      send: vi.fn(async () => ({})),
+    };
+
+    const monitor = new HealthMonitor({
+      getSnapshot,
+      logChannel: logChannel as any,
+      intervalMs: 50,
+    });
+
+    monitor.start();
+    await new Promise((r) => setTimeout(r, 120));
+    monitor.stop();
+
+    expect(logChannel.send).not.toHaveBeenCalled();
   });
 });

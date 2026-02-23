@@ -7,6 +7,11 @@ export interface HealthCounters {
   ttsFailures: number;
   invariantViolations: number;
   stallWatchdogFires: number;
+  idleNotificationsEnqueued: number;
+  idleNotificationsDeduped: number;
+  idleNotificationsDeferred: number;
+  idleNotificationsDropped: number;
+  idleNotificationsDelivered: number;
 }
 
 export interface HealthSnapshot {
@@ -19,6 +24,9 @@ export interface HealthSnapshot {
   queuePending: number;
   gatewayConnected: boolean;
   gatewayQueueDepth: number;
+  idleNotificationQueueDepth: number;
+  idleNotificationProcessing: boolean;
+  idleNotificationInFlight: boolean;
   dependencies: {
     whisper: 'up' | 'down' | 'unknown';
     tts: 'up' | 'down' | 'unknown';
@@ -36,5 +44,10 @@ export function createHealthCounters(): HealthCounters {
     ttsFailures: 0,
     invariantViolations: 0,
     stallWatchdogFires: 0,
+    idleNotificationsEnqueued: 0,
+    idleNotificationsDeduped: 0,
+    idleNotificationsDeferred: 0,
+    idleNotificationsDropped: 0,
+    idleNotificationsDelivered: 0,
   };
 }

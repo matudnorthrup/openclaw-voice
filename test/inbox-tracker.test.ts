@@ -223,6 +223,30 @@ describe('InboxTracker', () => {
       expect(activities[0].channelName).toBe('health');
       expect(activities[0].newMessageCount).toBe(1);
     });
+
+    it('ignores empty discord-user stubs that have no readable content', async () => {
+      const qs = createMockQueueState();
+      const T = 1_700_000_000_000;
+      qs.setSnapshots({
+        'session:health': T + 1000,
+        'session:finance': T + 1000,
+        'session:planning': T + 1000,
+      });
+
+      const historyMap: Record<string, ChatMessage[]> = {
+        'session:health': [
+          { role: 'assistant', content: '[discord-user]\n\n', timestamp: T + 2000 } as any,
+        ],
+        'session:finance': [],
+        'session:planning': [],
+      };
+
+      const gs = createMockGatewaySync(historyMap);
+      const tracker = new InboxTracker(qs as any, gs as any);
+
+      const activities = await tracker.checkInbox(testChannels);
+      expect(activities).toHaveLength(0);
+    });
   });
 
   describe('markSeen', () => {

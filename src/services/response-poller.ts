@@ -14,7 +14,7 @@ export class ResponsePoller {
   private gatewaySync: GatewaySync;
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
-  private onReady: ((displayName: string) => void) | null = null;
+  private onReady: ((displayName: string, sessionKey: string) => void) | null = null;
   private pendingObservations = new Map<string, PendingObservation>();
 
   constructor(queueState: QueueState, gatewaySync: GatewaySync) {
@@ -22,7 +22,7 @@ export class ResponsePoller {
     this.gatewaySync = gatewaySync;
   }
 
-  setOnReady(callback: (displayName: string) => void): void {
+  setOnReady(callback: (displayName: string, sessionKey: string) => void): void {
     this.onReady = callback;
   }
 
@@ -134,7 +134,7 @@ export class ResponsePoller {
         this.queueState.markReady(item.id, summary, content);
         this.pendingObservations.delete(item.id);
         console.log(`ResponsePoller: marked ${item.id} as ready (channel: ${item.displayName})`);
-        this.onReady?.(item.displayName);
+        this.onReady?.(item.displayName, item.sessionKey);
       }
     } catch (err: any) {
       console.warn(`ResponsePoller poll error: ${err.message}`);
