@@ -781,6 +781,15 @@ export class VoicePipeline {
         }
       }
 
+      // In queue/ask mode during grace, only commands (wake-word or bare navigation)
+      // should be processed. Free-form utterances without wake word are suppressed
+      // to avoid enqueuing accidental speech.
+      if ((mode === 'queue' || mode === 'ask') && inGracePeriod && !hasWakeWord) {
+        console.log(`${mode} mode grace: suppressing non-command utterance without wake word`);
+        this.stopWaitingLoop();
+        return;
+      }
+
       // Fallback command classifier (LLM): catches STT variations that regex misses.
       // During gated playback interrupts without wake word, avoid LLM command
       // inference to reduce false positives from cough/noise transcripts.
@@ -1873,7 +1882,13 @@ Use channel names (the part before the colon). Do not explain.`,
     this.log(`**${config.botName}:** ${responseText}`, channelName);
     this.session.appendAssistantMessage(responseText, channelName);
 
-    void this.syncToOpenClaw(transcript, responseText);
+    await this.persistVoiceExchange({
+      sessionKey: this.router?.getActiveSessionKey() ?? null,
+      channelName: channelName ?? 'default',
+      transcript,
+      response: responseText,
+      source: 'wait-fallback',
+    });
 
     this.stopWaitingLoop();
     this.transitionAndResetWatchdog({ type: 'SPEAKING_STARTED' });
@@ -2249,38 +2264,13 @@ Use channel names (the part before the colon). Do not explain.`,
           this.log(`**${config.botName}:** ${response}`, channelName);
           session.appendAssistantMessage(response, channelName);
 
-          // Sync to OpenClaw
-          if (gatewaySync) {
-            try {
-              console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
-              const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
-              if (ok) {
-                console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
-              } else {
-                console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=inject-returned-false`);
-              }
-            } catch (err: any) {
-              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=${err.message}`);
-            }
-            try {
-              console.log(`Gateway inject start queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
-              const ok = await gatewaySync.inject(sessionKey, response, 'voice-assistant');
-              if (ok) {
-                console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
-              } else {
-                console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=inject-returned-false`);
-              }
-            } catch (err: any) {
-              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
-            }
-
-            if (this.inboxTracker?.isActive() && gatewaySync.isConnected()) {
-              const count = await this.getCurrentMessageCount(sessionKey);
-              this.inboxTracker.markSeen(sessionKey, count);
-            }
-            // Record dispatch so inbox poll ignores text-agent echo responses
-            this.recentVoiceDispatchChannels.set(sessionKey, Date.now());
-          }
+          await this.persistVoiceExchange({
+            sessionKey,
+            channelName,
+            transcript,
+            response,
+            queueItemId,
+          });
 
           cb(response);
           return;
@@ -2290,39 +2280,13 @@ Use channel names (the part before the colon). Do not explain.`,
         this.log(`**${config.botName}:** ${response}`, channelName);
         session.appendAssistantMessage(response, channelName);
 
-        // Sync to OpenClaw
-        if (gatewaySync) {
-          try {
-            console.log(`Gateway inject start queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
-            const ok = await gatewaySync.inject(sessionKey, transcript, 'voice-user');
-            if (ok) {
-              console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey}`);
-            } else {
-              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=inject-returned-false`);
-            }
-          } catch (err: any) {
-            console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-user channel=${channelName} session=${sessionKey} error=${err.message}`);
-          }
-          try {
-            console.log(`Gateway inject start queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
-            const ok = await gatewaySync.inject(sessionKey, response, 'voice-assistant');
-            if (ok) {
-              console.log(`Gateway inject ok queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey}`);
-            } else {
-              console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=inject-returned-false`);
-            }
-          } catch (err: any) {
-            console.warn(`Gateway inject failed queueItem=${queueItemId} label=voice-assistant channel=${channelName} session=${sessionKey} error=${err.message}`);
-          }
-
-          // Update inbox snapshot so our own messages don't appear as "new"
-          if (this.inboxTracker?.isActive() && gatewaySync.isConnected()) {
-            const count = await this.getCurrentMessageCount(sessionKey);
-            this.inboxTracker.markSeen(sessionKey, count);
-          }
-          // Refresh cool-down so it covers text-agent echo responses
-          this.recentVoiceDispatchChannels.set(sessionKey, Date.now());
-        }
+        await this.persistVoiceExchange({
+          sessionKey,
+          channelName,
+          transcript,
+          response,
+          queueItemId,
+        });
 
         pollerRef?.check();
 
@@ -2341,21 +2305,22 @@ Use channel names (the part before the colon). Do not explain.`,
         // Clear pending wait state so the pipeline doesn't get stuck forever
         this.cancelPendingWait(`dispatch failed: ${err.message}`);
 
-        // Best-effort: inject the user message into the gateway so the text
-        // agent at least sees what was said, even though the LLM call failed.
-        if (gatewaySync) {
-          try {
-            await gatewaySync.inject(sessionKey, transcript, 'voice-user');
-            console.log(`Gateway inject (failed dispatch recovery) voice-user ok for ${queueItemId}`);
-          } catch {
-            // Already in error path — don't mask the original failure
-          }
-        }
-
         // Classify the error for a useful spoken message
         const msg = err.message?.toLowerCase() ?? '';
         const isNetwork = msg.includes('fetch failed') || msg.includes('econnrefused')
           || msg.includes('timeout') || msg.includes('enotfound');
+
+        // Mark the queue item ready with an explicit failure message so the user
+        // can discover the error via inbox flow or next-item navigation.
+        const failureSummary = isNetwork
+          ? 'Dispatch failed: gateway connection error.'
+          : 'Dispatch failed: gateway error.';
+        const failureText = isNetwork
+          ? 'I could not complete that request because the gateway connection failed. Please try again.'
+          : 'I could not complete that request because the gateway returned an error. Please try again.';
+        queueRef.markReady(queueItemId, failureSummary, failureText);
+        pollerRef?.check();
+
         const reason = isNetwork
           ? 'A network error occurred.'
           : `The gateway returned an error.`;
@@ -2983,7 +2948,9 @@ Use channel names (the part before the colon). Do not explain.`,
       /\b(?:let me|i(?:'m| am)\s+(?:going to|checking|looking|opening|searching|trying)|opening up the browser|found (?:the|an) item|adding it now|working on it)\b/gi,
     ) ?? []).length;
 
-    return normalized.length >= 1100 || lineCount >= 10 || toolChatterHits >= 2;
+    const shouldSummarize = normalized.length >= 1800 || lineCount >= 20 || toolChatterHits >= 4;
+    console.log(`[summary-check] len=${normalized.length} lines=${lineCount} chatter=${toolChatterHits} → ${shouldSummarize ? 'SUMMARIZE' : 'FULL'}`);
+    return shouldSummarize;
   }
 
   private async summarizeForVoice(fullText: string): Promise<string | null> {
@@ -3380,22 +3347,52 @@ Use channel names (the part before the colon). Do not explain.`,
     return null;
   }
 
-  private async syncToOpenClaw(userText: string, assistantText: string): Promise<void> {
-    if (!this.gatewaySync || !this.router) return;
+  private async persistVoiceExchange(params: {
+    sessionKey: string | null;
+    channelName: string;
+    transcript: string;
+    response: string;
+    queueItemId?: string;
+    source?: string;
+  }): Promise<void> {
+    const gatewaySync = this.gatewaySync;
+    if (!gatewaySync || !params.sessionKey) return;
+
+    const keyInfo = params.queueItemId
+      ? `queueItem=${params.queueItemId}`
+      : `source=${params.source ?? 'unknown'}`;
 
     try {
-      const sessionKey = this.router.getActiveSessionKey();
-      await this.gatewaySync.inject(sessionKey, userText, 'voice-user');
-      await this.gatewaySync.inject(sessionKey, assistantText, 'voice-assistant');
-
-      // Update inbox snapshot so our own messages don't appear as "new"
-      if (this.inboxTracker?.isActive() && this.gatewaySync.isConnected()) {
-        const count = await this.getCurrentMessageCount(sessionKey);
-        this.inboxTracker.markSeen(sessionKey, count);
+      console.log(`Gateway inject start ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey}`);
+      const userOk = await gatewaySync.inject(params.sessionKey, params.transcript, 'voice-user');
+      if (userOk) {
+        console.log(`Gateway inject ok ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey}`);
+      } else {
+        console.warn(`Gateway inject failed ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey} error=inject-returned-false`);
       }
     } catch (err: any) {
-      console.warn(`OpenClaw sync failed: ${err.message}`);
+      console.warn(`Gateway inject failed ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey} error=${err.message}`);
     }
+
+    try {
+      console.log(`Gateway inject start ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey}`);
+      const assistantOk = await gatewaySync.inject(params.sessionKey, params.response, 'voice-assistant');
+      if (assistantOk) {
+        console.log(`Gateway inject ok ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey}`);
+      } else {
+        console.warn(`Gateway inject failed ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey} error=inject-returned-false`);
+      }
+    } catch (err: any) {
+      console.warn(`Gateway inject failed ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey} error=${err.message}`);
+    }
+
+    // Update inbox snapshot so our own messages don't appear as "new"
+    if (this.inboxTracker?.isActive() && gatewaySync.isConnected()) {
+      const count = await this.getCurrentMessageCount(params.sessionKey);
+      this.inboxTracker.markSeen(params.sessionKey, count);
+    }
+    // Refresh cool-down so it covers text-agent echo responses.
+    this.recentVoiceDispatchChannels.set(params.sessionKey, Date.now());
   }
 
   private async sendChunked(channel: TextChannel, message: string): Promise<void> {

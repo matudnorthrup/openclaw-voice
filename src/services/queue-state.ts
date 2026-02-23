@@ -123,9 +123,13 @@ export class QueueState {
 
       // Mark stale "ready" items from previous sessions as heard —
       // they would otherwise trigger notifications forever on every restart.
+      // Only mark items older than 30 seconds to preserve items from
+      // programmatic reloads within the same session.
+      const STALE_THRESHOLD_MS = 30_000;
+      const now = Date.now();
       let staleCount = 0;
       for (const item of this.items) {
-        if (item.status === 'ready') {
+        if (item.status === 'ready' && (now - item.timestamp > STALE_THRESHOLD_MS)) {
           item.status = 'heard';
           staleCount++;
         }

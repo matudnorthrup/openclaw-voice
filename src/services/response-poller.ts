@@ -87,8 +87,10 @@ export class ResponsePoller {
           })
           .filter(({ text }) => {
             if (!text) return false;
-            // Skip injected user mirrors ("[voice-user] ..."), which are not replies.
+            // Skip injected user mirrors ("[voice-user] ..." / "[discord-user] ..."),
+            // which are not assistant replies.
             if (text.toLowerCase().startsWith('[voice-user]')) return false;
+            if (text.toLowerCase().startsWith('[discord-user]')) return false;
             return true;
           });
 

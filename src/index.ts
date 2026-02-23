@@ -32,6 +32,10 @@ let queueState: QueueState | null = null;
 let responsePoller: ResponsePoller | null = null;
 let dependencyMonitor: DependencyMonitor | null = null;
 let healthMonitor: HealthMonitor | null = null;
+const syncedDiscordMessageIds = new Map<string, number>();
+
+const SYNCED_MESSAGE_ID_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const SYNC_PREFIX_RE = /^\[(?:discord-user|discord-assistant|voice-user|voice-assistant)\]/i;
 
 // --- Text command handlers ---
 
@@ -187,9 +191,13 @@ client.on('messageCreate', async (message) => {
 async function syncDiscordMessageToGateway(message: any): Promise<void> {
   if (!gatewaySync) return;
   if (!message.guildId) return;
+  if (!rememberAndCheckMessageId(message.id)) return;
   if (message.content.startsWith('~')) return;
   if (message.content.startsWith('/')) return;
-  if (!message.content.trim()) return;
+  const content = message.content.trim();
+  if (!content) return;
+  if (SYNC_PREFIX_RE.test(content)) return;
+  if (message.author.bot) return;
   if (!message.channel || !('type' in message.channel)) return;
 
   // Mirror text/thread messages into per-channel gateway sessions so
@@ -199,14 +207,30 @@ async function syncDiscordMessageToGateway(message: any): Promise<void> {
   }
 
   const sessionKey = GatewaySync.sessionKeyForChannel(message.channelId);
-  const label = message.author.bot ? 'discord-assistant' : 'discord-user';
-  const snippet = message.content.trim().slice(0, 80);
-  const ok = await gatewaySync.inject(sessionKey, message.content.trim(), label);
+  const label = 'discord-user';
+  const snippet = content.slice(0, 80);
+  const ok = await gatewaySync.inject(sessionKey, content, label);
   if (!ok) {
     console.warn(`Gateway text sync failed channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id}`);
   } else {
     console.log(`Gateway text sync ok channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id} "${snippet}"`);
   }
+}
+
+function rememberAndCheckMessageId(messageId: string): boolean {
+  const now = Date.now();
+
+  for (const [id, seenAt] of syncedDiscordMessageIds) {
+    if (now - seenAt > SYNCED_MESSAGE_ID_TTL_MS) {
+      syncedDiscordMessageIds.delete(id);
+    }
+  }
+
+  if (syncedDiscordMessageIds.has(messageId)) {
+    return false;
+  }
+  syncedDiscordMessageIds.set(messageId, now);
+  return true;
 }
 
 // --- Voice state update: auto-join/leave ---

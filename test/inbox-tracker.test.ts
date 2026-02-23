@@ -197,6 +197,32 @@ describe('InboxTracker', () => {
       const activities = await tracker.checkInbox(testChannels);
       expect(activities).toHaveLength(0);
     });
+
+    it('detects discord-user activity when label is only in content prefix', async () => {
+      const qs = createMockQueueState();
+      const T = 1_700_000_000_000;
+      qs.setSnapshots({
+        'session:health': T + 1000,
+        'session:finance': T + 1000,
+        'session:planning': T + 1000,
+      });
+
+      const historyMap: Record<string, ChatMessage[]> = {
+        'session:health': [
+          { role: 'assistant', content: '[discord-user]\n\nhello from text', timestamp: T + 2000 } as any,
+        ],
+        'session:finance': [],
+        'session:planning': [],
+      };
+
+      const gs = createMockGatewaySync(historyMap);
+      const tracker = new InboxTracker(qs as any, gs as any);
+
+      const activities = await tracker.checkInbox(testChannels);
+      expect(activities).toHaveLength(1);
+      expect(activities[0].channelName).toBe('health');
+      expect(activities[0].newMessageCount).toBe(1);
+    });
   });
 
   describe('markSeen', () => {

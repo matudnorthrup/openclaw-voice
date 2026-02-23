@@ -116,6 +116,25 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     }
   }
 
+  // Try dispatch match early with less-normalized text (preserves interior periods for body)
+  const restDispatch = restRaw
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?,]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const dispatchMatch = restDispatch.match(
+    /^(?:(?:please|can\s+you|could\s+you|would\s+you)\s+)*(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
+  );
+  if (dispatchMatch) {
+    const body = dispatchMatch[1].trim();
+    if (body.length > 0) {
+      return { type: 'dispatch', body };
+    }
+  }
+
   const rest = trimmed
     .slice(match[0].length)
     .trim()
@@ -132,26 +151,11 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
 
   // Mode switch — must come before "switch to X" to avoid matching "switch to inbox mode" as a channel switch
-  // Avoid "switch to" prefix here — it collides with the channel-switch regex when STT mangles words.
-  // Use "enable", "activate", "set", or bare "<mode> mode" instead.
-  const modeMatch = rest.match(/^(?:(?:enable|activate|set)\s+)?(inbox|queue|wait|ask)\s+mode$/);
+  const modeMatch = rest.match(/^(?:(?:enable|activate|set|switch\s+to)\s+)?(inbox|queue|wait|ask)\s+mode$/);
   if (modeMatch) {
     const spoken = modeMatch[1];
     const mode: VoiceMode = spoken === 'inbox' ? 'queue' : spoken as VoiceMode;
     return { type: 'mode', mode };
-  }
-
-  // "dispatch to <channel> <payload>", "dispatch this message to <channel> <payload>",
-  // and natural variants like "dispatch this in my <channel> ..."
-  // Keep this before switch parsing so dispatch phrases don't degrade into channel switch.
-  const dispatchMatch = rest.match(
-    /^(?:(?:please|can\s+you|could\s+you|would\s+you)\s+)*(?:dispatch|deliver|route)\s+(?:this(?:\s+message)?\s+)?(?:to|in|into)\s+(.+)$/,
-  );
-  if (dispatchMatch) {
-    const body = dispatchMatch[1].trim();
-    if (body.length > 0) {
-      return { type: 'dispatch', body };
-    }
   }
 
   // "switch to X", "go to X", "change to X", "move to X"
@@ -239,8 +243,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'inbox-check' };
   }
 
-  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on", "skip", "skip it", "skip this"
-  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on|skip(?:\s+(?:it|this(?:\s+(?:one|message|part))?|that))?)$/.test(rest)) {
+  // "next", "next response", "next one", "next message", "next channel", "done", "I'm done", "move on"
+  if (/^(?:next(?:\s+(?:response|one|message|channel))?|(?:i'?m\s+)?done|i\s+am\s+done|move\s+on)$/.test(rest)) {
     return { type: 'inbox-next' };
   }
 
@@ -265,8 +269,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'silent-wait' };
   }
 
-  // "pause", "stop", "be quiet", etc.
-  if (/^(?:pause|stop(?:\s+talking)?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough)$/.test(rest)) {
+  // "pause", "stop", "be quiet", "skip", "skip this", etc.
+  if (/^(?:pause|stop(?:\s+talking)?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough|skip(?:\s+(?:it|this(?:\s+(?:one|message|part))?|that))?)$/.test(rest)) {
     return { type: 'pause' };
   }
 

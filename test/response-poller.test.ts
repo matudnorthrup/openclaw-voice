@@ -92,6 +92,18 @@ describe('ResponsePoller', () => {
     expect(queue.item.status).toBe('pending');
   });
 
+  it('does not mark ready from injected discord-user mirror messages', async () => {
+    const queue = new StubQueueState(pendingItem(2_000));
+    const gateway = new StubGatewaySync([
+      { role: 'assistant', content: '[discord-user] add milk', timestamp: 2_100 },
+    ]);
+    const poller = new ResponsePoller(queue as any, gateway as any);
+
+    await (poller as any).poll();
+
+    expect(queue.item.status).toBe('pending');
+  });
+
   it('marks ready from a fresh assistant response', async () => {
     const queue = new StubQueueState(pendingItem(2_000));
     const gateway = new StubGatewaySync([

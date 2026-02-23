@@ -239,6 +239,29 @@ export class InboxTracker {
     return '';
   }
 
+  private extractRawText(content: unknown): string {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((block: any) => {
+          if (!block || typeof block !== 'object') return '';
+          if (block.type === 'text' && typeof block.text === 'string') return block.text;
+          if (typeof block.text === 'string') return block.text;
+          if (typeof block.content === 'string') return block.content;
+          return '';
+        })
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    }
+    if (content && typeof content === 'object') {
+      const c: any = content;
+      if (typeof c.text === 'string') return c.text;
+      if (typeof c.content === 'string') return c.content;
+    }
+    return '';
+  }
+
   /**
    * Extract the label from a gateway message.  The gateway stores labels as a
    * text prefix `[label]\n\n` inside the message content rather than a separate
@@ -249,14 +272,14 @@ export class InboxTracker {
     // Check for an explicit label property first (future-proof)
     if ((message as any).label) return (message as any).label;
 
-    const text = this.extractSpeechText(message.content);
+    const text = this.extractRawText(message.content);
     const match = text.match(/^\[([a-z][\w-]*)\]/i);
     return match ? match[1] : undefined;
   }
 
   private cleanSpeechText(text: string): string {
     return text
-      .replace(/^\[(?:discord-user|discord-assistant)\]\s*/i, '')
+      .replace(/^(?:\[(?:discord-user|discord-assistant|voice-user|voice-assistant)\]\s*)+/i, '')
       .replace(/^\*\*You:\*\*\s*/i, '')
       .replace(/^\*\*Watson(?: Voice)?:\*\*\s*/i, '')
       .replace(/\s+/g, ' ')

@@ -432,12 +432,18 @@ export class ChannelRouter {
       // Skip system messages
       if (msg.role === 'system') continue;
 
-      const content = this.normalizeDiscordMessageContent(this.extractTextContent(msg.content));
+      const rawContent = this.extractTextContent(msg.content);
+      const content = this.normalizeDiscordMessageContent(rawContent);
       if (!content) continue;
 
-      // Messages injected from voice with label 'voice-user' are user messages
-      if (msg.label === 'voice-user') {
+      const label = this.extractMessageLabel(msg, rawContent);
+      const mappedRole = this.mapLabelToRole(label);
+      if (mappedRole === 'user') {
         messages.push({ role: 'user', content });
+        continue;
+      }
+      if (mappedRole === 'assistant') {
+        messages.push({ role: 'assistant', content });
         continue;
       }
 
@@ -543,8 +549,23 @@ export class ChannelRouter {
 
   private normalizeDiscordMessageContent(content: string): string {
     return content
-      .replace(/^\[(?:discord-user|discord-assistant)\]\s*/i, '')
+      .replace(/^(?:\[(?:discord-user|discord-assistant|voice-user|voice-assistant)\]\s*)+/i, '')
       .replace(/^\*\*You:\*\*\s*/i, '')
       .replace(new RegExp(`^\\*\\*${config.botName}:\\*\\*\\s*`, 'i'), '');
+  }
+
+  private extractMessageLabel(msg: ChatMessage, textContent: string): string | null {
+    if (typeof msg.label === 'string' && msg.label.trim()) {
+      return msg.label.trim().toLowerCase();
+    }
+    const match = textContent.match(/^\[([a-z][\w-]*)\]\s*/i);
+    return match ? match[1].toLowerCase() : null;
+  }
+
+  private mapLabelToRole(label: string | null): 'user' | 'assistant' | null {
+    if (!label) return null;
+    if (label === 'voice-user' || label === 'discord-user') return 'user';
+    if (label === 'voice-assistant' || label === 'discord-assistant') return 'assistant';
+    return null;
   }
 }
