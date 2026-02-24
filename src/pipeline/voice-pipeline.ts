@@ -1946,8 +1946,7 @@ Use channel names (the part before the colon). Do not explain.`,
     this.session.appendUserMessage(userId, transcript, channelName);
 
     const sessionScopedUser = this.router?.getActiveSessionKey() ?? userId;
-    const resolvedUser = this.gatewaySync?.getResolvedSessionKey(sessionScopedUser) ?? sessionScopedUser;
-    const { response } = await getResponse(resolvedUser, transcript);
+    const { response } = await getResponse(sessionScopedUser, transcript);
     const responseText = response;
 
     this.log(`**${config.botName}:** ${responseText}`, channelName);
@@ -2290,7 +2289,6 @@ Use channel names (the part before the colon). Do not explain.`,
     const routerRef = this.router;
     const queueRef = this.queueState;
     const pollerRef = this.responsePoller;
-    const gatewaySync = this.gatewaySync;
     const session = this.session;
 
     // Set cool-down BEFORE the LLM call so inbox poll ignores any messages
@@ -2304,11 +2302,9 @@ Use channel names (the part before the colon). Do not explain.`,
         // happen while this item is processing do not cross-contaminate context.
         await routerRef.refreshHistory(channelName);
         const history = routerRef.getHistory(channelName);
-        // Use the resolved session key as LLM user identity — the gateway may
-        // have migrated the session to a different key (e.g. after a session
-        // split), and getResponse bypasses GatewaySync's WebSocket layer.
-        const resolvedUser = gatewaySync?.getResolvedSessionKey(sessionKey) ?? sessionKey;
-        const { response, history: updatedHistory } = await getResponse(resolvedUser, transcript, {
+        // Always use the logical channel session key for completions. getResponse
+        // normalizes/guards against recursive openai-user key nesting.
+        const { response, history: updatedHistory } = await getResponse(sessionKey, transcript, {
           systemPrompt,
           history,
         });
@@ -3682,29 +3678,39 @@ Use channel names (the part before the colon). Do not explain.`,
       ? `queueItem=${params.queueItemId}`
       : `source=${params.source ?? 'unknown'}`;
 
-    try {
-      console.log(`Gateway inject start ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey}`);
-      const userOk = await gatewaySync.inject(params.sessionKey, params.transcript, 'voice-user');
-      if (userOk) {
-        console.log(`Gateway inject ok ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey}`);
-      } else {
-        console.warn(`Gateway inject failed ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey} error=inject-returned-false`);
+    const syncMessage = async (content: string, label: 'voice-user' | 'voice-assistant'): Promise<void> => {
+      const beforeResolved = gatewaySync.getResolvedSessionKey(params.sessionKey!);
+      try {
+        console.log(`Gateway inject start ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey}`);
+        const ok = await gatewaySync.inject(params.sessionKey!, content, label);
+        if (ok) {
+          console.log(`Gateway inject ok ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey}`);
+          const afterResolved = gatewaySync.getResolvedSessionKey(params.sessionKey!);
+          const mirrored = await gatewaySync.mirrorInjectToSessionFamily(
+            params.sessionKey!,
+            content,
+            label,
+            { excludeSessionKeys: [params.sessionKey!, beforeResolved, afterResolved] },
+          );
+          if (mirrored > 0) {
+            console.log(
+              `Gateway mirror inject ok ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey} mirrored=${mirrored}`,
+            );
+          }
+        } else {
+          console.warn(
+            `Gateway inject failed ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey} error=inject-returned-false`,
+          );
+        }
+      } catch (err: any) {
+        console.warn(
+          `Gateway inject failed ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey} error=${err.message}`,
+        );
       }
-    } catch (err: any) {
-      console.warn(`Gateway inject failed ${keyInfo} label=voice-user channel=${params.channelName} session=${params.sessionKey} error=${err.message}`);
-    }
+    };
 
-    try {
-      console.log(`Gateway inject start ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey}`);
-      const assistantOk = await gatewaySync.inject(params.sessionKey, params.response, 'voice-assistant');
-      if (assistantOk) {
-        console.log(`Gateway inject ok ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey}`);
-      } else {
-        console.warn(`Gateway inject failed ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey} error=inject-returned-false`);
-      }
-    } catch (err: any) {
-      console.warn(`Gateway inject failed ${keyInfo} label=voice-assistant channel=${params.channelName} session=${params.sessionKey} error=${err.message}`);
-    }
+    await syncMessage(params.transcript, 'voice-user');
+    await syncMessage(params.response, 'voice-assistant');
 
     // Refresh cool-down so it covers text-agent echo responses.
     this.recentVoiceDispatchChannels.set(params.sessionKey, Date.now());

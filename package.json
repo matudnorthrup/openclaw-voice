@@ -20,7 +20,9 @@
     "flows:stress:inbox": "npm run build --silent && node dist/testing/stress-inbox-report.js",
     "flows:stress:all": "npm run flows:stress && npm run flows:stress:inbox",
     "e2e:live": "npm run build --silent && node dist/testing/e2e-live-report.js",
-    "e2e:voice-loop": "npm run build --silent && node dist/testing/e2e-voice-loop-report.js"
+    "e2e:voice-loop": "npm run build --silent && node dist/testing/e2e-voice-loop-report.js",
+    "session:backfill": "tsx src/testing/backfill-session-splits.ts",
+    "session:health": "tsx src/testing/check-session-split-health.ts"
   },
   "keywords": [],
   "author": "",

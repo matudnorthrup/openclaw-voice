@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { WATSON_SYSTEM_PROMPT } from '../prompts/watson-system.js';
+import { GatewaySync } from './gateway-sync.js';
 
 export interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -47,11 +48,16 @@ export async function getResponse(
   options?: GetResponseOptions,
 ): Promise<GetResponseResult> {
   const start = Date.now();
+  const normalizedUserId = GatewaySync.normalizeCompletionUserId(userId);
+  const openAiDepth = GatewaySync.countOpenAiUserPrefixes(userId);
+  if (openAiDepth > 1 || normalizedUserId !== userId) {
+    console.warn(`Normalized gateway completion user "${userId}" -> "${normalizedUserId}" (openaiDepth=${openAiDepth})`);
+  }
 
   const systemPrompt = options?.systemPrompt ?? WATSON_SYSTEM_PROMPT;
   const externalHistory = options?.history !== undefined;
 
-  let history = externalHistory ? options!.history! : (conversations.get(userId) || []);
+  let history = externalHistory ? options!.history! : (conversations.get(normalizedUserId) || []);
   history.push({ role: 'user', content: text });
 
   // Trim to last MAX_HISTORY messages
@@ -75,7 +81,7 @@ export async function getResponse(
       model: `openclaw:${config.gatewayAgentId}`,
       max_tokens: 300,
       messages,
-      user: userId,
+      user: normalizedUserId,
     }),
   }, 'Claude LLM');
 
@@ -96,7 +102,7 @@ export async function getResponse(
   history.push({ role: 'assistant', content: assistantText });
 
   if (!externalHistory) {
-    conversations.set(userId, history);
+    conversations.set(normalizedUserId, history);
   }
 
   const elapsed = Date.now() - start;
@@ -113,7 +119,9 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
     { role: 'user', content: userMessage },
   ];
 
-  const sessionKey = `agent:${config.gatewayAgentId}:discord:channel:${config.utilityChannelId}`;
+  const sessionKey = GatewaySync.normalizeCompletionUserId(
+    `agent:${config.gatewayAgentId}:discord:channel:${config.utilityChannelId}`,
+  );
 
   const apiResponse = await fetchWithRetry(`${config.gatewayUrl}/v1/chat/completions`, {
     method: 'POST',
@@ -144,8 +152,9 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
 }
 
 export function clearConversation(userId: string): void {
-  conversations.delete(userId);
-  console.log(`Cleared conversation for ${userId}`);
+  const normalizedUserId = GatewaySync.normalizeCompletionUserId(userId);
+  conversations.delete(normalizedUserId);
+  console.log(`Cleared conversation for ${normalizedUserId}`);
 }
 
 /**

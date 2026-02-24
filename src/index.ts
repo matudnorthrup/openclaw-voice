@@ -231,15 +231,38 @@ async function syncDiscordMessageToGateway(message: any): Promise<void> {
   const label = 'discord-user';
   const skipReason = await getGatewayTextSyncSkipReason(sessionKey, content);
   if (skipReason) {
+    if (skipReason === 'native-session-cache' || skipReason === 'native-discord-session') {
+      const resolved = gatewaySync.getResolvedSessionKey(sessionKey);
+      const mirrored = await gatewaySync.mirrorInjectToSessionFamily(
+        sessionKey,
+        content,
+        label,
+        { excludeSessionKeys: [sessionKey, resolved] },
+      );
+      if (mirrored > 0) {
+        console.log(`Gateway text sync mirrored channel=${message.channelId} label=${label} msgId=${message.id} mirrored=${mirrored}`);
+      }
+    }
     console.log(`Gateway text sync skipped channel=${message.channelId} label=${label} msgId=${message.id} reason=${skipReason}`);
     return;
   }
   const snippet = content.slice(0, 80);
+  const beforeResolved = gatewaySync.getResolvedSessionKey(sessionKey);
   const ok = await gatewaySync.inject(sessionKey, content, label);
   if (!ok) {
     console.warn(`Gateway text sync failed channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id}`);
   } else {
+    const afterResolved = gatewaySync.getResolvedSessionKey(sessionKey);
+    const mirrored = await gatewaySync.mirrorInjectToSessionFamily(
+      sessionKey,
+      content,
+      label,
+      { excludeSessionKeys: [sessionKey, beforeResolved, afterResolved] },
+    );
     console.log(`Gateway text sync ok channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id} "${snippet}"`);
+    if (mirrored > 0) {
+      console.log(`Gateway text sync mirror ok channel=${message.channelId} label=${label} msgId=${message.id} mirrored=${mirrored}`);
+    }
   }
 }
 

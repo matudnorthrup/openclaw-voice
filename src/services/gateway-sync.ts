@@ -46,11 +46,18 @@ interface DeviceIdentity {
   privateKeyPem: string;
 }
 
+interface SessionFamilyCacheEntry {
+  keys: string[];
+  expiresAt: number;
+}
+
 const RPC_TIMEOUT_MS = 10_000;
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_CAP_MS = 30_000;
 const INJECT_QUEUE_MAX = 200;
 const INJECT_QUEUE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const SESSION_FAMILY_CACHE_TTL_MS = 60_000;
+const SESSION_SPLIT_WARN_INTERVAL_MS = 5 * 60 * 1000;
 
 const OPENCLAW_STATE_DIR = join(homedir(), '.openclaw');
 const DEVICE_IDENTITY_PATH = join(OPENCLAW_STATE_DIR, 'identity', 'device.json');
@@ -124,6 +131,8 @@ export class GatewaySync {
   private deviceIdentity: DeviceIdentity | null;
   private injectQueue: QueuedInject[] = [];
   private reconnectCallbacks: Array<() => void | Promise<void>> = [];
+  private sessionFamilyCache = new Map<string, SessionFamilyCacheEntry>();
+  private splitWarningAt = new Map<string, number>();
 
   static get defaultSessionKey(): string {
     return `agent:${config.gatewayAgentId}:main`;
@@ -131,6 +140,40 @@ export class GatewaySync {
 
   static sessionKeyForChannel(channelId: string): string {
     return `agent:${config.gatewayAgentId}:discord:channel:${channelId}`;
+  }
+
+  static countOpenAiUserPrefixes(sessionKey: string): number {
+    const prefix = `agent:${config.gatewayAgentId}:openai-user:`;
+    let key = sessionKey.trim();
+    let count = 0;
+    while (key.startsWith(prefix)) {
+      count++;
+      key = key.slice(prefix.length);
+    }
+    return count;
+  }
+
+  static stripOpenAiUserPrefixes(sessionKey: string): string {
+    const prefix = `agent:${config.gatewayAgentId}:openai-user:`;
+    let key = sessionKey.trim();
+    while (key.startsWith(prefix)) {
+      key = key.slice(prefix.length);
+    }
+    return key;
+  }
+
+  static normalizeCompletionUserId(userId: string): string {
+    const stripped = GatewaySync.stripOpenAiUserPrefixes(userId);
+    const channelId = GatewaySync.extractChannelIdFromKey(stripped) ?? GatewaySync.extractChannelIdFromKey(userId);
+    if (channelId) {
+      return GatewaySync.sessionKeyForChannel(channelId);
+    }
+    return stripped;
+  }
+
+  private static extractChannelIdFromKey(sessionKey: string): string | null {
+    const match = sessionKey.match(/channel:(\d+)$/);
+    return match ? match[1] : null;
   }
 
   constructor() {
@@ -171,6 +214,8 @@ export class GatewaySync {
     this.connected = false;
     this.injectQueue = [];
     this.reconnectCallbacks = [];
+    this.sessionFamilyCache.clear();
+    this.splitWarningAt.clear();
   }
 
   isConnected(): boolean {
@@ -196,7 +241,8 @@ export class GatewaySync {
    * Used by callers that bypass GatewaySync for HTTP calls (e.g. getResponse).
    */
   getResolvedSessionKey(sessionKey: string): string {
-    return this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+    const canonical = GatewaySync.normalizeCompletionUserId(sessionKey);
+    return this.sessionKeyCache.get(canonical) ?? this.sessionKeyCache.get(sessionKey) ?? canonical;
   }
 
   /**
@@ -210,28 +256,35 @@ export class GatewaySync {
 
       let updated = 0;
       for (const { name, sessionKey } of channelSessionKeys) {
-        const channelId = this.extractChannelId(sessionKey);
+        const normalizedKey = GatewaySync.normalizeCompletionUserId(sessionKey);
+        const channelId = this.extractChannelId(normalizedKey);
         if (!channelId) continue;
 
-        // Find shortest matching session key (most canonical)
-        const candidates: string[] = [];
-        for (const session of sessions) {
-          if (session.key.includes(channelId)) candidates.push(session.key);
+        const candidates = this.findSessionCandidatesForChannel(channelId, sessions);
+        if (candidates.length === 0) {
+          this.invalidateSessionFamily(channelId);
+          continue;
         }
-        if (candidates.length === 0) continue;
+        this.cacheSessionFamily(channelId, candidates);
+        this.logSessionSplitHealth(channelId, candidates);
 
-        candidates.sort((a, b) => a.length - b.length);
-        const best = candidates[0];
-        const current = this.sessionKeyCache.get(sessionKey);
+        const canonicalKey = GatewaySync.sessionKeyForChannel(channelId);
+        const best = candidates.includes(canonicalKey) ? canonicalKey : candidates[0]!;
+        const current = this.sessionKeyCache.get(normalizedKey);
 
-        if (best !== sessionKey && best !== current) {
+        if (best !== normalizedKey && best !== current) {
           console.log(`Session cache refresh: ${name} → ${best}`);
-          this.sessionKeyCache.set(sessionKey, best);
-          this.sessionDiscoveryAttempted.add(sessionKey);
+          this.sessionKeyCache.set(normalizedKey, best);
+          this.sessionDiscoveryAttempted.add(normalizedKey);
           updated++;
-        } else if (best !== sessionKey && !current) {
-          this.sessionKeyCache.set(sessionKey, best);
-          this.sessionDiscoveryAttempted.add(sessionKey);
+        } else if (best !== normalizedKey && !current) {
+          this.sessionKeyCache.set(normalizedKey, best);
+          this.sessionDiscoveryAttempted.add(normalizedKey);
+          updated++;
+        } else if (best === normalizedKey && current) {
+          // Session healed back to canonical — clear stale alias mapping.
+          console.log(`Session cache refresh: ${name} mapping healed (${current} → ${normalizedKey})`);
+          this.sessionKeyCache.delete(normalizedKey);
           updated++;
         }
       }
@@ -277,6 +330,117 @@ export class GatewaySync {
     this.reconnectCallbacks = [];
   }
 
+  async mirrorInjectToSessionFamily(
+    sessionKey: string,
+    message: string,
+    label?: string,
+    options?: { excludeSessionKeys?: string[] },
+  ): Promise<number> {
+    if (!this.connected) return 0;
+    const channelId = this.extractChannelId(sessionKey);
+    if (!channelId) return 0;
+
+    const family = await this.getSessionFamily(sessionKey);
+    if (family.length <= 1) return 0;
+
+    const exclude = new Set<string>();
+    for (const key of options?.excludeSessionKeys ?? []) {
+      exclude.add(key);
+      exclude.add(GatewaySync.normalizeCompletionUserId(key));
+    }
+
+    let mirrored = 0;
+    for (const key of family) {
+      if (exclude.has(key)) continue;
+
+      try {
+        const params: any = { sessionKey: key, message };
+        if (label) params.label = label;
+        await this.rpc('chat.inject', params);
+        mirrored++;
+      } catch (err: any) {
+        if (err.message?.includes('session not found')) {
+          this.invalidateSessionFamily(channelId);
+          continue;
+        }
+        console.warn(`GatewaySync mirror inject failed (${key}): ${err.message}`);
+      }
+    }
+
+    return mirrored;
+  }
+
+  private findSessionCandidatesForChannel(
+    channelId: string,
+    sessions: { key: string; displayName?: string; channel?: string; status?: string }[],
+  ): string[] {
+    const candidates = new Set<string>();
+    for (const session of sessions) {
+      if (session.key.includes(channelId)) {
+        candidates.add(session.key);
+        continue;
+      }
+      if (session.channel && session.channel.includes(channelId)) {
+        candidates.add(session.key);
+      }
+    }
+    return Array.from(candidates).sort((a, b) => a.length - b.length);
+  }
+
+  private cacheSessionFamily(channelId: string, keys: string[]): void {
+    const canonicalKey = GatewaySync.sessionKeyForChannel(channelId);
+    this.sessionFamilyCache.set(canonicalKey, {
+      keys: [...new Set(keys)],
+      expiresAt: Date.now() + SESSION_FAMILY_CACHE_TTL_MS,
+    });
+  }
+
+  private invalidateSessionFamily(channelId: string): void {
+    const canonicalKey = GatewaySync.sessionKeyForChannel(channelId);
+    this.sessionFamilyCache.delete(canonicalKey);
+  }
+
+  private async getSessionFamily(sessionKey: string): Promise<string[]> {
+    const channelId = this.extractChannelId(sessionKey);
+    if (!channelId) return [];
+
+    const canonicalKey = GatewaySync.sessionKeyForChannel(channelId);
+    const cached = this.sessionFamilyCache.get(canonicalKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.keys;
+    }
+
+    const sessions = await this.listSessions();
+    if (!sessions) {
+      return cached?.keys ?? [];
+    }
+
+    const candidates = this.findSessionCandidatesForChannel(channelId, sessions);
+    if (candidates.length === 0) {
+      this.sessionFamilyCache.delete(canonicalKey);
+      return [];
+    }
+
+    this.cacheSessionFamily(channelId, candidates);
+    this.logSessionSplitHealth(channelId, candidates);
+    return candidates;
+  }
+
+  private logSessionSplitHealth(channelId: string, candidates: string[]): void {
+    if (candidates.length <= 1) return;
+
+    const now = Date.now();
+    const last = this.splitWarningAt.get(channelId) ?? 0;
+    if (now - last < SESSION_SPLIT_WARN_INTERVAL_MS) return;
+    this.splitWarningAt.set(channelId, now);
+
+    const maxDepth = candidates.reduce((max, key) => Math.max(max, GatewaySync.countOpenAiUserPrefixes(key)), 0);
+    const nested = candidates.filter((key) => GatewaySync.countOpenAiUserPrefixes(key) > 1).length;
+    console.warn(
+      `Gateway session split detected channel=${channelId} sessions=${candidates.length} maxOpenAiDepth=${maxDepth} nested=${nested}`,
+    );
+  }
+
   private enqueueInject(sessionKey: string, message: string, label?: string): void {
     if (this.injectQueue.length >= INJECT_QUEUE_MAX) {
       this.injectQueue.shift(); // FIFO evict oldest
@@ -315,14 +479,16 @@ export class GatewaySync {
   }
 
   async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
+    const canonicalSessionKey = GatewaySync.normalizeCompletionUserId(sessionKey);
+
     // If not connected, queue for later delivery
     if (!this.connected) {
-      this.enqueueInject(sessionKey, message, label);
+      this.enqueueInject(canonicalSessionKey, message, label);
       return null;
     }
 
     // Check if we have a cached alternate session key for this channel
-    const resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+    const resolvedKey = this.sessionKeyCache.get(canonicalSessionKey) ?? canonicalSessionKey;
 
     try {
       const params: any = { sessionKey: resolvedKey, message };
@@ -333,14 +499,15 @@ export class GatewaySync {
       // If session not found, invalidate cache and re-discover
       if (err.message?.includes('session not found')) {
         // Always clear stale cache entry and re-discover
-        this.sessionKeyCache.delete(sessionKey);
-        this.sessionDiscoveryAttempted.delete(sessionKey);
-        const channelId = this.extractChannelId(sessionKey);
+        this.sessionKeyCache.delete(canonicalSessionKey);
+        this.sessionDiscoveryAttempted.delete(canonicalSessionKey);
+        const channelId = this.extractChannelId(canonicalSessionKey);
+        if (channelId) this.invalidateSessionFamily(channelId);
         if (channelId) {
           const discovered = await this.discoverSessionForChannel(channelId);
-          if (discovered && discovered !== sessionKey && discovered !== resolvedKey) {
-            console.log(`Gateway session fallback: ${sessionKey} → ${discovered}`);
-            this.sessionKeyCache.set(sessionKey, discovered);
+          if (discovered && discovered !== canonicalSessionKey && discovered !== resolvedKey) {
+            console.log(`Gateway session fallback: ${canonicalSessionKey} → ${discovered}`);
+            this.sessionKeyCache.set(canonicalSessionKey, discovered);
             // Retry with discovered key
             try {
               const params: any = { sessionKey: discovered, message };
@@ -369,18 +536,17 @@ export class GatewaySync {
       const sessions = await this.listSessions();
       if (!sessions) return null;
 
-      // Collect all sessions that reference this channel ID, prefer shortest key
-      // (prevents progressive nesting like agent:main:openai-user:agent:main:openai-user:...)
-      const candidates: string[] = [];
-      for (const session of sessions) {
-        if (session.key.includes(channelId)) candidates.push(session.key);
-        else if (session.channel && session.channel.includes(channelId)) candidates.push(session.key);
-      }
+      // Collect all sessions that reference this channel ID.
+      const candidates = this.findSessionCandidatesForChannel(channelId, sessions);
 
       if (candidates.length === 0) return null;
-      // Return the shortest key — the most canonical form
-      candidates.sort((a, b) => a.length - b.length);
-      return candidates[0];
+      this.cacheSessionFamily(channelId, candidates);
+      this.logSessionSplitHealth(channelId, candidates);
+
+      // Prefer canonical Discord key when available; otherwise use shortest
+      // discovered alias to avoid deep openai-user nesting.
+      const canonicalKey = GatewaySync.sessionKeyForChannel(channelId);
+      return candidates.includes(canonicalKey) ? canonicalKey : candidates[0]!;
     } catch (err: any) {
       console.warn(`GatewaySync discoverSessionForChannel failed: ${err.message}`);
       return null;
@@ -388,9 +554,9 @@ export class GatewaySync {
   }
 
   private extractChannelId(sessionKey: string): string | null {
-    // Extract channel ID from "agent:main:discord:channel:1234567890"
-    const match = sessionKey.match(/channel:(\d+)$/);
-    return match ? match[1] : null;
+    // Extract channel ID from keys like "agent:main:discord:channel:1234567890"
+    // and openai-user-prefixed variants.
+    return GatewaySync.extractChannelIdFromKey(sessionKey);
   }
 
   async listSessions(): Promise<{ key: string; displayName?: string; channel?: string; status?: string }[] | null> {
@@ -406,19 +572,20 @@ export class GatewaySync {
   }
 
   async getHistory(sessionKey: string, limit?: number): Promise<{ messages: ChatMessage[] } | null> {
-    let resolvedKey = this.sessionKeyCache.get(sessionKey) ?? sessionKey;
+    const canonicalSessionKey = GatewaySync.normalizeCompletionUserId(sessionKey);
+    let resolvedKey = this.sessionKeyCache.get(canonicalSessionKey) ?? canonicalSessionKey;
 
     // Proactive session discovery on first access — handles cases where the gateway
     // has split a channel into a new session with a different key.  Without this,
     // getHistory would silently return stale data from the old session.
-    if (resolvedKey === sessionKey && !this.sessionDiscoveryAttempted.has(sessionKey)) {
-      this.sessionDiscoveryAttempted.add(sessionKey);
-      const channelId = this.extractChannelId(sessionKey);
+    if (resolvedKey === canonicalSessionKey && !this.sessionDiscoveryAttempted.has(canonicalSessionKey)) {
+      this.sessionDiscoveryAttempted.add(canonicalSessionKey);
+      const channelId = this.extractChannelId(canonicalSessionKey);
       if (channelId) {
         const discovered = await this.discoverSessionForChannel(channelId);
-        if (discovered && discovered !== sessionKey) {
-          console.log(`Gateway history discovery: ${sessionKey} → ${discovered}`);
-          this.sessionKeyCache.set(sessionKey, discovered);
+        if (discovered && discovered !== canonicalSessionKey) {
+          console.log(`Gateway history discovery: ${canonicalSessionKey} → ${discovered}`);
+          this.sessionKeyCache.set(canonicalSessionKey, discovered);
           resolvedKey = discovered;
         }
       }
@@ -432,14 +599,15 @@ export class GatewaySync {
     } catch (err: any) {
       // If session not found, invalidate cache and re-discover
       if (err.message?.includes('session not found')) {
-        this.sessionKeyCache.delete(sessionKey);
-        this.sessionDiscoveryAttempted.delete(sessionKey);
-        const channelId = this.extractChannelId(sessionKey);
+        this.sessionKeyCache.delete(canonicalSessionKey);
+        this.sessionDiscoveryAttempted.delete(canonicalSessionKey);
+        const channelId = this.extractChannelId(canonicalSessionKey);
+        if (channelId) this.invalidateSessionFamily(channelId);
         if (channelId) {
           const discovered = await this.discoverSessionForChannel(channelId);
-          if (discovered && discovered !== sessionKey && discovered !== resolvedKey) {
-            console.log(`Gateway history fallback: ${sessionKey} → ${discovered}`);
-            this.sessionKeyCache.set(sessionKey, discovered);
+          if (discovered && discovered !== canonicalSessionKey && discovered !== resolvedKey) {
+            console.log(`Gateway history fallback: ${canonicalSessionKey} → ${discovered}`);
+            this.sessionKeyCache.set(canonicalSessionKey, discovered);
             try {
               const params: any = { sessionKey: discovered };
               if (limit !== undefined) params.limit = limit;
