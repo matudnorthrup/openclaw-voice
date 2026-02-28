@@ -56,4 +56,34 @@ describe('Claude session-key header behavior', () => {
     expect(firstHeaders['x-openclaw-session-key']).toBe(sessionKey);
     expect(secondHeaders['x-openclaw-session-key']).toBeUndefined();
   });
+
+  it('strips embedded voice transcript artifacts from assistant payloads', async () => {
+    const contaminated = [
+      'Looks good to me.',
+      '',
+      '[voice-user]',
+      '',
+      'repeat this please',
+      '',
+      '[voice-assistant]',
+      '',
+      'Looks good to me.',
+    ].join('\n');
+
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ choices: [{ message: { content: contaminated } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { getResponse } = await import('../src/services/claude.js');
+    const sessionKey = 'agent:main:discord:channel:112233';
+    const result = await getResponse(sessionKey, 'test sanitize', { history: [] });
+
+    expect(result.response).toBe('Looks good to me.');
+    expect(result.history.at(-1)).toEqual({
+      role: 'assistant',
+      content: 'Looks good to me.',
+    });
+  });
 });

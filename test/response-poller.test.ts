@@ -118,6 +118,24 @@ describe('ResponsePoller', () => {
     expect(queue.item.responseText).toContain('done');
   });
 
+  it('sanitizes assistant contamination containing embedded voice-user transcript', async () => {
+    const queue = new StubQueueState(pendingItem(2_000));
+    const gateway = new StubGatewaySync([
+      {
+        role: 'assistant',
+        content: 'Final answer.\n\n[voice-user]\n\nadd milk\n\n[voice-assistant]\n\nFinal answer.',
+        timestamp: 2_100,
+      },
+    ]);
+    const poller = new ResponsePoller(queue as any, gateway as any);
+
+    await (poller as any).poll();
+    await (poller as any).poll();
+
+    expect(queue.item.status).toBe('ready');
+    expect(queue.item.responseText).toBe('Final answer.');
+  });
+
   it('waits while newer non-assistant activity exists after assistant chunk', async () => {
     const queue = new StubQueueState(pendingItem(2_000));
     const gateway = new StubGatewaySync([

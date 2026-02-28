@@ -1,5 +1,6 @@
 import type { QueueState } from './queue-state.js';
 import type { GatewaySync } from './gateway-sync.js';
+import { sanitizeAssistantResponse } from './assistant-sanitizer.js';
 
 const POLL_INTERVAL_MS = 5_000;
 const STABLE_ASSISTANT_POLLS_REQUIRED = 2;
@@ -82,15 +83,11 @@ export class ResponsePoller {
         const assistants = freshMessages
           .filter((m: any) => m.role === 'assistant')
           .map((m: any) => {
-            const text = this.toText(m.content).trim();
+            const text = sanitizeAssistantResponse(this.toText(m.content));
             return { message: m, text };
           })
           .filter(({ text }) => {
             if (!text) return false;
-            // Skip injected user mirrors ("[voice-user] ..." / "[discord-user] ..."),
-            // which are not assistant replies.
-            if (text.toLowerCase().startsWith('[voice-user]')) return false;
-            if (text.toLowerCase().startsWith('[discord-user]')) return false;
             return true;
           });
 

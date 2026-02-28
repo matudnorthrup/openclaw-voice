@@ -49,4 +49,51 @@ describe('ChannelRouter gateway label mapping', () => {
       { role: 'user', content: 'plain text' },
     ]);
   });
+
+  it('drops gateway metadata wrapper messages from seeded history', () => {
+    const router = makeRouter();
+    const input: ChatMessage[] = [
+      {
+        role: 'user',
+        content: [
+          '[Chat messages since your last reply - for context]',
+          'User: hello',
+          '',
+          '[Current message - respond to this]',
+          'User: now',
+        ].join('\n'),
+      },
+      { role: 'assistant', content: '[voice-assistant]\n\nreal response' },
+    ];
+
+    const result = (router as any).convertOpenClawMessages(input);
+
+    expect(result).toEqual([
+      { role: 'assistant', content: 'real response' },
+    ]);
+  });
+
+  it('sanitizes assistant contamination that embeds [voice-user] transcript blocks', () => {
+    const router = makeRouter();
+    const input: ChatMessage[] = [
+      {
+        role: 'assistant',
+        content: [
+          '[voice-assistant]',
+          '',
+          'This should stay.',
+          '',
+          '[voice-user]',
+          '',
+          'This should be removed.',
+        ].join('\n'),
+      },
+    ];
+
+    const result = (router as any).convertOpenClawMessages(input);
+
+    expect(result).toEqual([
+      { role: 'assistant', content: 'This should stay.' },
+    ]);
+  });
 });
