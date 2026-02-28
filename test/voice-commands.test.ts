@@ -931,6 +931,24 @@ describe('parseVoiceCommand — gated-mode', () => {
   });
 });
 
+describe('parseVoiceCommand — endpoint-mode', () => {
+  it('parses "indicate mode"', () => {
+    expect(parseVoiceCommand('Hey Watson, indicate mode', BOT)).toEqual({ type: 'endpoint-mode', mode: 'indicate' });
+  });
+
+  it('parses "manual end mode"', () => {
+    expect(parseVoiceCommand('Watson, manual end mode', BOT)).toEqual({ type: 'endpoint-mode', mode: 'indicate' });
+  });
+
+  it('parses "set endpointing to silence"', () => {
+    expect(parseVoiceCommand('Hello Watson, set endpointing to silence', BOT)).toEqual({ type: 'endpoint-mode', mode: 'silence' });
+  });
+
+  it('parses "automatic end mode"', () => {
+    expect(parseVoiceCommand('Hey Watson, automatic end mode', BOT)).toEqual({ type: 'endpoint-mode', mode: 'silence' });
+  });
+});
+
 describe('parseVoiceCommand — earcon tour', () => {
   it('parses "earcon tour"', () => {
     expect(parseVoiceCommand('Hey Watson, earcon tour', BOT)).toEqual({ type: 'earcon-tour' });

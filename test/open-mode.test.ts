@@ -37,6 +37,7 @@ vi.mock('../src/discord/audio-receiver.js', () => ({
     start() {}
     stop() {}
     hasActiveSpeech() { return false; }
+    getLastSpeechStartedAt() { return 0; }
     simulateUtterance(userId: string, wav: Buffer, durationMs: number) {
       return this.onUtterance(userId, wav, durationMs);
     }
@@ -80,6 +81,7 @@ vi.mock('../src/services/voice-settings.js', () => ({
   setSilenceDuration: vi.fn(),
   setSpeechThreshold: vi.fn(),
   setGatedMode: vi.fn((enabled: boolean) => { voiceSettings.gated = enabled; }),
+  setEndpointingMode: vi.fn(),
   resolveNoiseLevel: vi.fn(() => 0.01),
   getNoisePresetNames: vi.fn(() => ['low', 'medium', 'high']),
 }));

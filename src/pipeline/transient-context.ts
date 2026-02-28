@@ -38,6 +38,10 @@ export interface TransientContext {
   newPostTimeoutPromptGuardUntil: number;
   dependencyAlertCooldownUntil: Record<'stt' | 'tts', number>;
   idleNotifyInFlight: boolean;
+  indicateCaptureActive: boolean;
+  indicateCaptureSegments: string[];
+  indicateCaptureStartedAt: number;
+  indicateCaptureLastSegmentAt: number;
 }
 
 export function createTransientContext(): TransientContext {
@@ -65,6 +69,10 @@ export function createTransientContext(): TransientContext {
     newPostTimeoutPromptGuardUntil: 0,
     dependencyAlertCooldownUntil: { stt: 0, tts: 0 },
     idleNotifyInFlight: false,
+    indicateCaptureActive: false,
+    indicateCaptureSegments: [],
+    indicateCaptureStartedAt: 0,
+    indicateCaptureLastSegmentAt: 0,
   };
 }
 
@@ -92,4 +100,8 @@ export function resetTransientContext(ctx: TransientContext): void {
   ctx.newPostTimeoutPromptGuardUntil = 0;
   ctx.dependencyAlertCooldownUntil = { stt: 0, tts: 0 };
   ctx.idleNotifyInFlight = false;
+  ctx.indicateCaptureActive = false;
+  ctx.indicateCaptureSegments = [];
+  ctx.indicateCaptureStartedAt = 0;
+  ctx.indicateCaptureLastSegmentAt = 0;
 }

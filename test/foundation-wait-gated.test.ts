@@ -22,6 +22,8 @@ vi.mock('../src/services/claude.js', () => ({
 }));
 
 let ttsStreamImpl: (text: string) => Promise<Buffer>;
+let receiverHasActiveSpeech = false;
+let receiverLastSpeechStartedAt = 0;
 
 vi.mock('../src/services/tts.js', () => ({
   textToSpeechStream: vi.fn(async (text: string) => ttsStreamImpl(text)),
@@ -35,7 +37,10 @@ vi.mock('../src/discord/audio-receiver.js', () => ({
     }
     start() {}
     stop() {}
-    hasActiveSpeech() { return false; }
+    hasActiveSpeech() { return receiverHasActiveSpeech; }
+    getLastSpeechStartedAt() { return receiverLastSpeechStartedAt; }
+    setActiveSpeech(active: boolean) { receiverHasActiveSpeech = active; }
+    setLastSpeechStartedAt(ts: number) { receiverLastSpeechStartedAt = ts; }
     simulateUtterance(userId: string, wav: Buffer, durationMs: number) {
       return this.onUtterance(userId, wav, durationMs);
     }
@@ -75,13 +80,21 @@ vi.mock('../src/audio/earcons.js', () => ({
 }));
 
 // Mock voice settings — start in gated mode
-let voiceSettings = { gated: true, silenceThreshold: 0.01, silenceDuration: 1500 };
+let voiceSettings = {
+  gated: true,
+  silenceThreshold: 0.01,
+  silenceDuration: 1500,
+  endpointingMode: 'silence',
+  indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
+  indicateTimeoutMs: 20000,
+};
 
 vi.mock('../src/services/voice-settings.js', () => ({
   getVoiceSettings: vi.fn(() => voiceSettings),
   setSilenceDuration: vi.fn(),
   setSpeechThreshold: vi.fn(),
   setGatedMode: vi.fn((enabled: boolean) => { voiceSettings.gated = enabled; }),
+  setEndpointingMode: vi.fn(),
   resolveNoiseLevel: vi.fn(() => 0.01),
   getNoisePresetNames: vi.fn(() => ['low', 'medium', 'high']),
 }));
@@ -115,7 +128,17 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     playerCalls.length = 0;
     earconHistory.length = 0;
     playStreamCb = null;
-    voiceSettings = { gated: true, silenceThreshold: 0.01, silenceDuration: 1500 };
+    receiverHasActiveSpeech = false;
+    receiverLastSpeechStartedAt = 0;
+    vi.useRealTimers();
+    voiceSettings = {
+      gated: true,
+      silenceThreshold: 0.01,
+      silenceDuration: 1500,
+      endpointingMode: 'silence',
+      indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
+      indicateTimeoutMs: 20000,
+    };
 
     // Default: STT returns empty, LLM returns simple response, TTS returns buffer
     transcribeImpl = async () => '';
@@ -145,6 +168,45 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     const pipeline = makePipeline();
 
     await simulateUtterance(pipeline, 'user1', 'Hey Watson');
+
+    expect((pipeline as any).ctx.promptGraceUntil).toBeGreaterThan(Date.now());
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(earconHistory).toContain('ready');
+
+    pipeline.stop();
+  });
+
+  it('1.1c — standalone code wake phrase triggers wake check', async () => {
+    const pipeline = makePipeline();
+
+    await simulateUtterance(pipeline, 'user1', 'Whiskey Foxtrot');
+
+    expect((pipeline as any).ctx.promptGraceUntil).toBeGreaterThan(Date.now());
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(earconHistory).toContain('ready');
+
+    pipeline.stop();
+  });
+
+  it('1.1d — spaced variant "Whiskey Fox trot" also triggers wake check', async () => {
+    const pipeline = makePipeline();
+
+    await simulateUtterance(pipeline, 'user1', 'Whiskey Fox trot');
+
+    expect((pipeline as any).ctx.promptGraceUntil).toBeGreaterThan(Date.now());
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(earconHistory).toContain('ready');
+
+    pipeline.stop();
+  });
+
+  it('1.1e — "What is key fox trot" fallback also triggers wake check', async () => {
+    const pipeline = makePipeline();
+
+    await simulateUtterance(pipeline, 'user1', 'What is key fox trot');
 
     expect((pipeline as any).ctx.promptGraceUntil).toBeGreaterThan(Date.now());
     expect(getStateMachineState(pipeline)).toBe('IDLE');
@@ -205,6 +267,185 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     pipeline.stop();
   });
 
+  it('1.3b — indicate mode does not close on bare "done"; closes on wake-prefixed command', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, add milk');
+    expect(prompts).toEqual([]);
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    await simulateUtterance(pipeline, 'user1', 'and eggs');
+    expect(prompts).toEqual([]);
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    await simulateUtterance(pipeline, 'user1', 'done');
+    expect(prompts).toEqual([]);
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    await simulateUtterance(pipeline, 'user1', "Watson, I'm done");
+    expect(prompts).toEqual(['add milk and eggs done']);
+    expect(playerCalls).toContain('playStream');
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.3c — indicate endpoint mode allows wake-only close command', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, add vitamin d to my list');
+    await simulateUtterance(pipeline, 'user1', 'and magnesium glycinate');
+    await simulateUtterance(pipeline, 'user1', 'Watson');
+
+    expect(prompts).toEqual(['add vitamin d to my list and magnesium glycinate']);
+    expect(playerCalls).toContain('playStream');
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.3d — indicate mode can start capture from prompt grace without wake word', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    playerCalls.length = 0;
+    earconHistory.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'add milk to my shopping list');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(prompts).toEqual([]);
+
+    await simulateUtterance(pipeline, 'user1', 'and eggs');
+    expect(prompts).toEqual([]);
+
+    await simulateUtterance(pipeline, 'user1', "Watson, I'm done");
+    expect(prompts).toEqual(['add milk to my shopping list and eggs']);
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(playerCalls).toContain('playStream');
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.3e — indicate mode closes on standalone code phrase without wake prefix', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, add milk');
+    await simulateUtterance(pipeline, 'user1', 'and eggs');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(prompts).toEqual([]);
+
+    await simulateUtterance(pipeline, 'user1', 'whiskey delta');
+    expect(prompts).toEqual(['add milk and eggs']);
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.3f — indicate mode closes on spaced "whiskey fox trot" variant', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, capture this update');
+    await simulateUtterance(pipeline, 'user1', 'with one more segment');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+
+    await simulateUtterance(pipeline, 'user1', 'whiskey fox trot');
+    expect(prompts).toEqual(['capture this update with one more segment']);
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.3g — indicate mode closes on "what is key fox trot" fallback phrase', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, capture this update');
+    await simulateUtterance(pipeline, 'user1', 'with one more segment');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+
+    await simulateUtterance(pipeline, 'user1', 'What is key fox trot');
+    expect(prompts).toEqual(['capture this update with one more segment']);
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.3h — indicate mode suppresses listening cue during capture and plays it on finalize', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    playerCalls.length = 0;
+    earconHistory.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'capture this update');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(earconHistory).not.toContain('listening');
+
+    await simulateUtterance(pipeline, 'user1', 'with one more segment');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(earconHistory).not.toContain('listening');
+
+    await simulateUtterance(pipeline, 'user1', "Watson, I'm done");
+    expect(prompts).toEqual(['capture this update with one more segment']);
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(earconHistory).toContain('listening');
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
   // ── 1.4: Grace period utterance ───────────────────────────────────────
 
   it('1.4 — utterance during prompt grace is processed without wake word', async () => {
@@ -248,6 +489,86 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     expect(getStateMachineState(pipeline)).toBe('IDLE');
 
     pipeline.stop();
+  });
+
+  it('1.5b — gate-closed cue is suppressed when speech starts during holdoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const pipeline = makePipeline();
+      const cueSpy = vi.spyOn(pipeline as any, 'playFastCue').mockResolvedValue(undefined);
+
+      receiverHasActiveSpeech = false;
+      (pipeline as any).onGraceExpired();
+      receiverHasActiveSpeech = true;
+
+      vi.advanceTimersByTime(350);
+      await Promise.resolve();
+
+      expect(cueSpy).not.toHaveBeenCalledWith('gate-closed');
+      pipeline.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('1.5c — gate-closed cue plays when no speech is detected during holdoff', async () => {
+    vi.useFakeTimers();
+    try {
+      const pipeline = makePipeline();
+      const cueSpy = vi.spyOn(pipeline as any, 'playFastCue').mockResolvedValue(undefined);
+
+      receiverHasActiveSpeech = false;
+      (pipeline as any).onGraceExpired();
+
+      vi.advanceTimersByTime(350);
+      await Promise.resolve();
+
+      expect(cueSpy).toHaveBeenCalledWith('gate-closed');
+      pipeline.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('1.5d — gate-closed cue is suppressed when speech started very recently but is no longer active', async () => {
+    vi.useFakeTimers();
+    try {
+      const pipeline = makePipeline();
+      const cueSpy = vi.spyOn(pipeline as any, 'playFastCue').mockResolvedValue(undefined);
+
+      // Simulate recent speech start near grace expiry.
+      receiverHasActiveSpeech = false;
+      receiverLastSpeechStartedAt = Date.now() - 100;
+      (pipeline as any).onGraceExpired();
+
+      vi.advanceTimersByTime(350);
+      await Promise.resolve();
+
+      expect(cueSpy).not.toHaveBeenCalledWith('gate-closed');
+      pipeline.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('1.5e — gate-closed cue still plays when prior speech start is stale', async () => {
+    vi.useFakeTimers();
+    try {
+      const pipeline = makePipeline();
+      const cueSpy = vi.spyOn(pipeline as any, 'playFastCue').mockResolvedValue(undefined);
+
+      receiverHasActiveSpeech = false;
+      receiverLastSpeechStartedAt = Date.now() - 5_000;
+      (pipeline as any).onGraceExpired();
+
+      vi.advanceTimersByTime(350);
+      await Promise.resolve();
+
+      expect(cueSpy).toHaveBeenCalledWith('gate-closed');
+      pipeline.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── 1.9: Pause command ────────────────────────────────────────────────

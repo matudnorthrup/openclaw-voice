@@ -1,6 +1,42 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+function parseAudioProcessingMode(value: string | undefined): 'discord' | 'local' {
+  return value?.toLowerCase() === 'local' ? 'local' : 'discord';
+}
+
+function parseEndpointingMode(value: string | undefined): 'silence' | 'indicate' {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return 'silence';
+  if (normalized === 'indicate' || normalized === 'manual') return 'indicate';
+  return 'silence';
+}
+
+function parseFloatWithFallback(value: string | undefined, fallback: number): number {
+  const parsed = parseFloat(value || '');
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseIntWithFallback(value: string | undefined, fallback: number): number {
+  const parsed = parseInt(value || '', 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseVadFrameSamples(value: string | undefined): 512 | 1024 | 1536 {
+  const parsed = parseInt(value || '512', 10);
+  if (parsed === 512 || parsed === 1024 || parsed === 1536) return parsed;
+  return 512;
+}
+
+function parseCloseWords(value: string | undefined, fallback: string[]): string[] {
+  if (!value) return fallback;
+  const parsed = value
+    .split(',')
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return parsed.length > 0 ? parsed : fallback;
+}
+
 function required(key: string): string {
   const value = process.env[key];
   if (!value) {
@@ -31,6 +67,17 @@ export const config = {
   silenceDurationMs: parseInt(process.env['SILENCE_DURATION_MS'] || '500', 10),
   speechThreshold: parseInt(process.env['SPEECH_THRESHOLD'] || '500', 10),
   minSpeechDurationMs: parseInt(process.env['MIN_SPEECH_DURATION_MS'] || '600', 10),
+  audioProcessing: parseAudioProcessingMode(process.env['AUDIO_PROCESSING']),
+  endpointingMode: parseEndpointingMode(process.env['ENDPOINTING_MODE']),
+  indicateCloseWords: parseCloseWords(
+    process.env['INDICATE_CLOSE_WORDS'],
+    ['over and out', 'over', 'whiskey foxtrot', 'whiskey delta', "i'm done", "i'm finished", 'go ahead'],
+  ),
+  indicateTimeoutMs: parseIntWithFallback(process.env['INDICATE_TIMEOUT_MS'], 20000),
+  vadPositiveSpeechThreshold: parseFloatWithFallback(process.env['VAD_POSITIVE_SPEECH_THRESHOLD'], 0.5),
+  vadNegativeSpeechThreshold: parseFloatWithFallback(process.env['VAD_NEGATIVE_SPEECH_THRESHOLD'], 0.35),
+  vadFrameSamples: parseVadFrameSamples(process.env['VAD_FRAME_SAMPLES']),
+  localStreamIdleMs: parseIntWithFallback(process.env['LOCAL_STREAM_IDLE_MS'], 4000),
   botName: process.env['BOT_NAME'] || 'Assistant',
   logChannelId: process.env['LOG_CHANNEL_ID'] || '',
   utilityChannelId: process.env['UTILITY_CHANNEL_ID'] || '1471563603625775124',

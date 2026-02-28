@@ -37,6 +37,7 @@ vi.mock('../src/discord/audio-receiver.js', () => ({
     start() {}
     stop() {}
     hasActiveSpeech() { return false; }
+    getLastSpeechStartedAt() { return 0; }
     simulateUtterance(userId: string, wav: Buffer, durationMs: number) {
       return this.onUtterance(userId, wav, durationMs);
     }
@@ -73,13 +74,24 @@ vi.mock('../src/audio/earcons.js', () => ({
   initEarcons: vi.fn(),
 }));
 
-let voiceSettings = { gated: true, silenceThreshold: 0.01, silenceDuration: 1500 };
+let voiceSettings = {
+  gated: true,
+  silenceThreshold: 0.01,
+  silenceDuration: 1500,
+  silenceDurationMs: 1500,
+  speechThreshold: 500,
+  minSpeechDurationMs: 300,
+  endpointingMode: 'silence',
+  indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
+  indicateTimeoutMs: 20000,
+};
 
 vi.mock('../src/services/voice-settings.js', () => ({
   getVoiceSettings: vi.fn(() => voiceSettings),
   setSilenceDuration: vi.fn(),
   setSpeechThreshold: vi.fn(),
   setGatedMode: vi.fn((enabled: boolean) => { voiceSettings.gated = enabled; }),
+  setEndpointingMode: vi.fn((mode: 'silence' | 'indicate') => { voiceSettings.endpointingMode = mode; }),
   resolveNoiseLevel: vi.fn(() => 0.01),
   getNoisePresetNames: vi.fn(() => ['low', 'medium', 'high']),
 }));
@@ -180,7 +192,17 @@ describe('Layer 3: Queue Mode Flow', () => {
     vi.clearAllMocks();
     earconHistory.length = 0;
     playerCalls.length = 0;
-    voiceSettings = { gated: true, silenceThreshold: 0.01, silenceDuration: 1500 };
+    voiceSettings = {
+      gated: true,
+      silenceThreshold: 0.01,
+      silenceDuration: 1500,
+      silenceDurationMs: 1500,
+      speechThreshold: 500,
+      minSpeechDurationMs: 300,
+      endpointingMode: 'silence',
+      indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
+      indicateTimeoutMs: 20000,
+    };
     transcribeImpl = async () => '';
     getResponseImpl = async () => ({ response: 'LLM response.', history: [] });
     ttsStreamImpl = async () => Buffer.from('tts-audio');
@@ -233,6 +255,32 @@ describe('Layer 3: Queue Mode Flow', () => {
     expect(playerCalls.filter((c) => c === 'playStream').length).toBeGreaterThanOrEqual(2);
     // Should have played ready earcon
     expect(earconHistory).toContain('ready');
+    expect(getState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('3.2b — indicate mode in queue captures across grace and enqueues on wake close', async () => {
+    const { pipeline, qs } = makePipeline('queue');
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+
+    await simulateUtterance(pipeline, 'user1', 'add milk to my list');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(qs.enqueue).not.toHaveBeenCalled();
+
+    await simulateUtterance(pipeline, 'user1', 'and eggs');
+    expect(qs.enqueue).not.toHaveBeenCalled();
+
+    await simulateUtterance(pipeline, 'user1', "Watson, I'm done");
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(qs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'walmart',
+        userMessage: 'add milk to my list and eggs',
+      }),
+    );
     expect(getState(pipeline)).toBe('IDLE');
 
     pipeline.stop();

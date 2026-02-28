@@ -1,4 +1,5 @@
 import type { VoiceMode } from './queue-state.js';
+import type { EndpointingMode } from './voice-settings.js';
 
 export type VoiceCommand =
   | { type: 'switch'; channel: string }
@@ -18,6 +19,7 @@ export type VoiceCommand =
   | { type: 'voice-status' }
   | { type: 'voice-channel' }
   | { type: 'gated-mode'; enabled: boolean }
+  | { type: 'endpoint-mode'; mode: EndpointingMode }
   | { type: 'wake-check' }
   | { type: 'silent-wait' }
   | { type: 'hear-full-message' }
@@ -233,6 +235,24 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
   }
   if (/^(?:open\s+mode|gate\s+off|ungated\s+mode)$/.test(rest)) {
     return { type: 'gated-mode', enabled: false };
+  }
+
+  // Endpointing mode controls:
+  // - indicate/manual end mode
+  // - silence/auto end mode
+  if (
+    /^(?:indicate|manual(?:\s+end)?)\s+mode$/.test(rest)
+    || /^(?:set|switch\s+to)\s+(?:indicate|manual(?:\s+end)?)\s+mode$/.test(rest)
+    || /^(?:set|switch\s+to|use|enable)\s+(?:endpoint(?:ing)?|end(?:\s+of\s+speech)?)(?:\s+(?:mode|style))?(?:\s+to)?\s+(?:indicate|manual(?:\s+end)?)(?:\s+mode)?$/.test(rest)
+  ) {
+    return { type: 'endpoint-mode', mode: 'indicate' };
+  }
+  if (
+    /^(?:silence|auto(?:matic)?(?:\s+end)?)\s+mode$/.test(rest)
+    || /^(?:set|switch\s+to)\s+(?:silence|auto(?:matic)?(?:\s+end)?)\s+mode$/.test(rest)
+    || /^(?:set|switch\s+to|use|enable)\s+(?:endpoint(?:ing)?|end(?:\s+of\s+speech)?)(?:\s+(?:mode|style))?(?:\s+to)?\s+(?:silence|auto(?:matic)?(?:\s+end)?)(?:\s+mode)?$/.test(rest)
+  ) {
+    return { type: 'endpoint-mode', mode: 'silence' };
   }
 
   // "inbox list", "what do I have", "check inbox", "what's new", "inbox"

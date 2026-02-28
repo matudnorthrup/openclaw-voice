@@ -1,8 +1,20 @@
+export type AudioProcessingMode = 'discord' | 'local';
+export type EndpointingMode = 'silence' | 'indicate';
+export type VadFrameSamples = 512 | 1024 | 1536;
+
 export interface VoiceSettingsValues {
   silenceDurationMs: number;
   speechThreshold: number;
   minSpeechDurationMs: number;
   gated: boolean;
+  audioProcessing: AudioProcessingMode;
+  endpointingMode: EndpointingMode;
+  indicateCloseWords: string[];
+  indicateTimeoutMs: number;
+  vadPositiveSpeechThreshold: number;
+  vadNegativeSpeechThreshold: number;
+  vadFrameSamples: VadFrameSamples;
+  localStreamIdleMs: number;
 }
 
 const NOISE_PRESETS: Record<string, number> = {
@@ -16,6 +28,14 @@ const settings: VoiceSettingsValues = {
   speechThreshold: 500,
   minSpeechDurationMs: 600,
   gated: true,
+  audioProcessing: 'discord',
+  endpointingMode: 'silence',
+  indicateCloseWords: ['over and out', 'over', 'whiskey foxtrot', 'whiskey delta', "i'm done", "i'm finished", 'go ahead'],
+  indicateTimeoutMs: 20000,
+  vadPositiveSpeechThreshold: 0.5,
+  vadNegativeSpeechThreshold: 0.35,
+  vadFrameSamples: 512,
+  localStreamIdleMs: 4000,
 };
 
 let initialized = false;
@@ -24,6 +44,15 @@ export function initVoiceSettings(values: Partial<VoiceSettingsValues>): void {
   if (values.silenceDurationMs !== undefined) settings.silenceDurationMs = values.silenceDurationMs;
   if (values.speechThreshold !== undefined) settings.speechThreshold = values.speechThreshold;
   if (values.minSpeechDurationMs !== undefined) settings.minSpeechDurationMs = values.minSpeechDurationMs;
+  if (values.gated !== undefined) settings.gated = values.gated;
+  if (values.audioProcessing !== undefined) settings.audioProcessing = values.audioProcessing;
+  if (values.endpointingMode !== undefined) settings.endpointingMode = values.endpointingMode;
+  if (values.indicateCloseWords !== undefined) settings.indicateCloseWords = values.indicateCloseWords;
+  if (values.indicateTimeoutMs !== undefined) settings.indicateTimeoutMs = values.indicateTimeoutMs;
+  if (values.vadPositiveSpeechThreshold !== undefined) settings.vadPositiveSpeechThreshold = values.vadPositiveSpeechThreshold;
+  if (values.vadNegativeSpeechThreshold !== undefined) settings.vadNegativeSpeechThreshold = values.vadNegativeSpeechThreshold;
+  if (values.vadFrameSamples !== undefined) settings.vadFrameSamples = values.vadFrameSamples;
+  if (values.localStreamIdleMs !== undefined) settings.localStreamIdleMs = values.localStreamIdleMs;
   initialized = true;
 }
 
@@ -45,6 +74,37 @@ export function setMinSpeechDuration(ms: number): void {
 
 export function setGatedMode(on: boolean): void {
   settings.gated = on;
+}
+
+export function setAudioProcessingMode(mode: AudioProcessingMode): void {
+  settings.audioProcessing = mode;
+}
+
+export function setEndpointingMode(mode: EndpointingMode): void {
+  settings.endpointingMode = mode;
+}
+
+export function setIndicateCloseWords(words: string[]): void {
+  settings.indicateCloseWords = words
+    .map((word) => word.trim())
+    .filter((word) => word.length > 0);
+}
+
+export function setIndicateTimeoutMs(ms: number): void {
+  settings.indicateTimeoutMs = Math.max(1000, ms);
+}
+
+export function setLocalVadThresholds(positive: number, negative: number): void {
+  settings.vadPositiveSpeechThreshold = positive;
+  settings.vadNegativeSpeechThreshold = negative;
+}
+
+export function setLocalVadFrameSamples(samples: VadFrameSamples): void {
+  settings.vadFrameSamples = samples;
+}
+
+export function setLocalStreamIdleMs(ms: number): void {
+  settings.localStreamIdleMs = ms;
 }
 
 export function resolveNoiseLevel(input: string): { threshold: number; label: string } | null {

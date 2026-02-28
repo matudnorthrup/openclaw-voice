@@ -27,6 +27,7 @@ vi.mock('../src/discord/audio-receiver.js', () => ({
     start() {}
     stop() {}
     hasActiveSpeech() { return false; }
+    getLastSpeechStartedAt() { return 0; }
   },
 }));
 

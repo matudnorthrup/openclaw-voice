@@ -94,6 +94,34 @@ Key files:
 - Script path: `src/testing/repair-thread-session.ts`
 - Purpose: preflight coverage/missing, apply backfill, then verify in one command.
 
+### 2026-02-28 — Incident: "General channel user-message replay"
+- **Discord thread/channel ID:** `1469108546351140896` (`#general`)
+- **Detection signal:**
+  - User report: "my message is captured, then assistant message, then my message again"
+  - Discord evidence: message `1477393401522421984` contains assistant text plus embedded `[voice-user]` and `[voice-assistant]` blocks in a single assistant post
+- **Runtime evidence gathered:**
+  - `watson-voice` logs for queue item `7f887d35-e460-4478-bf97-855ed48ba11a` show one `voice-user` inject and one `voice-assistant` inject (each mirrored to siblings)
+  - canonical gateway history includes assistant messages with embedded transcript markers, including `[voice-user]` not at message start
+  - `npm run -s session:health -- --channel=1469108546351140896 --history-limit=300`:
+    - `canonicalCoverage=1.00 status=OK` (split still present; coverage not missing)
+  - `npm run -s session:backfill -- --dry-run --channel=1469108546351140896 --history-limit=500 --max-per-channel=300`:
+    - `missing=0 applying=0`
+- **Root cause hypothesis (updated):**
+  - This incident is not primarily a "missing mirror/backfill" problem.
+  - Assistant payload contamination is leaking into user-facing output:
+    - `src/services/claude.ts` strips only `[Current message - respond to this]` tails.
+    - It does not sanitize assistant responses that include embedded `[voice-user]` / `[voice-assistant]` transcript blocks.
+    - `src/pipeline/voice-pipeline.ts` logs the returned assistant text directly to Discord, so contaminated payloads are posted verbatim.
+  - `src/services/channel-router.ts` currently keeps unlabeled gateway `user`/`assistant` history entries as-is, including metadata wrappers like `[Chat messages since your last reply - for context]`, which can further pollute subsequent prompts.
+- **Relationship to earlier split-family RCA:**
+  - Prior delivered-key mirror exclusion fix still appears valid.
+  - Session split remains active (family depth up to 4+ in general), which increases complexity/noise but did not explain this specific replay symptom by itself.
+- **Follow-up tasks:**
+  - Add stricter assistant-output sanitizer in `claude.ts` for transcript/label artifacts.
+  - Add a defensive pre-log sanitizer in `voice-pipeline.ts` before Discord/TTS output.
+  - Filter metadata wrapper turns during OpenClaw history seed in `channel-router.ts`.
+  - Add regression tests for assistant payloads containing embedded `[voice-user]` blocks.
+
 ## Current Runbook
 
 1. Detect split/coverage issues:
@@ -118,6 +146,8 @@ Key files:
   - `session_health_snapshots`
   - `session_family_members`
   - `session_repair_events`
+- Add alerting/snapshot query for assistant payload contamination markers:
+  - `\[voice-user\]` or `\[chat messages since your last reply` appearing inside assistant message bodies
 - Investigate occasional gateway write failure observed in logs:
   - `RPC error UNAVAILABLE: failed to write transcript: transcript file not found`
   - This may be a separate gateway-side persistence issue that can trigger fresh drift.

@@ -39,6 +39,7 @@ vi.mock('../src/discord/audio-receiver.js', () => ({
     start() {}
     stop() {}
     hasActiveSpeech() { return false; }
+    getLastSpeechStartedAt() { return 0; }
     simulateUtterance(userId: string, wav: Buffer, durationMs: number) {
       return this.onUtterance(userId, wav, durationMs);
     }
@@ -75,13 +76,24 @@ vi.mock('../src/audio/earcons.js', () => ({
   initEarcons: vi.fn(),
 }));
 
-let voiceSettings = { gated: true, silenceThreshold: 0.01, silenceDuration: 1500 };
+let voiceSettings = {
+  gated: true,
+  silenceThreshold: 0.01,
+  silenceDuration: 1500,
+  silenceDurationMs: 1500,
+  speechThreshold: 500,
+  minSpeechDurationMs: 300,
+  endpointingMode: 'silence',
+  indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
+  indicateTimeoutMs: 20000,
+};
 
 vi.mock('../src/services/voice-settings.js', () => ({
   getVoiceSettings: vi.fn(() => voiceSettings),
   setSilenceDuration: vi.fn(),
   setSpeechThreshold: vi.fn(),
   setGatedMode: vi.fn((enabled: boolean) => { voiceSettings.gated = enabled; }),
+  setEndpointingMode: vi.fn((mode: 'silence' | 'indicate') => { voiceSettings.endpointingMode = mode; }),
   resolveNoiseLevel: vi.fn(() => 0.01),
   getNoisePresetNames: vi.fn(() => ['low', 'medium', 'high']),
 }));
@@ -185,7 +197,17 @@ describe('Layer 4: Ask Mode Flow', () => {
     vi.clearAllMocks();
     earconHistory.length = 0;
     playerCalls.length = 0;
-    voiceSettings = { gated: true, silenceThreshold: 0.01, silenceDuration: 1500 };
+    voiceSettings = {
+      gated: true,
+      silenceThreshold: 0.01,
+      silenceDuration: 1500,
+      silenceDurationMs: 1500,
+      speechThreshold: 500,
+      minSpeechDurationMs: 300,
+      endpointingMode: 'silence',
+      indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
+      indicateTimeoutMs: 20000,
+    };
     transcribeImpl = async () => '';
     getResponseImpl = async () => ({ response: 'LLM response.', history: [] });
     ttsStreamImpl = async () => Buffer.from('tts-audio');
@@ -220,6 +242,34 @@ describe('Layer 4: Ask Mode Flow', () => {
     expect(earconHistory).toContain('acknowledged');
     expect(playerCalls).toContain('playStream'); // speaks "Queued to Walmart."
     expect(getState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('4.1b — indicate mode in ask captures across grace and enters choice on wake close', async () => {
+    const { pipeline, qs } = makePipeline('ask');
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'Watson, voice status');
+    await simulateUtterance(pipeline, 'draft my weekly plan');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(qs.enqueue).not.toHaveBeenCalled();
+    expect(getState(pipeline)).toBe('IDLE');
+
+    await simulateUtterance(pipeline, 'with focus blocks and walking');
+    expect(qs.enqueue).not.toHaveBeenCalled();
+
+    await simulateUtterance(pipeline, "Watson, I'm done");
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(qs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'walmart',
+        userMessage: 'draft my weekly plan with focus blocks and walking',
+      }),
+    );
+    expect(getState(pipeline)).toBe('AWAITING_QUEUE_CHOICE');
 
     pipeline.stop();
   });

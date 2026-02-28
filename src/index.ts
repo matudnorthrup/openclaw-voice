@@ -5,7 +5,7 @@ import { VoicePipeline } from './pipeline/voice-pipeline.js';
 import { clearConversation } from './services/claude.js';
 import { ChannelRouter } from './services/channel-router.js';
 import { GatewaySync } from './services/gateway-sync.js';
-import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, setGatedMode, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
+import { initVoiceSettings, getVoiceSettings, setSilenceDuration, setSpeechThreshold, setMinSpeechDuration, setGatedMode, setEndpointingMode, resolveNoiseLevel, getNoisePresetNames } from './services/voice-settings.js';
 import { getTtsBackend, setTtsBackend, getAvailableTtsBackends } from './services/tts.js';
 import { QueueState, type VoiceMode } from './services/queue-state.js';
 import { ResponsePoller } from './services/response-poller.js';
@@ -21,6 +21,14 @@ initVoiceSettings({
   silenceDurationMs: config.silenceDurationMs,
   speechThreshold: config.speechThreshold,
   minSpeechDurationMs: config.minSpeechDurationMs,
+  audioProcessing: config.audioProcessing,
+  endpointingMode: config.endpointingMode,
+  indicateCloseWords: config.indicateCloseWords,
+  indicateTimeoutMs: config.indicateTimeoutMs,
+  vadPositiveSpeechThreshold: config.vadPositiveSpeechThreshold,
+  vadNegativeSpeechThreshold: config.vadNegativeSpeechThreshold,
+  vadFrameSamples: config.vadFrameSamples,
+  localStreamIdleMs: config.localStreamIdleMs,
 });
 
 const client = createClient();
@@ -102,6 +110,8 @@ client.on('messageCreate', async (message) => {
     await message.reply(
       `**Voice settings:**\n` +
       `  Voice mode: **${modeLabel}**\n` +
+      `  Audio processing: **${s.audioProcessing}**\n` +
+      `  Endpointing: **${s.endpointingMode}**\n` +
       `  Silence delay: **${s.silenceDurationMs}ms**\n` +
       `  Noise threshold: **${s.speechThreshold}** (higher = ignores more noise)\n` +
       `  Min speech duration: **${s.minSpeechDurationMs}ms**`,
@@ -686,6 +696,14 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
     .addFields(
       { name: `Voice Mode — ${modeLabel}`, value: '**Wait:** respond immediately. **Inbox:** queue responses for review. **Ask:** confirm before processing.', inline: false },
       { name: `Gated — ${s.gated ? 'ON' : 'OFF'}  ·  TTS — ${ttsLabel[ttsBackend] ?? ttsBackend}`, value: 'Gated requires wake word for each utterance. TTS selects the speech engine.', inline: false },
+      { name: `Audio Processing — ${s.audioProcessing}`, value: s.audioProcessing === 'local' ? 'Manual stream control + local Silero VAD endpointing.' : 'Discord speaking endpointing + RMS post-filter.', inline: false },
+      {
+        name: `Endpointing — ${s.endpointingMode}`,
+        value: s.endpointingMode === 'indicate'
+          ? `Manual close command mode (${s.indicateCloseWords.map((c) => `${config.botName}, ${c}`).join(' · ')} · or just ${config.botName}).`
+          : 'Process each VAD segment after silence endpointing.',
+        inline: false,
+      },
       { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech.', inline: false },
       { name: `Silence Delay — ${s.silenceDurationMs}ms  ·  Min Speech — ${s.minSpeechDurationMs}ms`, value: 'Silence delay: pause before processing. Min speech: shortest accepted utterance.', inline: false },
     );
@@ -736,6 +754,10 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
   const availableTts = getAvailableTtsBackends();
   const toggleRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
+      .setCustomId('endpoint-toggle')
+      .setLabel(s.endpointingMode === 'indicate' ? '🖐️ End: Manual' : '⏱️ End: Silence')
+      .setStyle(s.endpointingMode === 'indicate' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+    new ButtonBuilder()
       .setCustomId('gated-toggle')
       .setLabel(s.gated ? '🔒 Gated: ON' : '🔓 Gated: OFF')
       .setStyle(s.gated ? ButtonStyle.Success : ButtonStyle.Secondary),
@@ -772,6 +794,13 @@ client.on('interactionCreate', async (interaction) => {
   if (interaction.isButton() && interaction.customId === 'gated-toggle') {
     const s = getVoiceSettings();
     setGatedMode(!s.gated);
+    await interaction.update(buildSettingsPanel());
+    return;
+  }
+
+  if (interaction.isButton() && interaction.customId === 'endpoint-toggle') {
+    const s = getVoiceSettings();
+    setEndpointingMode(s.endpointingMode === 'indicate' ? 'silence' : 'indicate');
     await interaction.update(buildSettingsPanel());
     return;
   }

@@ -5,6 +5,7 @@ import { WATSON_SYSTEM_PROMPT } from '../prompts/watson-system.js';
 import { config } from '../config.js';
 import type { Message } from './claude.js';
 import { GatewaySync, type ChatMessage } from './gateway-sync.js';
+import { isGatewayMetadataWrapper, sanitizeAssistantResponse } from './assistant-sanitizer.js';
 
 const SENDABLE_TYPES = new Set([
   ChannelType.GuildText,
@@ -433,24 +434,26 @@ export class ChannelRouter {
       if (msg.role === 'system') continue;
 
       const rawContent = this.extractTextContent(msg.content);
-      const content = this.normalizeDiscordMessageContent(rawContent);
-      if (!content) continue;
+      if (!rawContent) continue;
+      if (isGatewayMetadataWrapper(rawContent)) continue;
 
       const label = this.extractMessageLabel(msg, rawContent);
       const mappedRole = this.mapLabelToRole(label);
-      if (mappedRole === 'user') {
-        messages.push({ role: 'user', content });
-        continue;
-      }
-      if (mappedRole === 'assistant') {
-        messages.push({ role: 'assistant', content });
-        continue;
+      const role: 'user' | 'assistant' | null = mappedRole
+        ?? (msg.role === 'user' || msg.role === 'assistant' ? msg.role : null);
+      if (!role) continue;
+
+      let content = this.normalizeDiscordMessageContent(rawContent);
+      if (!content) continue;
+
+      // Defensive cleanup for assistant contamination like:
+      // "answer ... [voice-user] transcript ... [voice-assistant] answer"
+      if (role === 'assistant') {
+        content = sanitizeAssistantResponse(content);
+        if (!content) continue;
       }
 
-      // Keep user and assistant messages as-is
-      if (msg.role === 'user' || msg.role === 'assistant') {
-        messages.push({ role: msg.role, content });
-      }
+      messages.push({ role, content });
     }
     return messages;
   }
