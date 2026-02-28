@@ -27,6 +27,7 @@ export interface TransientContext {
   // Grace periods
   gateGraceUntil: number;
   promptGraceUntil: number;
+  followupPromptGraceUntil: number;
 
   // Cooldowns / flags
   rejectRepromptInFlight: boolean;
@@ -55,6 +56,7 @@ export function createTransientContext(): TransientContext {
     deferredWaitResponseText: null,
     gateGraceUntil: 0,
     promptGraceUntil: 0,
+    followupPromptGraceUntil: 0,
     rejectRepromptInFlight: false,
     rejectRepromptCooldownUntil: 0,
     ignoreProcessingUtterancesUntil: 0,
@@ -81,6 +83,7 @@ export function resetTransientContext(ctx: TransientContext): void {
   ctx.deferredWaitResponseText = null;
   ctx.gateGraceUntil = 0;
   ctx.promptGraceUntil = 0;
+  ctx.followupPromptGraceUntil = 0;
   ctx.rejectRepromptInFlight = false;
   ctx.rejectRepromptCooldownUntil = 0;
   ctx.ignoreProcessingUtterancesUntil = 0;

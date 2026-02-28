@@ -138,7 +138,7 @@ async function run(): Promise<void> {
 
       const allMessages = new Map<string, (ChatMessage & { timestamp?: number })[]>();
       for (const key of family) {
-        const result = await gateway.getHistory(key, historyLimit);
+        const result = await gateway.getHistoryExact(key, historyLimit);
         const base = (result?.messages ?? []) as (ChatMessage & { timestamp?: number })[];
 
         if (useArchive) {
@@ -187,7 +187,6 @@ async function run(): Promise<void> {
       if (dryRun || missingCapped.length === 0) continue;
 
       for (const entry of missingCapped) {
-        const beforeResolved = gateway.getResolvedSessionKey(targetKey);
         const injected = await gateway.inject(targetKey, entry.text, entry.label);
         if (!injected) {
           failedInjects++;
@@ -197,12 +196,11 @@ async function run(): Promise<void> {
         injectedCanonical++;
         canonicalSignatures.add(entry.signature);
 
-        const afterResolved = gateway.getResolvedSessionKey(targetKey);
         mirroredTotal += await gateway.mirrorInjectToSessionFamily(
           targetKey,
           entry.text,
           entry.label,
-          { excludeSessionKeys: [targetKey, beforeResolved, afterResolved] },
+          { excludeSessionKeys: [injected.sessionKey] },
         );
       }
     }

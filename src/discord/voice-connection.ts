@@ -6,6 +6,9 @@ import {
 } from '@discordjs/voice';
 
 let currentConnection: VoiceConnection | null = null;
+const VOICE_JOIN_TIMEOUT_MS = 30_000;
+const VOICE_JOIN_MAX_ATTEMPTS = 3;
+const VOICE_JOIN_RETRY_BASE_MS = 1_500;
 
 /**
  * Monkey-patch the DAVE session to keep passthrough mode permanently enabled.
@@ -40,24 +43,45 @@ export async function joinChannel(
   guildId: string,
   adapterCreator: any,
 ): Promise<VoiceConnection> {
-  const connection = joinVoiceChannel({
-    channelId,
-    guildId,
-    adapterCreator,
-    selfDeaf: false,  // Critical: must be false to receive audio
-    selfMute: false,
-  });
+  let lastError: unknown = null;
 
-  try {
-    await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-    console.log('Voice connection ready');
-    enableDavePassthrough(connection);
-    currentConnection = connection;
-    return connection;
-  } catch (error) {
-    connection.destroy();
-    throw new Error(`Failed to join voice channel within 30s: ${error}`);
+  for (let attempt = 1; attempt <= VOICE_JOIN_MAX_ATTEMPTS; attempt++) {
+    const connection = joinVoiceChannel({
+      channelId,
+      guildId,
+      adapterCreator,
+      selfDeaf: false,  // Critical: must be false to receive audio
+      selfMute: false,
+    });
+
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, VOICE_JOIN_TIMEOUT_MS);
+      console.log('Voice connection ready');
+      enableDavePassthrough(connection);
+      currentConnection = connection;
+      return connection;
+    } catch (error) {
+      lastError = error;
+      connection.destroy();
+
+      const message = String((error as Error)?.message ?? error ?? 'unknown error');
+      const transient =
+        message.includes('Cannot perform IP discovery') ||
+        message.includes('socket closed');
+      const hasRetry = attempt < VOICE_JOIN_MAX_ATTEMPTS;
+
+      if (transient && hasRetry) {
+        const delay = VOICE_JOIN_RETRY_BASE_MS * attempt;
+        console.warn(`Voice join failed (attempt ${attempt}/${VOICE_JOIN_MAX_ATTEMPTS}): ${message}. Retrying in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+
+      break;
+    }
   }
+
+  throw new Error(`Failed to join voice channel within ${Math.floor(VOICE_JOIN_TIMEOUT_MS / 1000)}s: ${lastError}`);
 }
 
 export function leaveChannel(): void {

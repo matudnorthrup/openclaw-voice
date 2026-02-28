@@ -22,7 +22,11 @@
     "e2e:live": "npm run build --silent && node dist/testing/e2e-live-report.js",
     "e2e:voice-loop": "npm run build --silent && node dist/testing/e2e-voice-loop-report.js",
     "session:backfill": "tsx src/testing/backfill-session-splits.ts",
-    "session:health": "tsx src/testing/check-session-split-health.ts"
+    "session:health": "tsx src/testing/check-session-split-health.ts",
+    "session:health:atlas": "tsx src/testing/session-health-atlas.ts",
+    "session:auto-repair": "tsx src/testing/auto-repair-session-splits.ts",
+    "session:repair-thread": "tsx src/testing/repair-thread-session.ts",
+    "session:hygiene:weekly": "npm run -s session:health:atlas && npm run -s session:auto-repair -- --dry-run --max-channels=20"
   },
   "keywords": [],
   "author": "",

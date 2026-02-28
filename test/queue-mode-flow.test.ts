@@ -3,7 +3,7 @@
  *
  * Verifies the async queue mode flow: enqueue → notify → read.
  * Tests mode switching, queue prompt dispatch, idle notifications,
- * and queue prompt suppression.
+ * and queue prompt handling during grace windows.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -128,6 +128,8 @@ function makeRouter(channelName = 'walmart', displayName = 'Walmart') {
     listChannels: vi.fn(() => [{ name: channelName, displayName }]),
     getLogChannel: vi.fn(async () => null),
     getLogChannelFor: vi.fn(async () => null),
+    getLastMessage: vi.fn(() => null),
+    getLastMessageFresh: vi.fn(async () => null),
     getAllChannelSessionKeys: vi.fn(() => []),
     findForumChannel: vi.fn(() => null),
     listForumChannels: vi.fn(() => []),
@@ -155,10 +157,15 @@ function makePipeline(mode: 'wait' | 'queue' | 'ask' = 'queue') {
   return { pipeline, qs, router, poller };
 }
 
-async function simulateUtterance(pipeline: VoicePipeline, userId: string, transcript: string) {
+async function simulateUtterance(
+  pipeline: VoicePipeline,
+  userId: string,
+  transcript: string,
+  durationMs = 500,
+) {
   transcribeImpl = async () => transcript;
   const receiver = (pipeline as any).receiver;
-  await receiver.simulateUtterance(userId, Buffer.from('fake-audio'), 500);
+  await receiver.simulateUtterance(userId, Buffer.from('fake-audio'), durationMs);
   await new Promise((r) => setTimeout(r, 10));
 }
 
@@ -250,9 +257,9 @@ describe('Layer 3: Queue Mode Flow', () => {
     pipeline.stop();
   });
 
-  // ── 3.6: Queue prompt suppression ─────────────────────────────────────
+  // ── 3.6: Queue prompt during grace ────────────────────────────────────
 
-  it('3.6 — utterance in queue mode during grace without wake word is suppressed', async () => {
+  it('3.6 — utterance in queue mode during grace without wake word is enqueued', async () => {
     const { pipeline, qs } = makePipeline('queue');
 
     // First: wake check to open grace window
@@ -261,12 +268,143 @@ describe('Layer 3: Queue Mode Flow', () => {
     earconHistory.length = 0;
     playerCalls.length = 0;
 
-    // Now speak without wake word during grace in queue mode — should be suppressed
+    // Now speak without wake word during grace in queue mode — should enqueue
     await simulateUtterance(pipeline, 'user1', 'add milk to my list');
 
-    // Should NOT have enqueued (prompt suppressed)
-    expect(qs.enqueue.mock.calls.length).toBe(enqueueBefore);
+    expect(qs.enqueue.mock.calls.length).toBe(enqueueBefore + 1);
+    expect(qs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'walmart',
+        userMessage: 'add milk to my list',
+      }),
+    );
     expect(getState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('3.7 — queue mode accepts immediate follow-up prompt after read-last-message', async () => {
+    const { pipeline, qs, router } = makePipeline('queue');
+    router.getLastMessageFresh.mockResolvedValue({
+      role: 'assistant',
+      content: 'Sleep score was down last night. Hydration looked good.',
+    });
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, read the last message');
+
+    const enqueueBefore = qs.enqueue.mock.calls.length;
+    await simulateUtterance(
+      pipeline,
+      'user1',
+      'compare that with the week average and tell me if there is any risk',
+    );
+
+    expect(qs.enqueue.mock.calls.length).toBe(enqueueBefore + 1);
+    expect(qs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'walmart',
+        userMessage: 'compare that with the week average and tell me if there is any risk',
+      }),
+    );
+
+    pipeline.stop();
+  });
+
+  it('3.8 — read-last-message follow-up grace starts after ready cue', async () => {
+    const { pipeline, router } = makePipeline('queue');
+    router.getLastMessageFresh.mockResolvedValue({
+      role: 'assistant',
+      content: 'Long message body for readback.',
+    });
+
+    const order: string[] = [];
+    const originalPlayReadyEarcon = (pipeline as any).playReadyEarcon.bind(pipeline);
+    const originalAllowFollowupPromptGrace = (pipeline as any).allowFollowupPromptGrace.bind(pipeline);
+
+    (pipeline as any).playReadyEarcon = vi.fn(async () => {
+      order.push('ready:start');
+      await originalPlayReadyEarcon();
+      order.push('ready:end');
+    });
+    (pipeline as any).allowFollowupPromptGrace = vi.fn((ms: number) => {
+      order.push('followup:set');
+      return originalAllowFollowupPromptGrace(ms);
+    });
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, read the last message');
+
+    expect(order).toContain('ready:end');
+    expect(order).toContain('followup:set');
+    expect(order.indexOf('followup:set')).toBeGreaterThan(order.indexOf('ready:end'));
+
+    pipeline.stop();
+  });
+
+  it('3.9 — long follow-up utterance is accepted when it starts inside follow-up grace', async () => {
+    const { pipeline, qs, router } = makePipeline('queue');
+    router.getLastMessageFresh.mockResolvedValue({
+      role: 'assistant',
+      content: 'Long message body for readback.',
+    });
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, read the last message');
+    const enqueueBefore = qs.enqueue.mock.calls.length;
+
+    // Simulate tail-end capture: grace timestamp is slightly in the past at
+    // capture time, but the utterance start (capture minus duration) is still
+    // within the grace+tolerance window.
+    const now = Date.now();
+    (pipeline as any).ctx.followupPromptGraceUntil = now - 200;
+    (pipeline as any).ctx.gateGraceUntil = now + 2000;
+
+    await simulateUtterance(
+      pipeline,
+      'user1',
+      'what did my calorie deficit end up looking like with actual numbers',
+      1200,
+    );
+
+    expect(qs.enqueue.mock.calls.length).toBe(enqueueBefore + 1);
+    expect(qs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'walmart',
+      }),
+    );
+
+    pipeline.stop();
+  });
+
+  it('3.10 — channel switch handoff allows one immediate follow-up prompt', async () => {
+    const { pipeline, qs } = makePipeline('queue');
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, switch to walmart');
+    const enqueueBefore = qs.enqueue.mock.calls.length;
+
+    await simulateUtterance(
+      pipeline,
+      'user1',
+      'what did my calorie deficit end up looking like with actual numbers',
+      1400,
+    );
+
+    expect(qs.enqueue.mock.calls.length).toBe(enqueueBefore + 1);
+    expect(qs.enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: 'walmart',
+      }),
+    );
+
+    pipeline.stop();
+  });
+
+  it('3.11 — bare "scratch to" switch is treated as a switch command', async () => {
+    const { pipeline, router, qs } = makePipeline('queue');
+
+    await simulateUtterance(pipeline, 'user1', 'Watson');
+    await simulateUtterance(pipeline, 'user1', 'scratch to walmart');
+
+    expect(router.switchTo).toHaveBeenCalledWith('walmart');
+    expect(qs.enqueue).not.toHaveBeenCalled();
 
     pipeline.stop();
   });

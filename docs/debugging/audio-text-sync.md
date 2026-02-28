@@ -105,11 +105,19 @@ Key files:
    - `npm run -s session:health -- --channel=<id>`
 4. Ensure runtime is healthy:
    - Run bot in tmux with Node 22 command above.
+5. Persist observability snapshots to Atlas:
+   - `npm run -s session:health:atlas`
+6. Dry-run auto-repair candidate selection:
+   - `npm run -s session:auto-repair -- --dry-run`
 
 ## Open Questions / Follow-up
 
 - Add scheduled health check + alerting on `session:health` non-zero exit.
 - Consider auto-heal hook when split warning (`Gateway session split detected ...`) appears repeatedly for a channel.
+- Atlas observability now available via:
+  - `session_health_snapshots`
+  - `session_family_members`
+  - `session_repair_events`
 - Investigate occasional gateway write failure observed in logs:
   - `RPC error UNAVAILABLE: failed to write transcript: transcript file not found`
   - This may be a separate gateway-side persistence issue that can trigger fresh drift.

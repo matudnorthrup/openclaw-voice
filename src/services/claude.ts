@@ -21,6 +21,7 @@ const MAX_HISTORY = 20;
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1500;
 const conversations = new Map<string, Message[]>();
+const GATEWAY_SESSION_HEADER = 'x-openclaw-session-key';
 
 async function fetchWithRetry(url: string, init: RequestInit, label: string, signal?: AbortSignal): Promise<Response> {
   let lastError: Error | null = null;
@@ -40,6 +41,71 @@ async function fetchWithRetry(url: string, init: RequestInit, label: string, sig
     }
   }
   throw lastError!;
+}
+
+function shouldRetryWithoutSessionHeader(status: number, body: string): boolean {
+  if (![400, 404, 422].includes(status)) return false;
+  const lower = body.toLowerCase();
+  return lower.includes('x-openclaw-session-key')
+    || lower.includes('session-key')
+    || lower.includes('unknown header')
+    || lower.includes('unsupported header');
+}
+
+async function requestGatewayCompletion(params: {
+  messages: Message[];
+  maxTokens: number;
+  sessionKey: string;
+  label: string;
+  signal?: AbortSignal;
+}): Promise<Response> {
+  const url = `${config.gatewayUrl}/v1/chat/completions`;
+  const body = JSON.stringify({
+    model: `openclaw:${config.gatewayAgentId}`,
+    max_tokens: params.maxTokens,
+    messages: params.messages,
+    // Keep `user` for backward compatibility if header routing is unavailable.
+    user: params.sessionKey,
+  });
+
+  const baseHeaders = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${config.gatewayToken}`,
+  };
+
+  let apiResponse = await fetchWithRetry(url, {
+    method: 'POST',
+    headers: {
+      ...baseHeaders,
+      [GATEWAY_SESSION_HEADER]: params.sessionKey,
+    },
+    body,
+  }, params.label, params.signal);
+
+  if (apiResponse.ok) {
+    return apiResponse;
+  }
+
+  const firstErrorBody = await apiResponse.text();
+  if (shouldRetryWithoutSessionHeader(apiResponse.status, firstErrorBody)) {
+    console.warn(
+      `${params.label}: gateway rejected ${GATEWAY_SESSION_HEADER}; retrying without header`,
+    );
+    apiResponse = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: baseHeaders,
+      body,
+    }, params.label, params.signal);
+
+    if (apiResponse.ok) {
+      return apiResponse;
+    }
+
+    const retryBody = await apiResponse.text();
+    throw new Error(`Gateway API error ${apiResponse.status}: ${retryBody}`);
+  }
+
+  throw new Error(`Gateway API error ${apiResponse.status}: ${firstErrorBody}`);
 }
 
 export async function getResponse(
@@ -71,24 +137,12 @@ export async function getResponse(
     ...history,
   ];
 
-  const apiResponse = await fetchWithRetry(`${config.gatewayUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.gatewayToken}`,
-    },
-    body: JSON.stringify({
-      model: `openclaw:${config.gatewayAgentId}`,
-      max_tokens: 300,
-      messages,
-      user: normalizedUserId,
-    }),
-  }, 'Claude LLM');
-
-  if (!apiResponse.ok) {
-    const body = await apiResponse.text();
-    throw new Error(`Gateway API error ${apiResponse.status}: ${body}`);
-  }
+  const apiResponse = await requestGatewayCompletion({
+    messages,
+    maxTokens: 300,
+    sessionKey: normalizedUserId,
+    label: 'Claude LLM',
+  });
 
   const data = await apiResponse.json() as any;
   const rawText = data.choices?.[0]?.message?.content || '';
@@ -123,24 +177,13 @@ export async function quickCompletion(systemPrompt: string, userMessage: string,
     `agent:${config.gatewayAgentId}:discord:channel:${config.utilityChannelId}`,
   );
 
-  const apiResponse = await fetchWithRetry(`${config.gatewayUrl}/v1/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${config.gatewayToken}`,
-    },
-    body: JSON.stringify({
-      model: `openclaw:${config.gatewayAgentId}`,
-      max_tokens: maxTokens,
-      messages,
-      user: sessionKey,
-    }),
-  }, 'Quick completion', signal);
-
-  if (!apiResponse.ok) {
-    const body = await apiResponse.text();
-    throw new Error(`Gateway API error ${apiResponse.status}: ${body}`);
-  }
+  const apiResponse = await requestGatewayCompletion({
+    messages,
+    maxTokens,
+    sessionKey,
+    label: 'Quick completion',
+    signal,
+  });
 
   const data = await apiResponse.json() as any;
   const result = data.choices?.[0]?.message?.content?.trim() || '';

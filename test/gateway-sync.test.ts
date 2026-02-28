@@ -90,4 +90,58 @@ describe('GatewaySync', () => {
       expect.objectContaining({ sessionKey: alias2, message: 'hello', label: 'discord-user' }),
     );
   });
+
+  it('returns delivered session key from inject so caller can mirror to canonical sibling', async () => {
+    const gateway = new GatewaySync();
+    const canonical = GatewaySync.sessionKeyForChannel('66666');
+    const agentId = canonical.split(':')[1]!;
+    const alias = `agent:${agentId}:openai-user:${canonical}`;
+
+    (gateway as any).connected = true;
+    (gateway as any).sessionKeyCache.set(canonical, alias);
+    vi.spyOn(gateway, 'listSessions').mockResolvedValue([
+      { key: canonical },
+      { key: alias },
+    ]);
+
+    const rpcSpy = vi.spyOn(gateway as any, 'rpc').mockResolvedValue({ messageId: 'm1' });
+
+    const injected = await gateway.inject(canonical, 'hello', 'voice-user');
+    expect(injected).toEqual({ messageId: 'm1', sessionKey: alias });
+
+    const mirrored = await gateway.mirrorInjectToSessionFamily(canonical, 'hello', 'voice-user', {
+      excludeSessionKeys: [injected!.sessionKey],
+    });
+    expect(mirrored).toBe(1);
+
+    expect(rpcSpy).toHaveBeenCalledTimes(2);
+    expect(rpcSpy).toHaveBeenNthCalledWith(
+      1,
+      'chat.inject',
+      expect.objectContaining({ sessionKey: alias, message: 'hello', label: 'voice-user' }),
+    );
+    expect(rpcSpy).toHaveBeenNthCalledWith(
+      2,
+      'chat.inject',
+      expect.objectContaining({ sessionKey: canonical, message: 'hello', label: 'voice-user' }),
+    );
+  });
+
+  it('getHistoryExact uses the provided session key without canonical normalization', async () => {
+    const gateway = new GatewaySync();
+    const canonical = GatewaySync.sessionKeyForChannel('77777');
+    const agentId = canonical.split(':')[1]!;
+    const alias = `agent:${agentId}:openai-user:${canonical}`;
+
+    (gateway as any).connected = true;
+    const rpcSpy = vi.spyOn(gateway as any, 'rpc').mockResolvedValue({ messages: [] });
+
+    await gateway.getHistoryExact(alias, 40);
+
+    expect(rpcSpy).toHaveBeenCalledTimes(1);
+    expect(rpcSpy).toHaveBeenCalledWith(
+      'chat.history',
+      expect.objectContaining({ sessionKey: alias, limit: 40 }),
+    );
+  });
 });

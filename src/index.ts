@@ -33,13 +33,15 @@ let responsePoller: ResponsePoller | null = null;
 let dependencyMonitor: DependencyMonitor | null = null;
 let healthMonitor: HealthMonitor | null = null;
 const syncedDiscordMessageIds = new Map<string, number>();
-const nativeGatewayDiscordSessions = new Set<string>();
+const nativeGatewayDiscordSessions = new Map<string, number>();
 
 const SYNCED_MESSAGE_ID_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const SYNC_PREFIX_RE = /^\[(?:discord-user|discord-assistant|voice-user|voice-assistant)\]/i;
 const GATEWAY_TEXT_SYNC_CHECK_DELAY_MS = 1500;
 const GATEWAY_TEXT_SYNC_HISTORY_LIMIT = 25;
 const GATEWAY_TEXT_SYNC_RECENT_WINDOW_MS = 120_000;
+const NATIVE_GATEWAY_SESSION_TTL_MS = 10 * 60 * 1000;
+const NATIVE_GATEWAY_SESSION_CACHE_MAX = 4096;
 
 // --- Text command handlers ---
 
@@ -237,7 +239,7 @@ async function syncDiscordMessageToGateway(message: any): Promise<void> {
         sessionKey,
         content,
         label,
-        { excludeSessionKeys: [sessionKey, resolved] },
+        { excludeSessionKeys: [resolved] },
       );
       if (mirrored > 0) {
         console.log(`Gateway text sync mirrored channel=${message.channelId} label=${label} msgId=${message.id} mirrored=${mirrored}`);
@@ -247,19 +249,19 @@ async function syncDiscordMessageToGateway(message: any): Promise<void> {
     return;
   }
   const snippet = content.slice(0, 80);
-  const beforeResolved = gatewaySync.getResolvedSessionKey(sessionKey);
-  const ok = await gatewaySync.inject(sessionKey, content, label);
-  if (!ok) {
+  const injected = await gatewaySync.inject(sessionKey, content, label);
+  if (!injected) {
     console.warn(`Gateway text sync failed channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id}`);
   } else {
-    const afterResolved = gatewaySync.getResolvedSessionKey(sessionKey);
     const mirrored = await gatewaySync.mirrorInjectToSessionFamily(
       sessionKey,
       content,
       label,
-      { excludeSessionKeys: [sessionKey, beforeResolved, afterResolved] },
+      { excludeSessionKeys: [injected.sessionKey] },
     );
-    console.log(`Gateway text sync ok channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id} "${snippet}"`);
+    console.log(
+      `Gateway text sync ok channel=${message.channelId} label=${label} msgId=${message.id} author=${message.author.id} delivered=${injected.sessionKey} "${snippet}"`,
+    );
     if (mirrored > 0) {
       console.log(`Gateway text sync mirror ok channel=${message.channelId} label=${label} msgId=${message.id} mirrored=${mirrored}`);
     }
@@ -284,7 +286,7 @@ function rememberAndCheckMessageId(messageId: string): boolean {
 
 async function getGatewayTextSyncSkipReason(sessionKey: string, content: string): Promise<string | null> {
   if (!gatewaySync?.isConnected()) return null;
-  if (nativeGatewayDiscordSessions.has(sessionKey)) return 'native-session-cache';
+  if (isNativeGatewaySessionCacheHit(sessionKey)) return 'native-session-cache';
 
   // Give any native Discord→gateway bridge a brief chance to ingest first.
   await new Promise((resolve) => setTimeout(resolve, GATEWAY_TEXT_SYNC_CHECK_DELAY_MS));
@@ -299,7 +301,7 @@ async function getGatewayTextSyncSkipReason(sessionKey: string, content: string)
       return isNativeDiscordGatewayMessage(text);
     });
     if (hasNativeDiscordMetadata) {
-      nativeGatewayDiscordSessions.add(sessionKey);
+      rememberNativeGatewaySession(sessionKey);
       return 'native-discord-session';
     }
 
@@ -311,6 +313,40 @@ async function getGatewayTextSyncSkipReason(sessionKey: string, content: string)
   }
 
   return null;
+}
+
+function isNativeGatewaySessionCacheHit(sessionKey: string): boolean {
+  pruneNativeGatewaySessionCache();
+  const expiresAt = nativeGatewayDiscordSessions.get(sessionKey) ?? 0;
+  if (expiresAt > Date.now()) {
+    return true;
+  }
+  if (expiresAt > 0) {
+    nativeGatewayDiscordSessions.delete(sessionKey);
+  }
+  return false;
+}
+
+function rememberNativeGatewaySession(sessionKey: string): void {
+  pruneNativeGatewaySessionCache();
+  nativeGatewayDiscordSessions.set(sessionKey, Date.now() + NATIVE_GATEWAY_SESSION_TTL_MS);
+  if (nativeGatewayDiscordSessions.size <= NATIVE_GATEWAY_SESSION_CACHE_MAX) return;
+
+  const entries = Array.from(nativeGatewayDiscordSessions.entries())
+    .sort((a, b) => a[1] - b[1]);
+  const overflow = nativeGatewayDiscordSessions.size - NATIVE_GATEWAY_SESSION_CACHE_MAX;
+  for (let i = 0; i < overflow; i++) {
+    const key = entries[i]?.[0];
+    if (key) nativeGatewayDiscordSessions.delete(key);
+  }
+}
+
+function pruneNativeGatewaySessionCache(now = Date.now()): void {
+  for (const [key, expiresAt] of nativeGatewayDiscordSessions) {
+    if (expiresAt <= now) {
+      nativeGatewayDiscordSessions.delete(key);
+    }
+  }
 }
 
 function extractGatewayMessageText(content: unknown): string {

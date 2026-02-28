@@ -33,6 +33,11 @@ export interface ChatMessage {
   label?: string;
 }
 
+export interface InjectResult {
+  messageId: string;
+  sessionKey: string;
+}
+
 interface QueuedInject {
   sessionKey: string;
   message: string;
@@ -58,6 +63,7 @@ const INJECT_QUEUE_MAX = 200;
 const INJECT_QUEUE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const SESSION_FAMILY_CACHE_TTL_MS = 60_000;
 const SESSION_SPLIT_WARN_INTERVAL_MS = 5 * 60 * 1000;
+const RESOLVED_ALIAS_LOG_INTERVAL_MS = 60_000;
 
 const OPENCLAW_STATE_DIR = join(homedir(), '.openclaw');
 const DEVICE_IDENTITY_PATH = join(OPENCLAW_STATE_DIR, 'identity', 'device.json');
@@ -133,6 +139,7 @@ export class GatewaySync {
   private reconnectCallbacks: Array<() => void | Promise<void>> = [];
   private sessionFamilyCache = new Map<string, SessionFamilyCacheEntry>();
   private splitWarningAt = new Map<string, number>();
+  private resolvedAliasLogAt = new Map<string, number>();
 
   static get defaultSessionKey(): string {
     return `agent:${config.gatewayAgentId}:main`;
@@ -216,6 +223,7 @@ export class GatewaySync {
     this.reconnectCallbacks = [];
     this.sessionFamilyCache.clear();
     this.splitWarningAt.clear();
+    this.resolvedAliasLogAt.clear();
   }
 
   isConnected(): boolean {
@@ -346,7 +354,6 @@ export class GatewaySync {
     const exclude = new Set<string>();
     for (const key of options?.excludeSessionKeys ?? []) {
       exclude.add(key);
-      exclude.add(GatewaySync.normalizeCompletionUserId(key));
     }
 
     let mirrored = 0;
@@ -434,11 +441,24 @@ export class GatewaySync {
     if (now - last < SESSION_SPLIT_WARN_INTERVAL_MS) return;
     this.splitWarningAt.set(channelId, now);
 
+    const canonicalKey = GatewaySync.sessionKeyForChannel(channelId);
+    const hasCanonical = candidates.includes(canonicalKey);
     const maxDepth = candidates.reduce((max, key) => Math.max(max, GatewaySync.countOpenAiUserPrefixes(key)), 0);
     const nested = candidates.filter((key) => GatewaySync.countOpenAiUserPrefixes(key) > 1).length;
+    const preferred = hasCanonical ? canonicalKey : candidates[0]!;
     console.warn(
-      `Gateway session split detected channel=${channelId} sessions=${candidates.length} maxOpenAiDepth=${maxDepth} nested=${nested}`,
+      `Gateway session split detected channel=${channelId} sessions=${candidates.length} maxOpenAiDepth=${maxDepth} nested=${nested} hasCanonical=${hasCanonical ? 'yes' : 'no'} preferred=${preferred}`,
     );
+  }
+
+  private logResolvedAliasMetric(operation: 'inject' | 'history', canonicalKey: string, resolvedKey: string): void {
+    if (canonicalKey === resolvedKey) return;
+    const metricKey = `${operation}:${canonicalKey}:${resolvedKey}`;
+    const now = Date.now();
+    const last = this.resolvedAliasLogAt.get(metricKey) ?? 0;
+    if (now - last < RESOLVED_ALIAS_LOG_INTERVAL_MS) return;
+    this.resolvedAliasLogAt.set(metricKey, now);
+    console.log(`Gateway resolved alias op=${operation} canonical=${canonicalKey} resolved=${resolvedKey}`);
   }
 
   private enqueueInject(sessionKey: string, message: string, label?: string): void {
@@ -478,7 +498,12 @@ export class GatewaySync {
     await this.flushInjectQueue();
   }
 
-  async inject(sessionKey: string, message: string, label?: string): Promise<{ messageId: string } | null> {
+  private toInjectResult(result: any, sessionKey: string): InjectResult {
+    const messageId = typeof result?.messageId === 'string' ? result.messageId : '';
+    return { messageId, sessionKey };
+  }
+
+  async inject(sessionKey: string, message: string, label?: string): Promise<InjectResult | null> {
     const canonicalSessionKey = GatewaySync.normalizeCompletionUserId(sessionKey);
 
     // If not connected, queue for later delivery
@@ -489,12 +514,13 @@ export class GatewaySync {
 
     // Check if we have a cached alternate session key for this channel
     const resolvedKey = this.sessionKeyCache.get(canonicalSessionKey) ?? canonicalSessionKey;
+    this.logResolvedAliasMetric('inject', canonicalSessionKey, resolvedKey);
 
     try {
       const params: any = { sessionKey: resolvedKey, message };
       if (label) params.label = label;
       const result = await this.rpc('chat.inject', params);
-      return result;
+      return this.toInjectResult(result, resolvedKey);
     } catch (err: any) {
       // If session not found, invalidate cache and re-discover
       if (err.message?.includes('session not found')) {
@@ -508,12 +534,13 @@ export class GatewaySync {
           if (discovered && discovered !== canonicalSessionKey && discovered !== resolvedKey) {
             console.log(`Gateway session fallback: ${canonicalSessionKey} → ${discovered}`);
             this.sessionKeyCache.set(canonicalSessionKey, discovered);
+            this.logResolvedAliasMetric('inject', canonicalSessionKey, discovered);
             // Retry with discovered key
             try {
               const params: any = { sessionKey: discovered, message };
               if (label) params.label = label;
               const result = await this.rpc('chat.inject', params);
-              return result;
+              return this.toInjectResult(result, discovered);
             } catch (retryErr: any) {
               console.warn(`GatewaySync inject failed (retry with ${discovered}): ${retryErr.message}`);
               return null;
@@ -571,9 +598,22 @@ export class GatewaySync {
     }
   }
 
+  async getHistoryExact(sessionKey: string, limit?: number): Promise<{ messages: ChatMessage[] } | null> {
+    try {
+      const params: any = { sessionKey };
+      if (limit !== undefined) params.limit = limit;
+      const result = await this.rpc('chat.history', params);
+      return result;
+    } catch (err: any) {
+      console.warn(`GatewaySync getHistoryExact failed (${sessionKey}): ${err.message}`);
+      return null;
+    }
+  }
+
   async getHistory(sessionKey: string, limit?: number): Promise<{ messages: ChatMessage[] } | null> {
     const canonicalSessionKey = GatewaySync.normalizeCompletionUserId(sessionKey);
     let resolvedKey = this.sessionKeyCache.get(canonicalSessionKey) ?? canonicalSessionKey;
+    this.logResolvedAliasMetric('history', canonicalSessionKey, resolvedKey);
 
     // Proactive session discovery on first access — handles cases where the gateway
     // has split a channel into a new session with a different key.  Without this,
@@ -587,6 +627,7 @@ export class GatewaySync {
           console.log(`Gateway history discovery: ${canonicalSessionKey} → ${discovered}`);
           this.sessionKeyCache.set(canonicalSessionKey, discovered);
           resolvedKey = discovered;
+          this.logResolvedAliasMetric('history', canonicalSessionKey, resolvedKey);
         }
       }
     }
@@ -608,6 +649,7 @@ export class GatewaySync {
           if (discovered && discovered !== canonicalSessionKey && discovered !== resolvedKey) {
             console.log(`Gateway history fallback: ${canonicalSessionKey} → ${discovered}`);
             this.sessionKeyCache.set(canonicalSessionKey, discovered);
+            this.logResolvedAliasMetric('history', canonicalSessionKey, discovered);
             try {
               const params: any = { sessionKey: discovered };
               if (limit !== undefined) params.limit = limit;

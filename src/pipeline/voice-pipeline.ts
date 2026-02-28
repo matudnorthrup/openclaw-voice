@@ -62,6 +62,7 @@ export interface IdleNotificationDiagnostics {
 
 export class VoicePipeline {
   private static readonly READY_GRACE_MS = 5_000;
+  private static readonly FOLLOWUP_PROMPT_GRACE_MS = 15_000;
   // Absorb Discord/VAD timing jitter at the ready->speak handoff.
   private static readonly READY_HANDOFF_TOLERANCE_MS = 600;
   // Rejected-audio reprompts are useful for brief misses, but noisy long chunks
@@ -840,15 +841,6 @@ export class VoicePipeline {
         }
       }
 
-      // In queue/ask mode during grace, only commands (wake-word or bare navigation)
-      // should be processed. Free-form utterances without wake word are suppressed
-      // to avoid enqueuing accidental speech.
-      if ((mode === 'queue' || mode === 'ask') && inGracePeriod && !hasWakeWord) {
-        console.log(`${mode} mode grace: suppressing non-command utterance without wake word`);
-        this.stopWaitingLoop();
-        return;
-      }
-
       // Fallback command classifier (LLM): catches STT variations that regex misses.
       // During gated playback interrupts without wake word, avoid LLM command
       // inference to reduce false positives from cough/noise transcripts.
@@ -1010,6 +1002,7 @@ export class VoicePipeline {
     this.counters.commandsRecognized++;
     // Any explicit command means user intent is clear; clear transient post-timeout guard.
     this.ctx.newPostTimeoutPromptGuardUntil = 0;
+    this.ctx.followupPromptGraceUntil = 0;
     if (command.type !== 'silent-wait') {
       this.cancelPendingWait(`voice command: ${command.type}`);
     }
@@ -1250,6 +1243,7 @@ export class VoicePipeline {
                 const displayName = threadResult.displayName || llmResult.best.displayName;
                 await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
                 await this.playReadyEarcon();
+                this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
                 return;
               }
             }
@@ -1334,6 +1328,9 @@ export class VoicePipeline {
 
       await this.speakResponse(responseText, { inbox: true });
       await this.playReadyEarcon();
+      if (result.success) {
+        this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
+      }
     } finally {
       this.stopWaitingLoop();
     }
@@ -1450,6 +1447,7 @@ Use channel names (the part before the colon). Do not explain.`,
       await this.onChannelSwitch();
       await this.speakResponse(this.buildSwitchConfirmation(result.displayName || selected.displayName));
       await this.playReadyEarcon();
+      this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
     } else {
       await this.speakResponse(`I couldn't switch to ${selected.displayName}.`);
       await this.playReadyEarcon();
@@ -1463,10 +1461,12 @@ Use channel names (the part before the colon). Do not explain.`,
     if (result.success) {
       await this.onChannelSwitch();
       await this.speakResponse(`Switched back to ${result.displayName || 'default'}.`);
+      await this.playReadyEarcon();
+      this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
     } else {
       await this.speakResponse("I couldn't switch to the default channel.");
+      await this.playReadyEarcon();
     }
-    await this.playReadyEarcon();
   }
 
   private async handleNoise(level: string): Promise<void> {
@@ -1621,6 +1621,9 @@ Use channel names (the part before the colon). Do not explain.`,
       );
     await this.speakResponse(raw, { inbox: true, allowSummary: true, isChannelMessage: true });
     await this.playReadyEarcon();
+    // Start follow-up grace after the ready cue so long readbacks don't
+    // consume the entire window before the user can respond.
+    this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
   }
 
   private async handleDispatch(body: string, userId: string): Promise<void> {
@@ -1867,6 +1870,10 @@ Use channel names (the part before the colon). Do not explain.`,
   private setPromptGrace(ms: number): void {
     this.ctx.promptGraceUntil = Date.now() + ms;
     this.scheduleGraceExpiry();
+  }
+
+  private allowFollowupPromptGrace(ms: number): void {
+    this.ctx.followupPromptGraceUntil = Date.now() + Math.max(0, ms);
   }
 
   private scheduleGraceExpiry(): void {
@@ -2563,6 +2570,7 @@ Use channel names (the part before the colon). Do not explain.`,
         console.log(`Hear full message (stored): "${full.slice(0, 60)}..."`);
         await this.speakResponse(full, { isReplay: true, forceFull: true });
         await this.playReadyEarcon();
+        this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
         return;
       }
     }
@@ -2578,6 +2586,7 @@ Use channel names (the part before the colon). Do not explain.`,
         console.log(`Hear full message (fetched): "${content.slice(0, 60)}..."`);
         await this.speakResponse(content, { inbox: true, forceFull: true, isChannelMessage: true });
         await this.playReadyEarcon();
+        this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
         return;
       }
     }
@@ -2954,7 +2963,7 @@ Use channel names (the part before the colon). Do not explain.`,
 
     // "go to X", "switch to X", "switch channel to X", "move channels X"
     // Also handle STT noise: "we go to X", "let's go to X", bare "to X"
-    const switchMatch = navInput.match(/^(?:(?:we|let'?s)\s+)?(?:go|switch|change|move)(?:\s+channels?)?(?:\s+to)?\s+(.+)$/)
+    const switchMatch = navInput.match(/^(?:(?:we|let'?s)\s+)?(?:go|switch|which|scratch|change|move)(?:\s+channels?)?(?:\s+to)?\s+(.+)$/)
       ?? navInput.match(/^to\s+(.+)$/);
     if (switchMatch) {
       const target = switchMatch[1].trim().replace(/\s+channel$/, '').trim();
@@ -3679,18 +3688,18 @@ Use channel names (the part before the colon). Do not explain.`,
       : `source=${params.source ?? 'unknown'}`;
 
     const syncMessage = async (content: string, label: 'voice-user' | 'voice-assistant'): Promise<void> => {
-      const beforeResolved = gatewaySync.getResolvedSessionKey(params.sessionKey!);
       try {
         console.log(`Gateway inject start ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey}`);
-        const ok = await gatewaySync.inject(params.sessionKey!, content, label);
-        if (ok) {
-          console.log(`Gateway inject ok ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey}`);
-          const afterResolved = gatewaySync.getResolvedSessionKey(params.sessionKey!);
+        const injected = await gatewaySync.inject(params.sessionKey!, content, label);
+        if (injected) {
+          console.log(
+            `Gateway inject ok ${keyInfo} label=${label} channel=${params.channelName} session=${params.sessionKey} delivered=${injected.sessionKey}`,
+          );
           const mirrored = await gatewaySync.mirrorInjectToSessionFamily(
             params.sessionKey!,
             content,
             label,
-            { excludeSessionKeys: [params.sessionKey!, beforeResolved, afterResolved] },
+            { excludeSessionKeys: [injected.sessionKey] },
           );
           if (mirrored > 0) {
             console.log(

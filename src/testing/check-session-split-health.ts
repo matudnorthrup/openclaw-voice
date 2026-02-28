@@ -61,7 +61,7 @@ async function run(): Promise<void> {
       const union = new Set<string>();
 
       for (const key of family) {
-        const result = await gateway.getHistory(key, historyLimit);
+        const result = await gateway.getHistoryExact(key, historyLimit);
         const messages = (result?.messages ?? []) as (ChatMessage & { timestamp?: number })[];
         const set = new Set<string>();
         for (let i = 0; i < messages.length; i++) {

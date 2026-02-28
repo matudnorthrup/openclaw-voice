@@ -408,6 +408,11 @@ describe('parseVoiceCommand — Hello Watson trigger', () => {
     expect(result).toEqual({ type: 'switch', channel: 'health' });
   });
 
+  it('parses "Hello Watson, scratch to health" STT variant', () => {
+    const result = parseVoiceCommand('Hello Watson, scratch to health', BOT);
+    expect(result).toEqual({ type: 'switch', channel: 'health' });
+  });
+
   it('parses "Hello Watson, done"', () => {
     const result = parseVoiceCommand('Hello Watson, done', BOT);
     expect(result).toEqual({ type: 'inbox-next' });
