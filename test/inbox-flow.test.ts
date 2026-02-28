@@ -368,6 +368,30 @@ describe('Layer 6: Inbox Flow', () => {
     pipeline.stop();
   });
 
+  it('6.7b — bare switch in INBOX_FLOW works in wait mode even after grace expires', async () => {
+    const activities = [
+      { channelName: 'health', displayName: 'Health', sessionKey: 'agent:main:discord:channel:health', newMessageCount: 1, queuedReadyCount: 0, newMessages: [] },
+    ];
+    const { pipeline, router } = makePipeline({ mode: 'wait', activities });
+
+    await simulateUtterance(pipeline, 'Watson, check inbox');
+    expect(getState(pipeline)).toBe('INBOX_FLOW');
+
+    // Simulate grace expiry before the follow-up command.
+    (pipeline as any).ctx.gateGraceUntil = 0;
+    (pipeline as any).ctx.promptGraceUntil = 0;
+    earconHistory.length = 0;
+    playerCalls.length = 0;
+
+    await simulateUtterance(pipeline, 'switch to nutrition');
+
+    expect(router.switchTo).toHaveBeenCalledWith('nutrition');
+    expect(earconHistory).toContain('listening');
+    expect(earconHistory).toContain('acknowledged');
+
+    pipeline.stop();
+  });
+
   // ── 6.8: Inbox flow timeout ─────────────────────────────────────────
 
   it('6.8 — inbox flow state machine manages flow index correctly', async () => {

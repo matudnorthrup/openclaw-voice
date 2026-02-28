@@ -894,6 +894,7 @@ export class VoicePipeline {
       // background processing where accidental noises can cause interruptions.
       const mode = modeAtCapture;
       const indicateEnabled = this.usesIndicateEndpoint(mode, gatedMode);
+      const inInboxFlow = this.stateMachine.getStateType() === 'INBOX_FLOW';
       if (!indicateEnabled && this.ctx.indicateCaptureActive) {
         this.clearIndicateCapture('mode-disabled');
       }
@@ -957,19 +958,21 @@ export class VoicePipeline {
           void this.maybeCueMissedWakeFromLLM(transcript, mode, inGracePeriod);
           // Don't stop waiting loop — pending wait callback is active
           this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
-        } else if (mode !== 'wait') {
+        } else if (mode !== 'wait' || inInboxFlow) {
           // In queue/ask mode, allow bare navigation commands (next, inbox check,
-          // etc.) through the gate without requiring the wake word.  This lets
-          // the user respond to notifications naturally.
+          // etc.) through the gate without requiring the wake word. In INBOX_FLOW
+          // this also applies while mode is wait, so navigation stays hands-free.
           const bareCommand = this.matchBareQueueCommand(transcript);
           if (bareCommand) {
             const resolved = this.resolveDoneCommandForContext(bareCommand, transcript);
-            console.log(`Gate bypass (${mode} mode bare command): ${resolved.type}`);
-            void this.playFastCue('listening');
+            const bypassLabel = inInboxFlow && mode === 'wait' ? 'inbox-flow bare command' : `${mode} mode bare command`;
+            console.log(`Gate bypass (${bypassLabel}): ${resolved.type}`);
+            await this.playFastCue('listening');
             await this.handleVoiceCommand(resolved, userId);
             return;
           } else {
-            console.log(`Gated: discarded "${transcript}" (no bare command match in ${mode} mode)`);
+            const contextLabel = inInboxFlow && mode === 'wait' ? 'inbox-flow' : `${mode} mode`;
+            console.log(`Gated: discarded "${transcript}" (no bare command match in ${contextLabel})`);
             if (this.looksLikeBareCommandAttempt(transcript)) {
               const now = Date.now();
               if (now >= this.ctx.failedWakeCueCooldownUntil) {
@@ -1016,10 +1019,13 @@ export class VoicePipeline {
       const parsedCommand = parseVoiceCommand(transcript, config.botName);
       const preParsedCommand: VoiceCommand | null = parsedCommand
         ?? (standaloneCodeWake ? { type: 'wake-check' } : null);
+      const bareCommandInGrace = !hasWakeWord && inGracePeriod
+        ? this.matchBareQueueCommand(transcript)
+        : null;
       const indicateStartEligible = hasWakeWord || inGracePeriod;
       if (indicateEnabled && !indicateFinalized && indicateStartEligible && !this.ctx.indicateCaptureActive) {
         const shouldStartFromWake = hasWakeWord && (!preParsedCommand || preParsedCommand.type === 'wake-check');
-        const shouldStartFromGrace = !hasWakeWord && inGracePeriod;
+        const shouldStartFromGrace = !hasWakeWord && inGracePeriod && !bareCommandInGrace;
         if (shouldStartFromWake || shouldStartFromGrace) {
           const seed = shouldStartFromWake
             ? (

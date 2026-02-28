@@ -286,6 +286,27 @@ describe('Layer 3: Queue Mode Flow', () => {
     pipeline.stop();
   });
 
+  it('3.2c — indicate mode in queue treats bare switch command in grace as command, not dictation capture', async () => {
+    const { pipeline, router } = makePipeline('queue');
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    earconHistory.length = 0;
+    playerCalls.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'switch to health');
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(router.switchTo).toHaveBeenCalledWith('health');
+
+    const listeningIdx = earconHistory.indexOf('listening');
+    const acknowledgedIdx = earconHistory.indexOf('acknowledged');
+    expect(listeningIdx).toBeGreaterThanOrEqual(0);
+    expect(acknowledgedIdx).toBeGreaterThan(listeningIdx);
+
+    pipeline.stop();
+  });
+
   // ── 3.3: Background completion → idle notification ────────────────────
 
   it('3.3 — notifyIfIdle is called when LLM dispatch completes', async () => {
