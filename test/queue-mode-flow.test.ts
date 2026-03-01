@@ -307,6 +307,23 @@ describe('Layer 3: Queue Mode Flow', () => {
     pipeline.stop();
   });
 
+  it('3.2d — indicate mode treats wake-prefixed cancel as interrupt command, not dictation', async () => {
+    const { pipeline } = makePipeline('queue');
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    earconHistory.length = 0;
+    playerCalls.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'Hello Watson cancel');
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(playerCalls).toContain('stopPlayback');
+    expect(earconHistory).toContain('listening');
+
+    pipeline.stop();
+  });
+
   // ── 3.3: Background completion → idle notification ────────────────────
 
   it('3.3 — notifyIfIdle is called when LLM dispatch completes', async () => {
@@ -324,6 +341,33 @@ describe('Layer 3: Queue Mode Flow', () => {
     expect(notifySpy).toHaveBeenCalled();
 
     pipeline.stop();
+  });
+
+  it('3.3b — idle notification is deferred while indicate capture is active', async () => {
+    const { pipeline } = makePipeline('queue');
+    vi.useFakeTimers();
+
+    try {
+      (pipeline as any).ctx.gateGraceUntil = 0;
+      (pipeline as any).ctx.promptGraceUntil = 0;
+      (pipeline as any).ctx.indicateCaptureActive = true;
+
+      pipeline.notifyIfIdle('Background message pending.');
+
+      await vi.advanceTimersByTimeAsync(300);
+      expect(playerCalls).not.toContain('playStream');
+      const firstDiag = pipeline.getIdleNotificationDiagnostics(12);
+      expect(firstDiag.recentEvents.some(
+        (event) => event.stage === 'deferred' && event.reason === 'indicate capture active',
+      )).toBe(true);
+
+      (pipeline as any).ctx.indicateCaptureActive = false;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(playerCalls).toContain('playStream');
+    } finally {
+      pipeline.stop();
+      vi.useRealTimers();
+    }
   });
 
   // ── 3.6: Queue prompt during grace ────────────────────────────────────

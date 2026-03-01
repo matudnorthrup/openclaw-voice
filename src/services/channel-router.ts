@@ -25,6 +25,19 @@ const channels = JSON.parse(
   readFileSync(resolve(__dirname, '../channels.json'), 'utf-8'),
 ) as Record<string, ChannelDef>;
 
+type DbRunResult = { lastInsertRowid?: number | bigint };
+
+type DbStmt = {
+  run: (...args: unknown[]) => DbRunResult;
+  all?: (...args: unknown[]) => Record<string, unknown>[];
+};
+
+type AliasDb = {
+  exec: (sql: string) => void;
+  prepare: (sql: string) => DbStmt;
+  close: () => void;
+};
+
 export class ChannelRouter {
   private guild: Guild;
   private activeChannelName = 'default';
@@ -32,10 +45,29 @@ export class ChannelRouter {
   private resolvedChannels = new Map<string, TextChannel>();
   private gatewaySync: GatewaySync | null = null;
   private lastAccessed = new Map<string, number>();
+  private aliasDb: AliasDb | null = null;
+  private aliasStmtUpsert: DbStmt | null = null;
+  private aliasStmtFindExact: DbStmt | null = null;
+  private aliasReady = false;
 
   constructor(guild: Guild, gatewaySync?: GatewaySync) {
     this.guild = guild;
     this.gatewaySync = gatewaySync ?? null;
+    this.initAliasCache();
+  }
+
+  destroy(): void {
+    if (this.aliasDb) {
+      try {
+        this.aliasDb.close();
+      } catch {
+        // Best effort shutdown.
+      }
+      this.aliasDb = null;
+    }
+    this.aliasStmtUpsert = null;
+    this.aliasStmtFindExact = null;
+    this.aliasReady = false;
   }
 
   listChannels(): { name: string; displayName: string; active: boolean }[] {
@@ -282,6 +314,257 @@ export class ChannelRouter {
 
   switchToDefault(): Promise<{ success: boolean; error?: string; historyCount: number; displayName?: string }> {
     return this.switchTo('default');
+  }
+
+  async refreshAliasCache(): Promise<void> {
+    if (!this.aliasReady || !this.aliasStmtUpsert) return;
+
+    let seeded = 0;
+    for (const [name, def] of Object.entries(channels)) {
+      if (!def.channelId) continue;
+      seeded += this.upsertAliasForms(name, def.channelId, def.displayName, 3);
+      seeded += this.upsertAliasForms(def.displayName, def.channelId, def.displayName, 3);
+    }
+
+    try {
+      const fetched = await this.guild.channels.fetch();
+      for (const ch of fetched.values()) {
+        if (!ch || !SENDABLE_TYPES.has(ch.type) || !('name' in ch) || typeof ch.name !== 'string') continue;
+        const displayName = `#${ch.name}`;
+        seeded += this.upsertAliasForms(ch.name, ch.id, displayName, 2);
+      }
+    } catch (err: any) {
+      console.warn(`Alias cache guild refresh failed: ${err.message}`);
+    }
+
+    try {
+      const activeThreads = await this.guild.channels.fetchActiveThreads();
+      for (const thread of activeThreads.threads.values()) {
+        const displayName = `#${thread.name}`;
+        seeded += this.upsertAliasForms(thread.name, thread.id, displayName, 2);
+      }
+    } catch {
+      // Optional; some guilds may not allow this.
+    }
+
+    if (seeded > 0) {
+      console.log(`Alias cache refreshed (${seeded} alias forms)`);
+    }
+  }
+
+  async lookupSwitchAlias(query: string): Promise<{ channelId: string; displayName: string } | null> {
+    if (!this.aliasReady || !this.aliasStmtFindExact || typeof this.aliasStmtFindExact.all !== 'function') return null;
+    const forms = this.channelSearchForms(query).slice(0, 4);
+    if (forms.length === 0) return null;
+    while (forms.length < 4) {
+      forms.push(forms[forms.length - 1] || '');
+    }
+
+    const rows = this.aliasStmtFindExact.all(...forms) as Array<{
+      channelId?: string;
+      displayName?: string;
+      hits?: number;
+      lastUsedAt?: string;
+    }>;
+    for (const row of rows) {
+      const channelId = String(row.channelId ?? '').trim();
+      if (!channelId) continue;
+      const resolved = await this.resolveChannel(channelId);
+      if (!resolved) continue;
+      const displayName = row.displayName && row.displayName.trim().length > 0
+        ? row.displayName
+        : ('name' in resolved ? `#${(resolved as any).name as string}` : `#${channelId}`);
+      return { channelId, displayName };
+    }
+    return null;
+  }
+
+  rememberSwitchAlias(phrase: string, channelId: string, displayName: string): void {
+    if (!this.aliasReady || !this.aliasStmtUpsert) return;
+    this.upsertAliasForms(phrase, channelId, displayName, 1);
+  }
+
+  async findSendableChannelByName(query: string): Promise<{ id: string; displayName: string } | null> {
+    const candidates = new Map<string, { id: string; name: string; score: number }>();
+
+    const consider = (channel: GuildBasedChannel | null | undefined): void => {
+      if (!channel || !SENDABLE_TYPES.has(channel.type)) return;
+      if (!('name' in channel) || typeof channel.name !== 'string') return;
+      const channelName = channel.name.trim();
+      if (!channelName) return;
+
+      const score = this.channelSearchScore(query, channelName);
+      if (score <= 0) return;
+
+      const previous = candidates.get(channel.id);
+      if (!previous || score > previous.score) {
+        candidates.set(channel.id, { id: channel.id, name: channelName, score });
+      }
+    };
+
+    for (const ch of this.guild.channels.cache.values()) {
+      consider(ch as GuildBasedChannel);
+    }
+
+    try {
+      const fetched = await this.guild.channels.fetch();
+      for (const ch of fetched.values()) {
+        if (ch) consider(ch as GuildBasedChannel);
+      }
+    } catch {
+      // Best-effort fallback only; cache may still be sufficient.
+    }
+
+    try {
+      const activeThreads = await this.guild.channels.fetchActiveThreads();
+      for (const thread of activeThreads.threads.values()) {
+        consider(thread as unknown as GuildBasedChannel);
+      }
+    } catch {
+      // Ignore; forum/thread listing can be permission-limited.
+    }
+
+    const best = [...candidates.values()]
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.name.length - b.name.length;
+      })[0];
+
+    if (!best) return null;
+    return { id: best.id, displayName: `#${best.name}` };
+  }
+
+  private channelSearchScore(query: string, candidate: string): number {
+    const queryForms = this.channelSearchForms(query);
+    const candidateForms = this.channelSearchForms(candidate);
+
+    let best = 0;
+    for (const q of queryForms) {
+      for (const c of candidateForms) {
+        if (!q || !c) continue;
+        if (q === c) {
+          best = Math.max(best, 100);
+          continue;
+        }
+        if (q.startsWith(c) || c.startsWith(q)) {
+          best = Math.max(best, 85);
+          continue;
+        }
+        if (q.includes(c) || c.includes(q)) {
+          best = Math.max(best, 70);
+        }
+      }
+    }
+    return best;
+  }
+
+  private channelSearchForms(text: string): string[] {
+    const base = text
+      .toLowerCase()
+      .replace(/[’']/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+    if (!base) return [''];
+
+    const singularish = base
+      .split(' ')
+      .map((token) => {
+        if (token.length <= 3) return token;
+        if (token.endsWith('ss')) return token;
+        if (token.endsWith('s')) return token.slice(0, -1);
+        return token;
+      })
+      .join(' ');
+
+    const compactBase = base.replace(/\s+/g, '');
+    const compactSingularish = singularish.replace(/\s+/g, '');
+    const spacedHyphenSplit = base.replace(/-/g, ' ');
+    return Array.from(new Set([base, singularish, compactBase, compactSingularish, spacedHyphenSplit].filter(Boolean)));
+  }
+
+  private initAliasCache(): void {
+    const db = this.openAliasDb();
+    if (!db) return;
+    this.aliasDb = db;
+    this.aliasDb.exec(`
+      CREATE TABLE IF NOT EXISTS voice_channel_aliases (
+        normalized_alias TEXT NOT NULL,
+        raw_alias TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        hits INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_used_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (normalized_alias, channel_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_voice_channel_aliases_channel
+        ON voice_channel_aliases(channel_id);
+
+      CREATE INDEX IF NOT EXISTS idx_voice_channel_aliases_last_used
+        ON voice_channel_aliases(last_used_at DESC);
+    `);
+    this.aliasStmtUpsert = this.aliasDb.prepare(`
+      INSERT INTO voice_channel_aliases (normalized_alias, raw_alias, channel_id, display_name, hits, created_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(normalized_alias, channel_id) DO UPDATE SET
+        raw_alias = excluded.raw_alias,
+        display_name = excluded.display_name,
+        hits = voice_channel_aliases.hits + excluded.hits,
+        last_used_at = datetime('now')
+    `);
+    this.aliasStmtFindExact = this.aliasDb.prepare(`
+      SELECT channel_id AS channelId, display_name AS displayName, hits, last_used_at AS lastUsedAt
+      FROM voice_channel_aliases
+      WHERE normalized_alias IN (?, ?, ?, ?)
+      ORDER BY hits DESC, last_used_at DESC
+      LIMIT 10
+    `);
+    this.aliasReady = true;
+  }
+
+  private openAliasDb(): AliasDb | null {
+    const home = process.env['HOME'];
+    if (!home) return null;
+    const dbPath = process.env['ATLAS_DB_PATH'] || `${home}/atlas/atlas.db`;
+    try {
+      const sqlite = require('node:sqlite') as { DatabaseSync: new (path: string) => AliasDb };
+      const db = new sqlite.DatabaseSync(dbPath);
+      db.exec('PRAGMA journal_mode = WAL;');
+      db.exec('PRAGMA foreign_keys = ON;');
+      return db;
+    } catch {
+      // Fall through to external better-sqlite3 path for older runtimes.
+    }
+
+    const modulePath = `${home}/atlas/node_modules/better-sqlite3`;
+    try {
+      const BetterSqlite3 = require(modulePath) as new (path: string) => AliasDb;
+      const db = new BetterSqlite3(dbPath);
+      db.exec('PRAGMA journal_mode = WAL;');
+      db.exec('PRAGMA foreign_keys = ON;');
+      return db;
+    } catch (err: any) {
+      console.warn(`Alias cache disabled: ${err.message}`);
+      return null;
+    }
+  }
+
+  private upsertAliasForms(
+    phrase: string,
+    channelId: string,
+    displayName: string,
+    hits: number,
+  ): number {
+    if (!this.aliasReady || !this.aliasStmtUpsert) return 0;
+    const raw = phrase.trim();
+    if (!raw || !channelId.trim()) return 0;
+    const forms = this.channelSearchForms(raw);
+    for (const normalized of forms) {
+      this.aliasStmtUpsert.run(normalized, raw, channelId, displayName, hits);
+    }
+    return forms.length;
   }
 
   listForumChannels(): { name: string; id: string }[] {

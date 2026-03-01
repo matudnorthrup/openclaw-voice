@@ -8,10 +8,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Service mocks ──────────────────────────────────────────────────────────
 
-let transcribeImpl: (buf: Buffer) => Promise<string>;
+let transcribeImpl: (buf: Buffer, options?: any) => Promise<string>;
 
 vi.mock('../src/services/whisper.js', () => ({
-  transcribe: vi.fn(async (buf: Buffer) => transcribeImpl(buf)),
+  transcribe: vi.fn(async (buf: Buffer, options?: any) => transcribeImpl(buf, options)),
 }));
 
 let getResponseImpl: (user: string, msg: string) => Promise<{ response: string }>;
@@ -50,12 +50,14 @@ vi.mock('../src/discord/audio-receiver.js', () => ({
 const playerCalls: string[] = [];
 const earconHistory: string[] = [];
 let playStreamCb: ((text: string) => void) | null = null;
+let playerIsPlaying = false;
+let playerIsWaiting = false;
 
 vi.mock('../src/discord/audio-player.js', () => ({
   DiscordAudioPlayer: class {
     attach() {}
-    isPlaying() { return false; }
-    isWaiting() { return false; }
+    isPlaying() { return playerIsPlaying; }
+    isWaiting() { return playerIsWaiting; }
     isPlayingEarcon(_name?: string) { return false; }
     async playEarcon(name: string) {
       earconHistory.push(name);
@@ -67,11 +69,22 @@ vi.mock('../src/discord/audio-player.js', () => ({
     }
     async playStream(_stream: any) {
       playerCalls.push('playStream');
+      playerIsPlaying = true;
       playStreamCb?.(_stream?.toString?.() ?? '');
     }
-    startWaitingLoop() { playerCalls.push('startWaitingLoop'); }
-    stopWaitingLoop() { playerCalls.push('stopWaitingLoop'); }
-    stopPlayback(_reason?: string) { playerCalls.push('stopPlayback'); }
+    startWaitingLoop() {
+      playerCalls.push('startWaitingLoop');
+      playerIsWaiting = true;
+    }
+    stopWaitingLoop() {
+      playerCalls.push('stopWaitingLoop');
+      playerIsWaiting = false;
+    }
+    stopPlayback(_reason?: string) {
+      playerCalls.push('stopPlayback');
+      playerIsPlaying = false;
+      playerIsWaiting = false;
+    }
   },
 }));
 
@@ -82,11 +95,17 @@ vi.mock('../src/audio/earcons.js', () => ({
 // Mock voice settings — start in gated mode
 let voiceSettings = {
   gated: true,
+  audioProcessing: 'local',
   silenceThreshold: 0.01,
   silenceDuration: 1500,
   endpointingMode: 'silence',
   indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
   indicateTimeoutMs: 20000,
+  sttStreamingEnabled: false,
+  sttStreamingChunkMs: 900,
+  sttStreamingMinChunkMs: 450,
+  sttStreamingOverlapMs: 180,
+  sttStreamingMaxChunks: 8,
 };
 
 vi.mock('../src/services/voice-settings.js', () => ({
@@ -130,14 +149,22 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     playStreamCb = null;
     receiverHasActiveSpeech = false;
     receiverLastSpeechStartedAt = 0;
+    playerIsPlaying = false;
+    playerIsWaiting = false;
     vi.useRealTimers();
     voiceSettings = {
       gated: true,
+      audioProcessing: 'local',
       silenceThreshold: 0.01,
       silenceDuration: 1500,
       endpointingMode: 'silence',
       indicateCloseWords: ["i'm done", "i'm finished", 'go ahead'],
       indicateTimeoutMs: 20000,
+      sttStreamingEnabled: false,
+      sttStreamingChunkMs: 900,
+      sttStreamingMinChunkMs: 450,
+      sttStreamingOverlapMs: 180,
+      sttStreamingMaxChunks: 8,
     };
 
     // Default: STT returns empty, LLM returns simple response, TTS returns buffer
@@ -297,6 +324,24 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     pipeline.stop();
   });
 
+  it('1.3b2 — indicate mode ignores bare cancel without error earcon', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    playerCalls.length = 0;
+    earconHistory.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'draft a quick update');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+
+    await simulateUtterance(pipeline, 'user1', 'cancel');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(earconHistory).not.toContain('error');
+
+    pipeline.stop();
+  });
+
   it('1.3c — indicate endpoint mode allows wake-only close command', async () => {
     const pipeline = makePipeline();
     voiceSettings.endpointingMode = 'indicate';
@@ -446,6 +491,162 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     pipeline.stop();
   });
 
+  it('1.3i — indicate capture routes wake-prefixed command instead of appending dictation', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    await simulateUtterance(pipeline, 'user1', 'draft this note');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect(((pipeline as any).ctx.indicateCaptureSegments ?? []).join(' ')).toContain('draft this note');
+
+    earconHistory.length = 0;
+    playerCalls.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'Hello Watson last message');
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect((pipeline as any).ctx.indicateCaptureSegments).toEqual([]);
+    expect(playerCalls).toContain('playStream');
+    expect(earconHistory).toContain('listening');
+
+    pipeline.stop();
+  });
+
+  it('1.3j — indicate capture routes bare "last message" command and clears capture', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    await simulateUtterance(pipeline, 'user1', 'draft this note');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+
+    earconHistory.length = 0;
+    playerCalls.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'my last message');
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect((pipeline as any).ctx.indicateCaptureSegments).toEqual([]);
+    expect(playerCalls).toContain('playStream');
+    expect(earconHistory).toContain('listening');
+
+    pipeline.stop();
+  });
+
+  it('1.3k — short single-segment indicate timeout clears silently', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    (pipeline as any).ctx.indicateCaptureActive = true;
+    (pipeline as any).ctx.indicateCaptureSegments = ['message'];
+    (pipeline as any).ctx.indicateCaptureStartedAt = Date.now();
+    (pipeline as any).ctx.indicateCaptureLastSegmentAt = Date.now();
+
+    playerCalls.length = 0;
+    earconHistory.length = 0;
+
+    await (pipeline as any).onIndicateCaptureTimeout();
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(playerCalls).not.toContain('playStream');
+    expect(earconHistory).not.toContain('ready');
+
+    pipeline.stop();
+  });
+
+  it('1.3k2 — indicate timeout defers while user is actively speaking', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+
+    (pipeline as any).ctx.indicateCaptureActive = true;
+    (pipeline as any).ctx.indicateCaptureSegments = ['still dictating'];
+    (pipeline as any).ctx.indicateCaptureStartedAt = Date.now();
+    (pipeline as any).ctx.indicateCaptureLastSegmentAt = Date.now();
+    receiverHasActiveSpeech = true;
+    receiverLastSpeechStartedAt = Date.now();
+
+    playerCalls.length = 0;
+    earconHistory.length = 0;
+
+    await (pipeline as any).onIndicateCaptureTimeout();
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    expect((pipeline as any).indicateCaptureTimer).not.toBeNull();
+    expect(playerCalls).not.toContain('playStream');
+
+    receiverHasActiveSpeech = false;
+    pipeline.stop();
+  });
+
+  it('1.3l — partial indicate close fallback finalizes when final transcript misses close phrase', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+    voiceSettings.sttStreamingEnabled = true;
+    voiceSettings.audioProcessing = 'local';
+
+    const prompts: string[] = [];
+    getResponseImpl = async (_user, msg) => {
+      prompts.push(msg);
+      return { response: 'Combined response.' };
+    };
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    await simulateUtterance(pipeline, 'user1', 'capture this update');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+
+    transcribeImpl = async (_buf, options) => {
+      options?.onPartial?.({
+        text: "Hello Watson, I'm done",
+        chunkIndex: 0,
+        totalChunks: 2,
+        elapsedMs: 30,
+      });
+      // Full transcript misses the wake + close phrase; without partial fallback
+      // this would have been treated as plain dictation.
+      return 'done';
+    };
+    const receiver = (pipeline as any).receiver;
+    await receiver.simulateUtterance('user1', Buffer.from('fake-audio'), 500);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(false);
+    expect(prompts).toEqual(['capture this update']);
+
+    pipeline.stop();
+  });
+
+  it('1.3m — partial wake-only close hint requires settling and does not prematurely finalize', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.endpointingMode = 'indicate';
+    voiceSettings.sttStreamingEnabled = true;
+    voiceSettings.audioProcessing = 'local';
+
+    await simulateUtterance(pipeline, 'user1', 'Watson, voice status');
+    await simulateUtterance(pipeline, 'user1', 'capture this update');
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+
+    transcribeImpl = async (_buf, options) => {
+      options?.onPartial?.({
+        text: 'Hello Watson',
+        chunkIndex: 0,
+        totalChunks: 2,
+        elapsedMs: 20,
+      });
+      return 'continue speaking';
+    };
+    const receiver = (pipeline as any).receiver;
+    await receiver.simulateUtterance('user1', Buffer.from('fake-audio'), 500);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect((pipeline as any).ctx.indicateCaptureActive).toBe(true);
+    const combined = ((pipeline as any).ctx.indicateCaptureSegments ?? []).join(' ');
+    expect(combined).toContain('capture this update');
+    expect(combined).toContain('continue speaking');
+
+    pipeline.stop();
+  });
+
   // ── 1.4: Grace period utterance ───────────────────────────────────────
 
   it('1.4 — utterance during prompt grace is processed without wake word', async () => {
@@ -466,6 +667,21 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     await simulateUtterance(pipeline, 'user1', 'add milk to my shopping list');
 
     expect(llmCalled).toBe(true);
+    expect(playerCalls).toContain('playStream');
+    expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.4b — grace accepts "my last message" without wake word', async () => {
+    const pipeline = makePipeline();
+
+    await simulateUtterance(pipeline, 'user1', 'Watson');
+    earconHistory.length = 0;
+    playerCalls.length = 0;
+
+    await simulateUtterance(pipeline, 'user1', 'my last message');
+
     expect(playerCalls).toContain('playStream');
     expect(getStateMachineState(pipeline)).toBe('IDLE');
 
@@ -594,6 +810,84 @@ describe('Layer 1: Foundation — Single Channel, Wait Mode, Gated', () => {
     // Should have TTS'd the "haven't said anything" message
     expect(playerCalls).toContain('playStream');
     expect(getStateMachineState(pipeline)).toBe('IDLE');
+
+    pipeline.stop();
+  });
+
+  it('1.10b — streaming partial wake pause can preempt playback before final transcript', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.sttStreamingEnabled = true;
+    voiceSettings.audioProcessing = 'local';
+    playerIsPlaying = true;
+
+    transcribeImpl = async (_buf, options) => {
+      options?.onPartial?.({
+        text: 'Hello Watson skip',
+        chunkIndex: 0,
+        totalChunks: 2,
+        elapsedMs: 40,
+      });
+      return '';
+    };
+
+    const receiver = (pipeline as any).receiver;
+    await receiver.simulateUtterance('user1', Buffer.from('fake-audio'), 500);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(playerCalls).toContain('stopPlayback');
+    expect(playerIsPlaying).toBe(false);
+
+    pipeline.stop();
+  });
+
+  it('1.10c — streaming partial wake command fallback executes when final transcript is empty', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.sttStreamingEnabled = true;
+    voiceSettings.audioProcessing = 'local';
+    playerIsPlaying = true;
+
+    transcribeImpl = async (_buf, options) => {
+      options?.onPartial?.({
+        text: 'Hello Watson status',
+        chunkIndex: 0,
+        totalChunks: 2,
+        elapsedMs: 35,
+      });
+      return '';
+    };
+
+    const receiver = (pipeline as any).receiver;
+    await receiver.simulateUtterance('user1', Buffer.from('fake-audio'), 500);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(playerCalls).toContain('stopPlayback');
+    expect(playerCalls).toContain('playStream');
+
+    pipeline.stop();
+  });
+
+  it('1.10d — streaming partial wake-only does not preempt playback', async () => {
+    const pipeline = makePipeline();
+    voiceSettings.sttStreamingEnabled = true;
+    voiceSettings.audioProcessing = 'local';
+    playerIsPlaying = true;
+
+    transcribeImpl = async (_buf, options) => {
+      options?.onPartial?.({
+        text: 'Hello Watson',
+        chunkIndex: 0,
+        totalChunks: 2,
+        elapsedMs: 25,
+      });
+      return '';
+    };
+
+    const receiver = (pipeline as any).receiver;
+    await receiver.simulateUtterance('user1', Buffer.from('fake-audio'), 500);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(playerCalls).not.toContain('stopPlayback');
+    expect(playerIsPlaying).toBe(true);
 
     pipeline.stop();
   });

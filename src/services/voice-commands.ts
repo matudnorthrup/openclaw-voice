@@ -9,6 +9,7 @@ export type VoiceCommand =
   | { type: 'noise'; level: string }
   | { type: 'delay'; value: number }
   | { type: 'delay-adjust'; direction: 'longer' | 'shorter' }
+  | { type: 'indicate-timeout'; valueMs: number }
   | { type: 'settings' }
   | { type: 'new-post' }
   | { type: 'mode'; mode: VoiceMode }
@@ -197,6 +198,21 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'delay', value: parseInt(delayMatch[1], 10) };
   }
 
+  const indicateTimeoutMatch = rest.match(
+    /^(?:set\s+)?(?:indicate|manual(?:\s+end)?|endpoint(?:ing)?)(?:\s+(?:capture|end(?:\s+of\s+speech)?))?\s+timeout(?:\s+to)?\s+(\d+)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m)$/,
+  );
+  if (indicateTimeoutMatch) {
+    const amount = parseInt(indicateTimeoutMatch[1], 10);
+    const unit = indicateTimeoutMatch[2];
+    let multiplier = 1000;
+    if (unit.startsWith('ms') || unit.startsWith('millisecond')) {
+      multiplier = 1;
+    } else if (unit.startsWith('m')) {
+      multiplier = 60_000;
+    }
+    return { type: 'indicate-timeout', valueMs: amount * multiplier };
+  }
+
   // "longer delay", "shorter delay", "delay longer", "delay shorter"
   const delayAdjustMatch = rest.match(/^(longer|shorter)\s+delay$|^delay\s+(longer|shorter)$/);
   if (delayAdjustMatch) {
@@ -273,8 +289,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'inbox-clear' };
   }
 
-  // "read last message", "read the last message", "last message"
-  if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(rest)) {
+  // "read last message", "read the/my last message", "last message", "my last message"
+  if (/^(?:read\s+(?:(?:the|my)\s+)?last\s+message|(?:(?:the|my)\s+)?last\s+message)$/.test(rest)) {
     return { type: 'read-last-message' };
   }
 
@@ -289,8 +305,8 @@ export function parseVoiceCommand(transcript: string, botName: string): VoiceCom
     return { type: 'silent-wait' };
   }
 
-  // "pause", "stop", "be quiet", "skip", "skip this", etc.
-  if (/^(?:pause|stop(?:\s+talking)?|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough|skip(?:\s+(?:it|this(?:\s+(?:one|message|part))?|that))?)$/.test(rest)) {
+  // "pause", "stop", "cancel", "be quiet", "skip", "skip this", etc.
+  if (/^(?:pause|stop(?:\s+talking)?|cancel(?:\s+(?:it|that|this))?|never\s*mind|nevermind|forget\s*it|be\s+quiet|shut\s+up|shush|hush|quiet|silence|enough|skip(?:\s+(?:it|this(?:\s+(?:one|message|part))?|that))?)$/.test(rest)) {
     return { type: 'pause' };
   }
 

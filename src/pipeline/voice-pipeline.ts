@@ -2,14 +2,14 @@ import { VoiceConnection } from '@discordjs/voice';
 import { TextChannel } from 'discord.js';
 import { AudioReceiver } from '../discord/audio-receiver.js';
 import { DiscordAudioPlayer } from '../discord/audio-player.js';
-import { transcribe } from '../services/whisper.js';
+import { transcribe, type StreamingPartialEvent } from '../services/whisper.js';
 import { getResponse, quickCompletion } from '../services/claude.js';
 import { textToSpeechStream } from '../services/tts.js';
 import { SessionTranscript } from '../services/session-transcript.js';
 import { config } from '../config.js';
 import { sanitizeAssistantResponse } from '../services/assistant-sanitizer.js';
 import { parseVoiceCommand, matchesWakeWord, extractFromWakeWord, matchChannelSelection, matchQueueChoice, matchSwitchChoice, type VoiceCommand, type ChannelOption } from '../services/voice-commands.js';
-import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, setGatedMode, setEndpointingMode, resolveNoiseLevel, getNoisePresetNames, type EndpointingMode } from '../services/voice-settings.js';
+import { getVoiceSettings, setSilenceDuration, setSpeechThreshold, setGatedMode, setEndpointingMode, setIndicateTimeoutMs, resolveNoiseLevel, getNoisePresetNames, type EndpointingMode } from '../services/voice-settings.js';
 import { PipelineStateMachine, type TransitionEffect, type PipelineEvent } from './pipeline-state.js';
 import { checkPipelineInvariants, type InvariantContext } from './pipeline-invariants.js';
 import { createTransientContext, resetTransientContext, type TransientContext } from './transient-context.js';
@@ -74,6 +74,7 @@ export class VoicePipeline {
   private static readonly COMMAND_CLASSIFIER_MAX_CHARS = 420;
   private static readonly NEW_POST_TIMEOUT_PROMPT_GUARD_MS = 8_000;
   private static readonly GATE_CLOSE_CUE_HOLDOFF_MS = 320;
+  private static readonly INDICATE_TIMEOUT_ACTIVE_SPEECH_GRACE_MS = 1200;
   private static readonly STANDALONE_CODE_WAKE_TOKENS = [
     'whiskeyfoxtrot',
     'whiskeydelta',
@@ -219,6 +220,20 @@ export class VoicePipeline {
     ) ?? [];
   }
 
+  private rememberSwitchAlias(phrase: string): void {
+    if (!this.router) return;
+    const rememberAlias = (this.router as unknown as {
+      rememberSwitchAlias?: (spoken: string, channelId: string, displayName: string) => void;
+    }).rememberSwitchAlias;
+    if (!rememberAlias) return;
+
+    const active = this.router.getActiveChannel();
+    const channelId = active?.channelId;
+    if (!channelId) return;
+    const displayName = active.displayName || active.name || channelId;
+    rememberAlias.call(this.router, phrase, channelId, displayName);
+  }
+
   private isNonLexicalTranscript(transcript: string): boolean {
     const text = transcript.trim();
     if (!text) return true;
@@ -257,6 +272,71 @@ export class VoicePipeline {
     const endpointingMode = getVoiceSettings().endpointingMode ?? 'silence';
     const supportedMode = mode === 'wait' || mode === 'queue' || mode === 'ask';
     return endpointingMode === 'indicate' && gatedMode && supportedMode;
+  }
+
+  private shouldUseStreamingTranscription(): boolean {
+    const s = getVoiceSettings();
+    return Boolean(s.audioProcessing === 'local' && s.sttStreamingEnabled);
+  }
+
+  private onStreamingPartialTranscript(userId: string, event: StreamingPartialEvent): void {
+    const text = event.text.trim();
+    if (!text || this.isNonLexicalTranscript(text)) return;
+    const clipped = text.length > 120 ? `${text.slice(0, 120)}...` : text;
+    console.log(
+      `Whisper partial ${event.chunkIndex + 1}/${event.totalChunks} from ${userId}: "${clipped}" (${event.elapsedMs}ms)`,
+    );
+  }
+
+  private partialCommandKey(command: VoiceCommand): string {
+    // Stable key for repeated partial evidence settlement.
+    return JSON.stringify(command);
+  }
+
+  private shouldSettlePartialCommand(command: VoiceCommand, hits: number): boolean {
+    if (command.type === 'pause') return true;
+    switch (command.type) {
+      case 'read-last-message':
+      case 'hear-full-message':
+      case 'voice-status':
+      case 'voice-channel':
+      case 'what-channel':
+      case 'settings':
+        return hits >= 1;
+      default:
+        return hits >= 2;
+    }
+  }
+
+  private classifyIndicateDirectiveTranscript(
+    transcript: string,
+  ): { kind: 'close' | 'cancel'; reason: 'wake-close' | 'wake-empty' | 'wake-cancel' | 'standalone-code'; stripped: string } | null {
+    const hasWakeWord = matchesWakeWord(transcript, config.botName);
+    const stripped = hasWakeWord ? this.stripLeadingWakePhrase(transcript) : transcript.trim();
+    const normalizedStripped = this.normalizeClosePhrase(stripped);
+    const standaloneCodeWake = this.isStandaloneCodeWakePhrase(stripped);
+
+    if (hasWakeWord && this.isCancelIntent(stripped)) {
+      return { kind: 'cancel', reason: 'wake-cancel', stripped };
+    }
+
+    if (hasWakeWord && normalizedStripped.length === 0) {
+      return { kind: 'close', reason: 'wake-empty', stripped };
+    }
+
+    if (hasWakeWord && this.isIndicateCloseCommand(stripped)) {
+      return { kind: 'close', reason: 'wake-close', stripped };
+    }
+
+    if (!hasWakeWord && standaloneCodeWake) {
+      return { kind: 'close', reason: 'standalone-code', stripped };
+    }
+
+    return null;
+  }
+
+  private isIndicateDirectiveTranscript(transcript: string): boolean {
+    return this.classifyIndicateDirectiveTranscript(transcript) !== null;
   }
 
   private escapeRegex(text: string): string {
@@ -332,9 +412,25 @@ export class VoicePipeline {
   private async onIndicateCaptureTimeout(): Promise<void> {
     this.indicateCaptureTimer = null;
     if (!this.ctx.indicateCaptureActive) return;
-    const hadSegments = this.ctx.indicateCaptureSegments.some((segment) => segment.trim().length > 0);
+    const now = Date.now();
+    const recentSpeechStart = this.receiver.getLastSpeechStartedAt();
+    const speechRecentlyStarted = recentSpeechStart > 0
+      && now - recentSpeechStart < VoicePipeline.INDICATE_TIMEOUT_ACTIVE_SPEECH_GRACE_MS;
+    if (this.receiver.hasActiveSpeech() || speechRecentlyStarted) {
+      console.log('Indicate capture timeout deferred (active speech detected)');
+      this.armIndicateCaptureTimeout();
+      return;
+    }
+    const segments = this.ctx.indicateCaptureSegments
+      .map((segment) => segment.trim())
+      .filter((segment) => segment.length > 0);
+    const captured = segments.join(' ').trim();
     this.clearIndicateCapture('timeout');
-    if (!hadSegments) return;
+    if (!captured) return;
+    if (segments.length === 1 && this.isLikelyAccidentalIndicateSeed(captured)) {
+      console.log('Indicate capture timed out with likely accidental short seed — cleared silently');
+      return;
+    }
     const closeHint = this.getIndicateClosePhrases()[0] || "I'm done";
     console.log('Indicate capture timed out waiting for close phrase');
     await this.speakResponse(
@@ -366,6 +462,15 @@ export class VoicePipeline {
     this.armIndicateCaptureTimeout();
   }
 
+  private isLikelyAccidentalIndicateSeed(transcript: string): boolean {
+    const normalized = this.normalizeClosePhrase(transcript);
+    if (!normalized) return true;
+    const words = normalized.split(' ').filter(Boolean);
+    // One tiny trailing fragment ("message", "okay", etc.) is usually VAD/STT
+    // spillover, not an intentional indicate capture body.
+    return words.length <= 1 && normalized.length <= 12;
+  }
+
   private flushIndicateCapture(reason: string): string {
     const transcript = this.ctx.indicateCaptureSegments
       .map((segment) => segment.trim())
@@ -378,7 +483,12 @@ export class VoicePipeline {
 
   private async consumeIndicateCaptureUtterance(
     transcript: string,
-  ): Promise<{ action: 'continue' | 'finalize' | 'cancel'; transcript?: string }> {
+  ): Promise<{
+    action: 'continue' | 'finalize' | 'cancel' | 'command';
+    transcript?: string;
+    command?: VoiceCommand;
+    commandTranscript?: string;
+  }> {
     const hasWakeWord = matchesWakeWord(transcript, config.botName);
     const stripped = hasWakeWord ? this.stripLeadingWakePhrase(transcript) : transcript.trim();
     const standaloneCodeWake = this.isStandaloneCodeWakePhrase(stripped);
@@ -406,6 +516,38 @@ export class VoicePipeline {
       return { action: 'finalize', transcript: finalized };
     }
 
+    // Command precedence while indicate capture is active:
+    // wake-prefixed commands should interrupt capture and execute now
+    // instead of being appended into dictation.
+    if (hasWakeWord) {
+      const wakeCommand = parseVoiceCommand(transcript, config.botName);
+      if (wakeCommand && wakeCommand.type !== 'wake-check') {
+        this.clearIndicateCapture(`wake-command:${wakeCommand.type}`);
+        console.log(`Indicate capture interrupted by wake command: ${wakeCommand.type}`);
+        return {
+          action: 'command',
+          command: wakeCommand,
+          commandTranscript: transcript,
+        };
+      }
+    }
+
+    // Allow high-confidence bare playback commands to interrupt active indicate
+    // capture without wake word. Keep this list narrow to avoid dictation
+    // phrases being misread as navigation commands.
+    if (!hasWakeWord) {
+      const bareCommand = this.matchBareQueueCommand(stripped);
+      if (bareCommand && (bareCommand.type === 'read-last-message' || bareCommand.type === 'hear-full-message')) {
+        this.clearIndicateCapture(`bare-command:${bareCommand.type}`);
+        console.log(`Indicate capture interrupted by bare command: ${bareCommand.type}`);
+        return {
+          action: 'command',
+          command: bareCommand,
+          commandTranscript: stripped,
+        };
+      }
+    }
+
     // Radio-code override for experimentation: allow specific standalone codes
     // to close indicate capture without a wake prefix.
     if (!hasWakeWord && standaloneCodeWake) {
@@ -423,7 +565,6 @@ export class VoicePipeline {
     // don't accidentally append command words into the prompt body.
     if (!hasWakeWord && !standaloneCodeWake && (this.isIndicateCloseCommand(stripped) || this.isCancelIntent(stripped))) {
       console.log('Indicate capture: ignoring non-wake close/cancel phrase');
-      void this.playFastCue('error');
       return { action: 'continue' };
     }
 
@@ -747,6 +888,15 @@ export class VoicePipeline {
     const gateClosedCueInterrupt = gatedInterrupt && this.player.isPlayingEarcon('gate-closed');
     let keepCurrentState = false;
     let playedListeningEarly = false;
+    let partialWakeWordDetected = false;
+    let partialPlaybackStoppedByPartial = false;
+    let partialWakeCommandDetected: VoiceCommand | null = null;
+    let partialWakeCommandTranscript = '';
+    const partialCommandEvidence = new Map<string, number>();
+    let partialIndicateDirective:
+      { kind: 'close' | 'cancel'; reason: 'wake-close' | 'wake-empty' | 'wake-cancel' | 'standalone-code'; transcript: string } | null | undefined;
+    let partialIndicateDirectiveHits = 0;
+    let partialIndicateDirectiveKey = '';
 
     // Check if busy — buffer utterance instead of silently dropping
     if (this.isProcessing() && !gatedSpeakingProbe) {
@@ -807,20 +957,92 @@ export class VoicePipeline {
       }
 
       // Step 1: Speech-to-text
-      let transcript = await transcribe(wavBuffer);
+      const settings = getVoiceSettings();
+      let transcript = await transcribe(
+        wavBuffer,
+        this.shouldUseStreamingTranscription()
+          ? {
+            enablePartials: true,
+            chunkMs: settings.sttStreamingChunkMs,
+            minChunkMs: settings.sttStreamingMinChunkMs,
+            overlapMs: settings.sttStreamingOverlapMs,
+            maxChunks: settings.sttStreamingMaxChunks,
+            onPartial: (event) => {
+              this.onStreamingPartialTranscript(userId, event);
+              const partialText = event.text.trim();
+              if (!partialText) return;
+
+              const partialCmd = parseVoiceCommand(partialText, config.botName);
+              const partialHasWake = partialCmd !== null || matchesWakeWord(partialText, config.botName);
+              if (partialHasWake) {
+                partialWakeWordDetected = true;
+              }
+              if (partialCmd && partialCmd.type !== 'wake-check') {
+                const key = this.partialCommandKey(partialCmd);
+                const hits = (partialCommandEvidence.get(key) ?? 0) + 1;
+                partialCommandEvidence.set(key, hits);
+                if (this.shouldSettlePartialCommand(partialCmd, hits)) {
+                  partialWakeCommandDetected = partialCmd;
+                  partialWakeCommandTranscript = partialText;
+                }
+              }
+
+              if (indicateEndpointAtCapture && this.ctx.indicateCaptureActive) {
+                const directive = this.classifyIndicateDirectiveTranscript(partialText);
+                if (directive) {
+                  const directiveKey = `${directive.kind}:${directive.reason}:${this.normalizeClosePhrase(directive.stripped)}`;
+                  if (directiveKey === partialIndicateDirectiveKey) {
+                    partialIndicateDirectiveHits += 1;
+                  } else {
+                    partialIndicateDirectiveKey = directiveKey;
+                    partialIndicateDirectiveHits = 1;
+                  }
+                  const settleHits = directive.reason === 'wake-empty' ? 2 : 1;
+                  if (partialIndicateDirectiveHits >= settleHits) {
+                    partialIndicateDirective = {
+                      kind: directive.kind,
+                      reason: directive.reason,
+                      transcript: partialText,
+                    };
+                  }
+                }
+              }
+
+              // During active playback, partials should only preempt on an explicit
+              // wake-word command, not wake-check alone.
+              const partialInterruptCommand =
+                partialCmd && partialCmd.type !== 'wake-check'
+                  ? partialCmd
+                  : null;
+              if (!gatedMode || !wasPlayingResponse || !partialInterruptCommand || partialPlaybackStoppedByPartial) return;
+              if (this.player.isPlaying() && !this.player.isWaiting()) {
+                console.log(`Gated interrupt: command confirmed by streaming partial (${partialInterruptCommand.type})`);
+                this.player.stopPlayback('speech-during-playback-gated-partial-command');
+                partialPlaybackStoppedByPartial = true;
+              }
+            },
+          }
+          : undefined,
+      );
       if (!transcript || transcript.trim().length === 0) {
-        console.log('Empty transcript, skipping');
-        this.stopWaitingLoop();
-        if (this.stateMachine.isAwaitingState()) {
-          await this.playReadyEarcon();
+        if (partialWakeCommandDetected && partialWakeCommandTranscript) {
+          transcript = partialWakeCommandTranscript;
+          const clipped = transcript.length > 120 ? `${transcript.slice(0, 120)}...` : transcript;
+          console.log(`Using streaming partial command transcript fallback: "${clipped}"`);
+        } else {
+          console.log('Empty transcript, skipping');
+          this.stopWaitingLoop();
+          if (this.stateMachine.isAwaitingState()) {
+            await this.playReadyEarcon();
+            return;
+          }
+          if (gatedSpeakingProbe) {
+            keepCurrentState = true;
+            return;
+          }
+          this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
           return;
         }
-        if (gatedSpeakingProbe) {
-          keepCurrentState = true;
-          return;
-        }
-        this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
-        return;
       }
 
       if (this.isNonLexicalTranscript(transcript)) {
@@ -901,6 +1123,17 @@ export class VoicePipeline {
 
       let indicateFinalized = false;
       if (indicateEnabled && this.ctx.indicateCaptureActive) {
+        if (
+          partialIndicateDirective
+          && !this.isIndicateDirectiveTranscript(transcript)
+        ) {
+          transcript = partialIndicateDirective.transcript;
+          const clipped = transcript.length > 120 ? `${transcript.slice(0, 120)}...` : transcript;
+          console.log(
+            `Using streaming partial indicate ${partialIndicateDirective.kind} fallback (${partialIndicateDirective.reason}): "${clipped}"`,
+          );
+        }
+
         const indicateResult = await this.consumeIndicateCaptureUtterance(transcript);
         if (indicateResult.action === 'continue') {
           this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
@@ -908,6 +1141,17 @@ export class VoicePipeline {
         }
         if (indicateResult.action === 'cancel') {
           this.transitionAndResetWatchdog({ type: 'RETURN_TO_IDLE' });
+          return;
+        }
+        if (indicateResult.action === 'command' && indicateResult.command) {
+          await this.playFastCue('listening');
+          const resolvedCommand = this.resolveDoneCommandForContext(
+            indicateResult.command,
+            indicateResult.commandTranscript ?? transcript,
+          );
+          await this.handleVoiceCommand(resolvedCommand, userId);
+          const totalMs = Date.now() - pipelineStart;
+          console.log(`Voice command (indicate capture) complete: ${totalMs}ms total`);
           return;
         }
         transcript = indicateResult.transcript ?? '';
@@ -919,6 +1163,7 @@ export class VoicePipeline {
       const hasWakeWord = indicateFinalized
         ? true
         : (matchesWakeWord(transcript, config.botName) || standaloneCodeWake);
+      const effectiveWakeWord = hasWakeWord || partialWakeWordDetected;
       const inGracePeriod = indicateFinalized
         ? true
         : (
@@ -933,7 +1178,7 @@ export class VoicePipeline {
       const interruptGraceEligible = indicateFinalized || (allowGraceBypass && (graceFromGateAtCapture || graceFromPromptAtCapture));
 
       // By design in gated mode, interrupting active playback must include wake word.
-      if (gatedInterrupt && !hasWakeWord && !gateClosedCueInterrupt && !interruptGraceEligible) {
+      if (gatedInterrupt && !effectiveWakeWord && !gateClosedCueInterrupt && !interruptGraceEligible) {
         console.log(`Gated interrupt rejected (wake word required): "${transcript}"`);
         if (gatedSpeakingProbe) {
           keepCurrentState = true;
@@ -942,7 +1187,7 @@ export class VoicePipeline {
         }
         return;
       }
-      if (gatedMode && !inGracePeriod && !hasWakeWord) {
+      if (gatedMode && !inGracePeriod && !effectiveWakeWord) {
         if (gatedInterrupt) {
           console.log(`Gated: discarded interrupt "${transcript}"`);
           // Don't stop playback — Watson keeps talking
@@ -1018,8 +1263,9 @@ export class VoicePipeline {
 
       const parsedCommand = parseVoiceCommand(transcript, config.botName);
       const preParsedCommand: VoiceCommand | null = parsedCommand
+        ?? partialWakeCommandDetected
         ?? (standaloneCodeWake ? { type: 'wake-check' } : null);
-      const bareCommandInGrace = !hasWakeWord && inGracePeriod
+      const bareCommandInGrace = !effectiveWakeWord && inGracePeriod
         ? this.matchBareQueueCommand(transcript)
         : null;
       const indicateStartEligible = hasWakeWord || inGracePeriod;
@@ -1057,14 +1303,17 @@ export class VoicePipeline {
       // Gated mode: passed gate check — start waiting loop now
       // Skip in ask mode — no LLM processing, Watson just speaks "Inbox, or wait?"
       if (gatedMode) {
-        if (inGracePeriod && !hasWakeWord) {
+        if (inGracePeriod && !effectiveWakeWord) {
           console.log('Gate grace period: processing without wake word');
         }
         if (gatedInterrupt) {
-          if (gateClosedCueInterrupt && !hasWakeWord) {
+          if (partialPlaybackStoppedByPartial) {
+            // Playback was already stopped by partial STT; preserve the
+            // interrupt semantics without issuing another stop.
+          } else if (gateClosedCueInterrupt && !effectiveWakeWord) {
             console.log('Gated interrupt: allowing speech over gate-closed cue');
             this.player.stopPlayback('speech-over-gate-closed-cue');
-          } else if (!hasWakeWord && interruptGraceEligible) {
+          } else if (!effectiveWakeWord && interruptGraceEligible) {
             console.log('Gated interrupt: accepted during ready handoff grace');
             this.player.stopPlayback('speech-during-playback-gated-grace');
           } else {
@@ -1110,7 +1359,7 @@ export class VoicePipeline {
       // Fallback command classifier (LLM): catches STT variations that regex misses.
       // During gated playback interrupts without wake word, avoid LLM command
       // inference to reduce false positives from cough/noise transcripts.
-      const allowLlmInference = !(gatedInterrupt && !hasWakeWord);
+      const allowLlmInference = !(gatedInterrupt && !effectiveWakeWord);
       const runClassifier = allowLlmInference && this.shouldRunCommandClassifier(transcript);
       if (allowLlmInference && !runClassifier) {
         console.log('Skipping LLM command classifier for likely prompt utterance');
@@ -1132,7 +1381,7 @@ export class VoicePipeline {
       // without wake word.  When the classifier timed out we have zero signal —
       // short fragments are almost certainly filler ("Bye", "Mm", half-sentences).
       // Even without a timeout, single-word non-commands are never useful prompts.
-      if (!hasWakeWord) {
+      if (!effectiveWakeWord) {
         const wordCount = transcript.trim().split(/\s+/).filter(Boolean).length;
         const threshold = this.lastClassifierTimedOut ? 5 : 2;
         if (wordCount < threshold) {
@@ -1296,6 +1545,9 @@ export class VoicePipeline {
         break;
       case 'delay-adjust':
         await this.handleDelayAdjust(command.direction);
+        break;
+      case 'indicate-timeout':
+        await this.handleIndicateTimeout(command.valueMs);
         break;
       case 'settings':
         await this.handleReadSettings();
@@ -1492,6 +1744,54 @@ export class VoicePipeline {
         // No exact match among multiple fuzzy hits → fall through to LLM disambiguation
       }
 
+      // Atlas-backed phrase memory: resolve previously successful spoken aliases
+      // before invoking slower dynamic/LLM matching.
+      if (!match) {
+        const lookupAlias = (this.router as unknown as {
+          lookupSwitchAlias?: (query: string) => Promise<{ channelId: string; displayName: string } | null>;
+        }).lookupSwitchAlias;
+        const cachedAlias = lookupAlias
+          ? await lookupAlias.call(this.router, channelName)
+          : null;
+        if (cachedAlias) {
+          console.log(`Alias cache match: "${channelName}" → ${cachedAlias.channelId}`);
+          const aliasResult = await this.router.switchTo(cachedAlias.channelId);
+          if (aliasResult.success) {
+            await this.onChannelSwitch();
+            this.rememberSwitchAlias(channelName);
+            const displayName = aliasResult.displayName || cachedAlias.displayName || channelName;
+            await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
+            await this.playReadyEarcon();
+            this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
+            return;
+          }
+        }
+      }
+
+      // Fallback: scan guild sendable channels/threads directly by name so
+      // non-static channels can resolve without waiting on LLM matching.
+      if (!match) {
+        const findDirectChannel = (this.router as unknown as {
+          findSendableChannelByName?: (query: string) => Promise<{ id: string; displayName: string } | null>;
+        }).findSendableChannelByName;
+        const directMatch = findDirectChannel
+          ? await findDirectChannel.call(this.router, channelName)
+          : null;
+        if (directMatch) {
+          console.log(`Direct guild channel match: "${channelName}" → ${directMatch.id}`);
+          const directResult = await this.router.switchTo(directMatch.id);
+          if (directResult.success) {
+            await this.onChannelSwitch();
+            this.rememberSwitchAlias(channelName);
+            const displayName = directResult.displayName || directMatch.displayName || channelName;
+            await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
+            await this.playReadyEarcon();
+            this.allowFollowupPromptGrace(VoicePipeline.FOLLOWUP_PROMPT_GRACE_MS);
+            return;
+          }
+        }
+      }
+
       // LLM fallback: if string matching failed or was ambiguous, ask the utility model (include forum threads)
       if (!match) {
         const forumThreads = await this.router.getForumThreads();
@@ -1509,6 +1809,7 @@ export class VoicePipeline {
               const threadResult = await this.router.switchTo(threadId);
               if (threadResult.success) {
                 await this.onChannelSwitch();
+                this.rememberSwitchAlias(channelName);
                 const displayName = threadResult.displayName || llmResult.best.displayName;
                 await this.speakResponse(`Switched to ${displayName}.`, { inbox: true });
                 await this.playReadyEarcon();
@@ -1545,6 +1846,7 @@ export class VoicePipeline {
       let responseText: string;
       if (result.success) {
         await this.onChannelSwitch();
+        this.rememberSwitchAlias(channelName);
         const activeSessionKey = this.router.getActiveSessionKey();
 
         // Check for queued responses — read them in full
@@ -1612,6 +1914,7 @@ export class VoicePipeline {
     try {
       const channelList = channels.map((c) => `${c.name}: ${c.displayName}`).join('\n');
 
+      const signal = AbortSignal.timeout(3000);
       const result = await quickCompletion(
         `You are a channel matcher. Given a list of channels and a user description, rank the top matches.
 Reply in this exact format:
@@ -1620,6 +1923,8 @@ Reply in this exact format:
 - If nothing matches: NONE
 Use channel names (the part before the colon). Do not explain.`,
         `Channels:\n${channelList}\n\nUser wants: "${userPhrase}"`,
+        120,
+        signal,
       );
 
       const cleaned = result.trim();
@@ -1757,6 +2062,19 @@ Use channel names (the part before the colon). Do not explain.`,
     await this.playReadyEarcon();
   }
 
+  private async handleIndicateTimeout(valueMs: number): Promise<void> {
+    const clamped = Math.max(10_000, Math.min(60 * 60 * 1000, valueMs));
+    setIndicateTimeoutMs(clamped);
+    if (this.ctx.indicateCaptureActive) {
+      this.armIndicateCaptureTimeout();
+    }
+    const timeoutLabel = clamped % 60_000 === 0
+      ? `${clamped / 60_000} minute${clamped === 60_000 ? '' : 's'}`
+      : `${Math.round(clamped / 1000)} seconds`;
+    await this.speakResponse(`Indicate timeout set to ${timeoutLabel}.`);
+    await this.playReadyEarcon();
+  }
+
   private async handleDelayAdjust(direction: 'longer' | 'shorter'): Promise<void> {
     const current = getVoiceSettings().silenceDurationMs;
     const delta = direction === 'longer' ? 500 : -500;
@@ -1770,16 +2088,20 @@ Use channel names (the part before the colon). Do not explain.`,
   private async handleReadSettings(): Promise<void> {
     const s = getVoiceSettings();
     const closeCommands = s.indicateCloseWords ?? [];
+    const streamingText = s.sttStreamingEnabled
+      ? `Streaming transcription: on, ${s.sttStreamingChunkMs} millisecond chunks.`
+      : 'Streaming transcription: off.';
     const endpointText = s.endpointingMode === 'indicate'
       ? `Endpointing: indicate. End command examples: ${
         closeCommands.length > 0
           ? closeCommands.slice(0, 2).map((c) => `${config.botName}, ${c}`).join(' or ')
           : `${config.botName}, I'm done`
-      }, or just ${config.botName}.`
+      }, or just ${config.botName}. Timeout: ${Math.round(s.indicateTimeoutMs / 1000)} seconds.`
       : 'Endpointing: silence.';
     await this.speakResponse(
       `Audio processing: ${s.audioProcessing}. ` +
       `${endpointText} ` +
+      `${streamingText} ` +
       `Silence delay: ${s.silenceDurationMs} milliseconds. ` +
       `Noise threshold: ${s.speechThreshold}. ` +
       `Minimum speech duration: ${s.minSpeechDurationMs} milliseconds.`,
@@ -1856,7 +2178,16 @@ Use channel names (the part before the colon). Do not explain.`,
     const noiseLabel = presetMap[s.speechThreshold] ?? String(s.speechThreshold);
     parts.push(`Noise: ${noiseLabel}. Delay: ${s.silenceDurationMs} milliseconds.`);
     parts.push(`Audio: ${s.audioProcessing}.`);
-    parts.push(`Endpointing: ${s.endpointingMode}.`);
+    if (s.endpointingMode === 'indicate') {
+      parts.push(`Endpointing: indicate (${Math.round(s.indicateTimeoutMs / 1000)} second timeout).`);
+    } else {
+      parts.push('Endpointing: silence.');
+    }
+    if (s.sttStreamingEnabled) {
+      parts.push(`Streaming STT: on (${s.sttStreamingChunkMs} millisecond chunks).`);
+    } else {
+      parts.push('Streaming STT: off.');
+    }
 
     // Gateway connection
     const gwState = this.gatewaySync?.getConnectionState?.() ?? 'disconnected';
@@ -3279,8 +3610,8 @@ Use channel names (the part before the colon). Do not explain.`,
       return { type: 'inbox-clear' };
     }
 
-    // "read last message", "read the last message", "last message"
-    if (/^(?:read\s+(?:the\s+)?last\s+message|last\s+message)$/.test(normalized)) {
+    // "read last message", "read the/my last message", "last message", "my last message"
+    if (/^(?:read\s+(?:(?:the|my)\s+)?last\s+message|(?:(?:the|my)\s+)?last\s+message)$/.test(normalized)) {
       return { type: 'read-last-message' };
     }
 
@@ -3648,6 +3979,10 @@ Use channel names (the part before the colon). Do not explain.`,
       return { drop: true, reason: 'silent wait' };
     }
 
+    if (this.ctx.indicateCaptureActive) {
+      return { delayMs: 1200, reason: 'indicate capture active' };
+    }
+
     if (Date.now() < this.ctx.promptGraceUntil || Date.now() < this.ctx.gateGraceUntil) {
       const until = Math.max(this.ctx.promptGraceUntil, this.ctx.gateGraceUntil);
       return {
@@ -3722,6 +4057,10 @@ Use channel names (the part before the colon). Do not explain.`,
       return this.typeSafeIdleDeliveryResult('dropped', 'stale-before-delivery');
     }
 
+    if (this.ctx.indicateCaptureActive) {
+      return this.typeSafeIdleDeliveryResult('deferred', 'indicate capture active before delivery', 1200);
+    }
+
     // If a ready item belongs to the currently active channel and we're idle,
     // read it directly instead of announcing "Response ready from <same channel>".
     if (this.shouldAutoReadReadyForActiveChannel(message)) {
@@ -3750,7 +4089,7 @@ Use channel names (the part before the colon). Do not explain.`,
       if (this.isIdleNotificationStale(item)) {
         return this.typeSafeIdleDeliveryResult('dropped', 'stale-before-playback');
       }
-      if (this.isBusy() || this.player.isPlaying() || this.receiver.hasActiveSpeech()) {
+      if (this.isBusy() || this.player.isPlaying() || this.receiver.hasActiveSpeech() || this.ctx.indicateCaptureActive) {
         return this.typeSafeIdleDeliveryResult('deferred', 'became busy before playback', 900);
       }
 
@@ -4238,7 +4577,11 @@ Use channel names (the part before the colon). Do not explain.`,
       })
       .join(' ');
 
-    return singularish === base ? [base] : [base, singularish];
+    const compactBase = base.replace(/\s+/g, '');
+    const compactSingularish = singularish.replace(/\s+/g, '');
+
+    const forms = new Set<string>([base, singularish, compactBase, compactSingularish].filter(Boolean));
+    return Array.from(forms);
   }
 
   private sanitizeAssistantOutput(text: string, context: string): string {

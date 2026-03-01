@@ -22,6 +22,14 @@ function parseIntWithFallback(value: string | undefined, fallback: number): numb
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseBooleanWithFallback(value: string | undefined, fallback: boolean): boolean {
+  if (!value) return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') return true;
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') return false;
+  return fallback;
+}
+
 function parseVadFrameSamples(value: string | undefined): 512 | 1024 | 1536 {
   const parsed = parseInt(value || '512', 10);
   if (parsed === 512 || parsed === 1024 || parsed === 1536) return parsed;
@@ -74,6 +82,11 @@ export const config = {
     ['over and out', 'over', 'whiskey foxtrot', 'whiskey delta', "i'm done", "i'm finished", 'go ahead'],
   ),
   indicateTimeoutMs: parseIntWithFallback(process.env['INDICATE_TIMEOUT_MS'], 20000),
+  sttStreamingEnabled: parseBooleanWithFallback(process.env['STT_STREAMING_ENABLED'], false),
+  sttStreamingChunkMs: Math.max(250, parseIntWithFallback(process.env['STT_STREAMING_CHUNK_MS'], 900)),
+  sttStreamingMinChunkMs: Math.max(200, parseIntWithFallback(process.env['STT_STREAMING_MIN_CHUNK_MS'], 450)),
+  sttStreamingOverlapMs: Math.max(0, parseIntWithFallback(process.env['STT_STREAMING_OVERLAP_MS'], 180)),
+  sttStreamingMaxChunks: Math.max(1, parseIntWithFallback(process.env['STT_STREAMING_MAX_CHUNKS'], 8)),
   vadPositiveSpeechThreshold: parseFloatWithFallback(process.env['VAD_POSITIVE_SPEECH_THRESHOLD'], 0.5),
   vadNegativeSpeechThreshold: parseFloatWithFallback(process.env['VAD_NEGATIVE_SPEECH_THRESHOLD'], 0.35),
   vadFrameSamples: parseVadFrameSamples(process.env['VAD_FRAME_SAMPLES']),

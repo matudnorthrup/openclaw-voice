@@ -25,6 +25,11 @@ initVoiceSettings({
   endpointingMode: config.endpointingMode,
   indicateCloseWords: config.indicateCloseWords,
   indicateTimeoutMs: config.indicateTimeoutMs,
+  sttStreamingEnabled: config.sttStreamingEnabled,
+  sttStreamingChunkMs: config.sttStreamingChunkMs,
+  sttStreamingMinChunkMs: config.sttStreamingMinChunkMs,
+  sttStreamingOverlapMs: config.sttStreamingOverlapMs,
+  sttStreamingMaxChunks: config.sttStreamingMaxChunks,
   vadPositiveSpeechThreshold: config.vadPositiveSpeechThreshold,
   vadNegativeSpeechThreshold: config.vadNegativeSpeechThreshold,
   vadFrameSamples: config.vadFrameSamples,
@@ -112,6 +117,7 @@ client.on('messageCreate', async (message) => {
       `  Voice mode: **${modeLabel}**\n` +
       `  Audio processing: **${s.audioProcessing}**\n` +
       `  Endpointing: **${s.endpointingMode}**\n` +
+      `  STT streaming: **${s.sttStreamingEnabled ? `on (${s.sttStreamingChunkMs}ms chunks)` : 'off'}**\n` +
       `  Silence delay: **${s.silenceDurationMs}ms**\n` +
       `  Noise threshold: **${s.speechThreshold}** (higher = ignores more noise)\n` +
       `  Min speech duration: **${s.minSpeechDurationMs}ms**`,
@@ -528,9 +534,15 @@ async function handleJoin(guildId: string, message?: any): Promise<void> {
     if (pipeline) {
       pipeline.stop();
     }
+    if (router) {
+      router.destroy();
+    }
 
     pipeline = new VoicePipeline(connection, logChannel);
     router = new ChannelRouter(guild, gatewaySync ?? undefined);
+    void router.refreshAliasCache().catch((err: any) => {
+      console.warn(`Alias cache refresh failed: ${err.message}`);
+    });
     pipeline.setRouter(router);
     if (gatewaySync) {
       pipeline.setGatewaySync(gatewaySync);
@@ -702,6 +714,13 @@ function buildSettingsPanel(): { embeds: EmbedBuilder[]; components: ActionRowBu
         value: s.endpointingMode === 'indicate'
           ? `Manual close command mode (${s.indicateCloseWords.map((c) => `${config.botName}, ${c}`).join(' · ')} · or just ${config.botName}).`
           : 'Process each VAD segment after silence endpointing.',
+        inline: false,
+      },
+      {
+        name: `STT Streaming — ${s.sttStreamingEnabled ? 'ON' : 'OFF'}`,
+        value: s.sttStreamingEnabled
+          ? `Chunk ${s.sttStreamingChunkMs}ms · overlap ${s.sttStreamingOverlapMs}ms · max ${s.sttStreamingMaxChunks} chunks`
+          : 'Disabled (batch transcription only).',
         inline: false,
       },
       { name: `Noise Threshold — ${s.speechThreshold} (${noiseLabel})`, value: 'How loud audio must be to count as speech.', inline: false },

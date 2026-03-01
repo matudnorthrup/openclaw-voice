@@ -329,6 +329,11 @@ describe('parseVoiceCommand — inbox next', () => {
     const result = parseVoiceCommand('Hey Watson, skip it', BOT);
     expect(result).toEqual({ type: 'pause' });
   });
+
+  it('parses "cancel" as pause/interrupt command', () => {
+    const result = parseVoiceCommand('Hey Watson, cancel', BOT);
+    expect(result).toEqual({ type: 'pause' });
+  });
 });
 
 describe('parseVoiceCommand — inbox clear', () => {
@@ -356,6 +361,11 @@ describe('parseVoiceCommand — read last message', () => {
 
   it('parses "last message"', () => {
     const result = parseVoiceCommand('Hello Watson, last message', BOT);
+    expect(result).toEqual({ type: 'read-last-message' });
+  });
+
+  it('parses "my last message"', () => {
+    const result = parseVoiceCommand('Hello Watson, my last message', BOT);
     expect(result).toEqual({ type: 'read-last-message' });
   });
 });
@@ -946,6 +956,20 @@ describe('parseVoiceCommand — endpoint-mode', () => {
 
   it('parses "automatic end mode"', () => {
     expect(parseVoiceCommand('Hey Watson, automatic end mode', BOT)).toEqual({ type: 'endpoint-mode', mode: 'silence' });
+  });
+
+  it('parses indicate timeout in minutes', () => {
+    expect(parseVoiceCommand('Hey Watson, set indicate timeout to 15 minutes', BOT)).toEqual({
+      type: 'indicate-timeout',
+      valueMs: 900000,
+    });
+  });
+
+  it('parses endpoint timeout in seconds', () => {
+    expect(parseVoiceCommand('Watson, endpoint timeout 90 seconds', BOT)).toEqual({
+      type: 'indicate-timeout',
+      valueMs: 90000,
+    });
   });
 });
 
