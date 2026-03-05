@@ -242,7 +242,7 @@ export class GatewaySync {
   private sessionDiscoveryAttempted = new Set<string>();
   // Periodic cache refresh interval
   private cacheRefreshTimer: ReturnType<typeof setInterval> | null = null;
-  private static CACHE_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  private static CACHE_REFRESH_INTERVAL_MS = 15 * 60 * 1000; // 15 minutes
 
   /**
    * Return the resolved session key for a given key (from discovery cache).

@@ -118,7 +118,7 @@ export class VoicePipeline {
 
   // Inbox background poll — detects text-originated messages in inbox mode
   private inboxPollTimer: NodeJS.Timeout | null = null;
-  private static readonly INBOX_POLL_INTERVAL_MS = 20_000;
+  private static readonly INBOX_POLL_INTERVAL_MS = 60_000;
   private inboxPollInFlight = false;
   // Track last-notified stamp per channel to avoid repeat notifications
   private inboxPollNotifiedStamps = new Map<string, number>();

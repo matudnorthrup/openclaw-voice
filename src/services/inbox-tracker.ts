@@ -53,12 +53,13 @@ export class InboxTracker {
 
   async checkInbox(channels: ChannelInfo[]): Promise<ChannelActivity[]> {
     const activities: ChannelActivity[] = [];
+    const pollStart = Date.now();
 
     for (const ch of channels) {
       // Re-read the snapshot for each channel inside the loop to avoid
       // clobbering concurrent markSeen() calls that may run during awaits.
       const rawBaseline = this.queueState.getSnapshots()[ch.sessionKey] ?? 0;
-      const result = await this.gatewaySync.getHistory(ch.sessionKey, 80);
+      const result = await this.gatewaySync.getHistory(ch.sessionKey, 40);
       // Re-read baseline AFTER the await — markSeen may have advanced it
       // while we were waiting for the network response.
       const freshBaseline = this.queueState.getSnapshots()[ch.sessionKey] ?? 0;
@@ -124,6 +125,11 @@ export class InboxTracker {
           earliestTimestamp,
         });
       }
+    }
+
+    const elapsedMs = Date.now() - pollStart;
+    if (elapsedMs > 15_000) {
+      console.warn(`InboxTracker: poll cycle took ${(elapsedMs / 1000).toFixed(1)}s (${channels.length} channels) — Gateway may be under pressure`);
     }
 
     // Sort oldest-first so "next" reads the earliest activity first.
@@ -201,7 +207,7 @@ export class InboxTracker {
 
   private async getMessageCount(sessionKey: string): Promise<number> {
     if (!this.gatewaySync.isConnected()) return 0;
-    const result = await this.gatewaySync.getHistory(sessionKey, 80);
+    const result = await this.gatewaySync.getHistory(sessionKey, 40);
     const messages = result?.messages ?? [];
     if (messages.length === 0) return 0;
     return this.getMessageStamp(messages[messages.length - 1], messages.length - 1);
