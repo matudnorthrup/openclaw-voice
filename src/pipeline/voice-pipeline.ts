@@ -3707,6 +3707,8 @@ Use channel names (the part before the colon). Do not explain.`,
       this.ctx.lastSpokenWasSummary = spokenText !== fullText;
       this.ctx.lastSpokenIsChannelMessage = !!options?.isChannelMessage;
     }
+    const wasSummarized = spokenText !== fullText;
+    console.log(`[speakResponse] fullLen=${fullText.length} spokenLen=${spokenText.length} summarized=${wasSummarized} allowSummary=${!!options?.allowSummary} forceFull=${!!options?.forceFull} text="${spokenText.slice(0, 120)}${spokenText.length > 120 ? '...' : ''}"`);
     const ttsStream = await textToSpeechStream(spokenText);
     this.stopWaitingLoop();
     this.player.stopPlayback('speak-response-preempt');

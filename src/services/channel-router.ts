@@ -804,22 +804,24 @@ export class ChannelRouter {
 
     try {
       const fetched = await textChannel.messages.fetch({ limit: 10 });
-      // Collect consecutive messages from the same author (newest first)
+      // Collect consecutive messages with the same ROLE (newest first)
       // to reassemble responses split across multiple Discord messages.
+      // We break on role change, not just author change, because the voice
+      // pipeline posts both **You:** transcripts and **Watson:** responses
+      // from the same bot account.
       let firstRole: 'user' | 'assistant' | null = null;
-      let firstAuthorId: string | null = null;
       const parts: string[] = [];
       for (const msg of fetched.values()) {
         const content = this.normalizeDiscordMessageContent(msg.content);
         if (!content.trim()) continue;
         const isUserTranscript = msg.author.bot && /^\*\*You:\*\*/i.test(msg.content);
-        const role = (msg.author.bot && !isUserTranscript) ? 'assistant' : 'user';
+        const isHumanUser = !msg.author.bot;
+        const role: 'user' | 'assistant' = (isUserTranscript || isHumanUser) ? 'user' : 'assistant';
         if (firstRole === null) {
           firstRole = role;
-          firstAuthorId = msg.author.id;
           parts.push(content);
-        } else if (msg.author.id === firstAuthorId) {
-          // Same author continuation — collect (these are older, so prepend)
+        } else if (role === firstRole) {
+          // Same role continuation — collect (these are older, so prepend)
           parts.unshift(content);
         } else {
           break;
