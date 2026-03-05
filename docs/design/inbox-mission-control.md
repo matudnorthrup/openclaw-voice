@@ -1,6 +1,6 @@
 # Inbox as Mission Control
 
-**Status:** Design complete, partially implemented
+**Status:** Core flows implemented, polish in progress
 **Source:** Watson Voice Obsidian thread (2026-02-15)
 
 ## Vision
@@ -24,9 +24,9 @@ The inbox is a **home base** — an orchestration layer where you sit, dispatch 
 ## Implementation Phases
 
 1. ✅ Inbox as persistent state (`INBOX_HOME`)
-2. 🔲 Proactive nudges (response poller → TTS notification)
-3. 🔲 Auto-return from channels
-4. 🔲 Polish (pending status, cancel dispatch, entry summary)
+2. ✅ Proactive nudges (response poller → TTS notification)
+3. ✅ Auto-return from channels
+4. 🔄 Polish (pending status, cancel dispatch, entry summary)
 
 ## Key Decisions
 
