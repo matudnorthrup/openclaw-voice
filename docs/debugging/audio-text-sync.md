@@ -1,5 +1,5 @@
 ---
-status: monitoring
+status: investigating
 component: gateway-sync, channel-router, pipeline
 priority: high
 started: 2026-02-01
@@ -26,15 +26,6 @@ Key files:
 - `src/pipeline/voice-pipeline.ts` — orchestration, when inject happens
 
 ## Investigation Log
-
-### 2026-03-05 — Phase Closeout (Move to Monitoring)
-- **Decision:** Mark the active fix phase complete and move this track to monitoring.
-- **Why:** The contamination/replay hardening tasks from the 2026-02-28 incident are now in place, including assistant transcript sanitization and role-aware "read last message" handling.
-- **Recent commits:**
-  - `928fc41` — assistant transcript contamination handling
-  - `5aa44df` — role-aware history stitching + `speakResponse` diagnostics
-- **Operational stance:** keep this as an active watch area, but no longer treat it as the top implementation blocker unless new incidents appear.
-- **Next focus:** inbox mission-control phase work (proactive nudges and auto-return polish).
 
 ### 2026-02-24 — Journal Created
 - **Action:** Created this debugging journal to track the ongoing sync investigation

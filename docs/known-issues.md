@@ -3,12 +3,10 @@
 ## Active
 
 ### Text/Audio Session Sync Drift
-**Status:** monitoring | **Component:** gateway-sync, channel-router, pipeline, claude
+**Status:** investigating | **Component:** gateway-sync, channel-router, pipeline, claude
 **Impact:** High — voice and text sessions can get out of alignment, causing Watson to lose context or respond with stale history.
 
 Latest confirmed incident (2026-02-28): in `#general` (`1469108546351140896`), assistant posts can include embedded `[voice-user]` transcript blocks, which appears as user-message replay in channel logs.
-
-Current phase is closed and moved to monitoring as of **2026-03-05** after contamination sanitization and role-aware history fixes.
 
 See `debugging/audio-text-sync.md` for the full investigation journal and incident details.
 
